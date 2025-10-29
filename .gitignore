@@ -1,0 +1,19 @@
+# Ignore data and output folders
+artifacts/
+lob_data/
+
+# Ignore Python cache and environment files
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.mypy_cache/
+.env
+.venv
+
+# Ignore VSCode workspace settings (optional)
+.vscode/
+
+# Ignore system files
+.DS_Store
+Thumbs.db

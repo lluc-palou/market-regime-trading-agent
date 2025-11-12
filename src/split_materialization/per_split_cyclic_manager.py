@@ -4,14 +4,14 @@ Per-Split Cyclic Manager
 Manages cyclic collections for individual splits using the same pattern as CyclicPipelineManager:
 - split_X_input (current data)
 - split_X_output (transformed data)
-- SWAP: Drop input, Rename output → input
+- SWAP: Drop input, Rename output -> input
 
 Pattern for each split:
-  split_X_input → Process → split_X_output → SWAP → split_X_input
+  split_X_input -> Process -> split_X_output -> SWAP -> split_X_input
   
 Swap logic (identical to CyclicPipelineManager):
   1. Drop split_X_input (old data discarded)
-  2. Rename split_X_output → split_X_input (new data becomes input)
+  2. Rename split_X_output -> split_X_input (new data becomes input)
 """
 
 from pymongo import MongoClient
@@ -24,7 +24,7 @@ class PerSplitCyclicManager:
     Manages cyclic collections for each split independently.
     
     Simplified pattern for each split:
-      split_X_input → Process → split_X_output → SWAP → split_X_input
+      split_X_input -> Process -> split_X_output -> SWAP -> split_X_input
     """
     
     def __init__(self, mongo_uri: str, db_name: str):
@@ -52,7 +52,7 @@ class PerSplitCyclicManager:
         split_ids = []
         for coll_name in all_collections:
             if coll_name.startswith("split_") and coll_name.endswith("_input"):
-                # Extract split ID: "split_0_input" → 0
+                # Extract split ID: "split_0_input" -> 0
                 split_id_str = coll_name.replace("split_", "").replace("_input", "")
                 try:
                     split_id = int(split_id_str)
@@ -114,11 +114,11 @@ class PerSplitCyclicManager:
     
     def swap_split_to_input(self, split_id: int):
         """
-        Swap split_X_output → split_X_input.
+        Swap split_X_output -> split_X_input.
         
         Uses the exact same pattern as CyclicPipelineManager:
         1. Drop input (old data discarded)
-        2. Rename output → input (new data becomes input)
+        2. Rename output -> input (new data becomes input)
         
         Args:
             split_id: Split ID to swap
@@ -152,10 +152,10 @@ class PerSplitCyclicManager:
         self.db[input_coll].drop()
         logger(f"Dropped '{input_coll}'", "INFO")
         
-        # Step 2: Rename output → input
-        logger(f"Step 2: Renaming '{output_coll}' → '{input_coll}'", "INFO")
+        # Step 2: Rename output -> input
+        logger(f"Step 2: Renaming '{output_coll}' -> '{input_coll}'", "INFO")
         self.db[output_coll].rename(input_coll, dropTarget=False)
-        logger(f"Renamed '{output_coll}' → '{input_coll}'", "INFO")
+        logger(f"Renamed '{output_coll}' -> '{input_coll}'", "INFO")
         
         # Verify
         new_input_count = self.db[input_coll].count_documents({})
@@ -253,7 +253,7 @@ class PerSplitCyclicManager:
             self.db[archive_coll].drop()
         
         # Copy input to archive (not rename, so input remains)
-        logger(f"Archiving {input_coll} → {archive_coll}", "INFO")
+        logger(f"Archiving {input_coll} -> {archive_coll}", "INFO")
         
         # MongoDB doesn't have native copy, so we use aggregate $out
         self.db[input_coll].aggregate([

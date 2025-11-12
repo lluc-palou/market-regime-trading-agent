@@ -27,7 +27,7 @@ def to_naive_datetime(dt: datetime) -> datetime:
     return to_naive_utc(dt)
 
 # =================================================================================================
-# Parsing Functions (String → Naive UTC Datetime)
+# Parsing Functions (String -> Naive UTC Datetime)
 # =================================================================================================
 
 def parse_timestamp_from_metadata(ts: Union[str, datetime]) -> datetime:
@@ -58,7 +58,7 @@ def parse_hour_string(hour_str: str) -> datetime:
     return normalize_timestamp_string(hour_str)
 
 # =================================================================================================
-# Formatting Functions (Naive UTC Datetime → String)
+# Formatting Functions (Naive UTC Datetime -> String)
 # =================================================================================================
 
 def format_timestamp_for_metadata(dt: datetime) -> str:

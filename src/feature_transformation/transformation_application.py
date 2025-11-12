@@ -208,7 +208,7 @@ def apply_transformations_direct(
     
     changes = sum(1 for b, a in zip(sample_before or [], sample_after or []) if b != a)
     if changes > 0:
-        logger(f"✓ Detected {changes} changes in first 5 features", "INFO")
+        logger(f"[OK] Detected {changes} changes in first 5 features", "INFO")
     else:
         logger("WARNING: No changes detected in sample!", "WARNING")
     logger("=" * 80, "INFO")

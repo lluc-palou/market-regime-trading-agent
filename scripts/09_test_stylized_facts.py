@@ -1,16 +1,23 @@
 """
-Stylized Facts Testing Pipeline
+Stylized Facts Testing Pipeline (ENHANCED VERSION)
 
 Tests stylized facts (stationarity, normality, autocorrelation, etc.) on representative
 windows from each CPCV split.
 
+ENHANCEMENTS:
+- Added EnhancedResultsAggregator for statistical confidence measures
+- Provides mean, variance, and 95% confidence intervals
+- Outputs easy-to-analyze CSV with per-feature statistics
+- Backward compatible with original outputs
+
 Place this script in: rdl-lob/scripts/
-Run with: python scripts/05_stylized_facts_testing.py
+Run with: python scripts/09_test_stylized_facts.py
 """
 
 import os
 import sys
 import time
+import json
 from pathlib import Path
 import yaml
 
@@ -20,6 +27,45 @@ import yaml
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 REPO_ROOT = os.path.dirname(SCRIPT_DIR)
 sys.path.insert(0, REPO_ROOT)
+
+# =================================================================================================
+# Unicode/MLflow Fix for Windows - MUST BE FIRST!
+# =================================================================================================
+# Fix Windows console encoding to handle Unicode characters (fixes MLflow emoji errors)
+if sys.platform == 'win32':
+    # Set environment variables for UTF-8 support
+    os.environ['PYTHONIOENCODING'] = 'utf-8:replace'
+    os.environ['PYTHONUTF8'] = '1'
+    
+    # Reconfigure stdout/stderr to use UTF-8 with error replacement
+    if hasattr(sys.stdout, 'reconfigure'):
+        try:
+            sys.stdout.reconfigure(encoding='utf-8', errors='replace')
+            sys.stderr.reconfigure(encoding='utf-8', errors='replace')
+        except:
+            pass
+
+# Patch MLflow to remove emoji that causes Windows encoding errors
+try:
+    from mlflow.tracking._tracking_service import client as mlflow_client
+    
+    _original_log_url = mlflow_client.TrackingServiceClient._log_url
+    
+    def _patched_log_url(self, run_id):
+        try:
+            run = self.get_run(run_id)
+            run_name = run.info.run_name or run_id
+            run_url = self._get_run_url(run.info.experiment_id, run_id)
+            sys.stdout.write(f"[RUN] View run {run_name} at: {run_url}\n")
+            sys.stdout.flush()
+        except:
+            pass
+    
+    mlflow_client.TrackingServiceClient._log_url = _patched_log_url
+except:
+    pass
+# =================================================================================================
+
 
 # Import utilities
 from src.utils import (
@@ -31,7 +77,8 @@ from src.utils import (
 # Import stylized facts modules
 from src.stylized_facts import (
     StreamingStylizedFactsPipeline,
-    ResultsAggregator
+    ResultsAggregator,
+    EnhancedResultsAggregator  # NEW: For statistical confidence measures
 )
 
 # ============================================================================
@@ -41,11 +88,19 @@ from src.stylized_facts import (
 MONGO_URI = "mongodb://127.0.0.1:27017/"
 DB_NAME = "raw"  # Change to your database name
 METADATA_PATH = Path(REPO_ROOT) / "artifacts" / "fold_assignment" / "reproducibility.yaml"
-OUTPUT_DIR = Path(REPO_ROOT) / "artifacts" / "stylized_facts_results"
+
+# Default output directory (can be overridden by command-line argument)
+DEFAULT_OUTPUT_DIR = Path(REPO_ROOT) / "artifacts" / "stylized_facts"
 
 CONFIG = {
     'forecast_horizon': 240,
     'significance_level': 0.05
+}
+
+# NEW: Enhanced statistics configuration
+ENHANCED_CONFIG = {
+    'confidence_level': 0.95,  # 95% confidence intervals
+    'enable_enhanced_stats': True  # Set to False to disable enhanced statistics
 }
 
 # ============================================================================
@@ -148,11 +203,17 @@ def validate_windows(metadata: dict):
 # Main Pipeline
 # ============================================================================
 
-def run_stylized_facts_pipeline():
+def run_stylized_facts_pipeline(output_dir: Path = None):
     """
     Execute stylized facts testing pipeline.
+    
+    Args:
+        output_dir: Output directory for results. If None, uses DEFAULT_OUTPUT_DIR.
     """
     start_time = time.time()
+    
+    # Use provided output_dir or default
+    OUTPUT_DIR = output_dir if output_dir is not None else DEFAULT_OUTPUT_DIR
     
     # Create Spark session
     spark = create_spark_session(
@@ -163,12 +224,15 @@ def run_stylized_facts_pipeline():
     )
     
     try:
-        log_section("Stylized Facts Testing Pipeline")
+        log_section("Stylized Facts Testing Pipeline (ENHANCED)")
         logger(f"Database: {DB_NAME}", "INFO")
         logger(f"Metadata: {METADATA_PATH}", "INFO")
         logger(f"Output directory: {OUTPUT_DIR}", "INFO")
         logger(f"Forecast horizon: {CONFIG['forecast_horizon']}", "INFO")
         logger(f"Significance level: {CONFIG['significance_level']}", "INFO")
+        logger(f"Enhanced statistics: {'ENABLED' if ENHANCED_CONFIG['enable_enhanced_stats'] else 'DISABLED'}", "INFO")
+        if ENHANCED_CONFIG['enable_enhanced_stats']:
+            logger(f"Confidence level: {ENHANCED_CONFIG['confidence_level'] * 100}%", "INFO")
         log_section("", char="=")
         
         # ====================================================================
@@ -235,9 +299,9 @@ def run_stylized_facts_pipeline():
         logger("", "INFO")
         
         # ====================================================================
-        # Step 6: Aggregate Results
+        # Step 6: Aggregate Results (Standard)
         # ====================================================================
-        log_section("Step 6: Aggregating Results")
+        log_section("Step 6: Aggregating Results (Standard Summary)")
         
         if not results_paths:
             logger("WARNING: No result files to aggregate", "WARNING")
@@ -269,6 +333,48 @@ def run_stylized_facts_pipeline():
         log_section("", char="-")
         
         # ====================================================================
+        # Step 6b: Enhanced Statistical Analysis (NEW)
+        # ====================================================================
+        
+        if ENHANCED_CONFIG['enable_enhanced_stats']:
+            logger("", "INFO")
+            log_section("Step 6b: Computing Enhanced Statistics with Confidence Intervals")
+            
+            # Use enhanced aggregator for statistical confidence measures
+            enhanced_aggregator = EnhancedResultsAggregator(
+                OUTPUT_DIR, 
+                confidence_level=ENHANCED_CONFIG['confidence_level']
+            )
+            
+            # Compute enhanced statistics
+            logger("Computing mean, variance, and confidence intervals...", "INFO")
+            enhanced_stats = enhanced_aggregator.compute_enhanced_statistics(combined)
+            
+            # Create feature summary DataFrame (easy to analyze)
+            logger("Creating per-feature summary DataFrame...", "INFO")
+            feature_df = enhanced_aggregator.create_feature_summary_dataframe(enhanced_stats)
+            
+            # Compute violations with confidence intervals
+            logger("Identifying violations with statistical confidence...", "INFO")
+            enhanced_violations = enhanced_aggregator.identify_violations(combined)
+            
+            # Save enhanced outputs
+            logger("Saving enhanced summary outputs...", "INFO")
+            enhanced_aggregator.save_enhanced_summary(enhanced_stats, feature_df)
+            
+            # Also save enhanced violations
+            enhanced_violations_path = OUTPUT_DIR / "enhanced_violations.json"
+            with open(enhanced_violations_path, 'w', encoding='utf-8') as f:
+                json.dump(enhanced_violations, f, indent=2)
+            logger(f"  Saved enhanced violations: {enhanced_violations_path}", "INFO")
+            
+            logger("", "INFO")
+            logger("Enhanced statistics computed successfully!", "INFO")
+            logger(f"Confidence level used: {ENHANCED_CONFIG['confidence_level'] * 100}%", "INFO")
+            logger("", "INFO")
+            log_section("", char="-")
+        
+        # ====================================================================
         # Summary
         # ====================================================================
         elapsed_time = time.time() - start_time
@@ -282,10 +388,17 @@ def run_stylized_facts_pipeline():
         logger(f"Results saved to: {OUTPUT_DIR}", "INFO")
         logger("", "INFO")
         logger("Output files:", "INFO")
-        logger(f"  - summary_all_splits.csv", "INFO")
-        logger(f"  - summary_statistics.json", "INFO")
-        logger(f"  - violations.json", "INFO")
-        logger(f"  - summary_report.txt", "INFO")
+        logger(f"  Standard summary:", "INFO")
+        logger(f"    - summary_all_splits.csv", "INFO")
+        logger(f"    - summary_statistics.json", "INFO")
+        logger(f"    - violations.json", "INFO")
+        
+        if ENHANCED_CONFIG['enable_enhanced_stats']:
+            logger(f"  Enhanced summary (with confidence intervals):", "INFO")
+            logger(f"    - enhanced_summary_statistics.json", "INFO")
+            logger(f"    - enhanced_summary_by_feature.csv ← Use this for analysis!", "INFO")
+            logger(f"    - enhanced_violations.json", "INFO")
+        
         log_section("", char="=")
         
     except Exception as e:
@@ -295,7 +408,10 @@ def run_stylized_facts_pipeline():
         raise
     
     finally:
-        spark.stop()
+        # Only stop Spark if not orchestrated
+        if not is_orchestrated:
+            spark.stop()
+            logger('Spark session stopped', "INFO")
 
 
 # ============================================================================
@@ -303,11 +419,42 @@ def run_stylized_facts_pipeline():
 # ============================================================================
 
 if __name__ == "__main__":
+    import argparse
+    
+    # Parse command-line arguments
+    parser = argparse.ArgumentParser(description='Stylized Facts Testing Pipeline (Enhanced)')
+    parser.add_argument('--output-dir', type=str, default=None,
+                        help='Output directory for results (relative to repo root)')
+    parser.add_argument('--no-enhanced-stats', action='store_true',
+                        help='Disable enhanced statistical analysis')
+    parser.add_argument('--confidence-level', type=float, default=0.95,
+                        help='Confidence level for intervals (default: 0.95)')
+    args = parser.parse_args()
+    
+    # Update configuration based on arguments
+    if args.no_enhanced_stats:
+        ENHANCED_CONFIG['enable_enhanced_stats'] = False
+        logger("Enhanced statistics disabled via command-line argument", "INFO")
+    
+    if args.confidence_level:
+        if 0 < args.confidence_level < 1:
+            ENHANCED_CONFIG['confidence_level'] = args.confidence_level
+        else:
+            logger(f"Invalid confidence level: {args.confidence_level}. Using default 0.95", "WARNING")
+    
+    # Convert output_dir to Path if provided
+    output_dir = None
+    if args.output_dir:
+        output_dir = Path(REPO_ROOT) / args.output_dir
+        logger(f"Using output directory from argument: {output_dir}", "INFO")
+    else:
+        logger(f"Using default output directory: {DEFAULT_OUTPUT_DIR}", "INFO")
+    
     # Check if running from orchestrator
     is_orchestrated = os.environ.get('PIPELINE_ORCHESTRATED', 'false') == 'true'
     
     try:
-        run_stylized_facts_pipeline()
+        run_stylized_facts_pipeline(output_dir=output_dir)
     except Exception as e:
         logger(f"Pipeline failed: {str(e)}", "ERROR")
         raise

@@ -2,7 +2,47 @@ import os
 import sys
 from datetime import datetime
 
+# =================================================================================================
+# Unicode/MLflow Fix for Windows - MUST BE FIRST!
+# =================================================================================================
+# Fix Windows console encoding to handle Unicode characters (fixes MLflow emoji errors)
+if sys.platform == 'win32':
+    # Set environment variables for UTF-8 support
+    os.environ['PYTHONIOENCODING'] = 'utf-8:replace'
+    os.environ['PYTHONUTF8'] = '1'
+    
+    # Reconfigure stdout/stderr to use UTF-8 with error replacement
+    if hasattr(sys.stdout, 'reconfigure'):
+        try:
+            sys.stdout.reconfigure(encoding='utf-8', errors='replace')
+            sys.stderr.reconfigure(encoding='utf-8', errors='replace')
+        except:
+            pass
+
+# Patch MLflow to remove emoji that causes Windows encoding errors
+try:
+    from mlflow.tracking._tracking_service import client as mlflow_client
+    
+    _original_log_url = mlflow_client.TrackingServiceClient._log_url
+    
+    def _patched_log_url(self, run_id):
+        """Patched MLflow URL logger - replaces emoji with [RUN]"""
+        try:
+            run = self.get_run(run_id)
+            run_name = run.info.run_name or run_id
+            run_url = self._get_run_url(run.info.experiment_id, run_id)
+            sys.stdout.write(f"[RUN] View run {run_name} at: {run_url}\n")
+            sys.stdout.flush()
+        except:
+            pass  # Silently skip if anything fails
+    
+    mlflow_client.TrackingServiceClient._log_url = _patched_log_url
+except:
+    pass  # MLflow not imported yet or patch failed
+
+# =================================================================================================
 # Setup paths
+# =================================================================================================
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 REPO_ROOT = os.path.dirname(SCRIPT_DIR)
 sys.path.insert(0, REPO_ROOT)
@@ -20,10 +60,10 @@ CONFIG = {
     'db_name': "raw",
     
     # Pipeline control
-    'reset': True,          # Reset pipeline to archive state before running
-    'start_from': 3,        # Start from stage 3-13
-    'stop_at': 13,          # Stop at stage 3-13
-    'skip_init': False,     # Skip initialization check (only if you know pipeline is ready)
+    'reset': False,        # Reset pipeline to archive state before running
+    'start_from': 8,       # Start from stage 3-13
+    'stop_at': 8,         # Stop at stage 3-13
+    'skip_init': True,     # Skip initialization check (only if you know pipeline is ready)
     
     # Stylized facts testing
     'enable_stylized_facts': True,  # Enable stylized facts analysis
@@ -82,7 +122,7 @@ STAGES = {
         "name": "Apply Feature Transformations",
         "script": "08_apply_feature_transforms.py",
         "swap_after": False,
-        "description": "Apply selected transformations and rename: split_X_output → split_X_input",
+        "description": "Apply selected transformations and rename: split_X_output -> split_X_input",
         "stage_type": "pipeline"
     },
     10: {
@@ -105,7 +145,7 @@ STAGES = {
         "name": "Apply EWMA Standardization",
         "script": "11_apply_feature_standardization.py",
         "swap_after": False,
-        "description": "Apply EWMA standardization and rename: split_X_output → split_X_input",
+        "description": "Apply EWMA standardization and rename: split_X_output -> split_X_input",
         "stage_type": "pipeline"
     },
     13: {
@@ -116,6 +156,13 @@ STAGES = {
         "stage_type": "analysis",
         "depends_on": [12],
         "output_dir": "artifacts/stylized_facts/03_standardized"
+    },
+    14: {
+        "name": "Null Value Filtering",
+        "script": "12_filter_nulls.py",
+        "swap_after": False,
+        "description": "Apply Null Filtering and rename: split_X_output -> split_X_input",
+        "stage_type": "pipeline"
     }
 }
 
@@ -184,11 +231,12 @@ def run_stage_with_swap(pipeline_mgr: CyclicPipelineManager,
     # Run stage
     logger(f"Executing {stage_info['script']}...", "INFO")
     
-    # For analysis stages with output_dir, pass it as argument
+    # For analysis stages with output_dir, pass it as keyword argument
     if stage_info.get("output_dir"):
+        # Convert output-dir to output_dir for kwargs (hyphens to underscores)
         result = stage_runner.run_stage(
-            stage_info['script'], 
-            args=['--output-dir', stage_info["output_dir"]]
+            stage_info['script'],
+            **{'output-dir': stage_info["output_dir"]}
         )
     else:
         result = stage_runner.run_stage(stage_info['script'])
@@ -199,7 +247,7 @@ def run_stage_with_swap(pipeline_mgr: CyclicPipelineManager,
         
         # For analysis stages, failure is non-fatal (warning only)
         if is_stylized_facts_stage(stage_num):
-            logger(f"⚠️  Analysis stage failed, but continuing pipeline...", "WARNING")
+            logger(f"[WARNING]️  Analysis stage failed, but continuing pipeline...", "WARNING")
             return True  # Don't stop pipeline for analysis failures
         
         return False
@@ -232,8 +280,8 @@ def main():
         logger("Error: start_from must be <= stop_at", "ERROR")
         return 1
     
-    if not (3 <= CONFIG['start_from'] <= 13 and 3 <= CONFIG['stop_at'] <= 13):
-        logger("Error: stages must be between 3 and 13", "ERROR")
+    if not (3 <= CONFIG['start_from'] <= 14 and 3 <= CONFIG['stop_at'] <= 14):
+        logger("Error: stages must be between 3 and 14", "ERROR")
         return 1
     
     # Check if requested stages exist

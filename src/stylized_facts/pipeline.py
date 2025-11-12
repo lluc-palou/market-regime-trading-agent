@@ -195,12 +195,11 @@ class StreamingStylizedFactsPipeline:
                     # Append to file (or create if first window)
                     write_mode = 'w' if window_count == 0 else 'a'
                     write_header = (window_count == 0)
-                    
+
                     window_results.to_csv(
-                        split_results_path, 
-                        mode=write_mode,
-                        header=write_header,
-                        index=False
+                        split_results_path,
+                        quoting=1,
+                        escapechar='\\'
                     )
                     
                     logger(f"  Saved {len(window_results):,} test results", "INFO")

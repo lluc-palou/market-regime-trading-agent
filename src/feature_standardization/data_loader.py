@@ -131,10 +131,11 @@ def filter_standardizable_features(feature_names: List[str]) -> List[str]:
     """
     Filter feature names to only include those that should be standardized.
     
-    Excludes:
-    - Raw LOB data (bids, asks)
-    - Binned data (bins)
-    - Forward returns (targets, not standardized)
+    Excludes features that:
+    - Are targets (forward returns)
+    - Need to keep original scale (volatility, variance_proxy)
+    - Will be dropped before materialization (mid_price, log_return, spread)
+    - Raw LOB data (bins)
     
     Args:
         feature_names: List of all feature names
@@ -143,11 +144,16 @@ def filter_standardizable_features(feature_names: List[str]) -> List[str]:
         List of feature names to standardize
     """
     EXCLUDE_PATTERNS = [
-        'fwd_logret_',  # Forward returns (targets)
+        'fwd_logret_',      # Forward returns (targets)
     ]
     
     EXCLUDE_EXACT = [
-        'bins',  # Binned LOB data
+        'bins',             # Binned LOB data (already standardized)
+        'variance_proxy',   # Keep original scale
+        'volatility',       # Keep original scale
+        'mid_price',        # Will be dropped - skip processing
+        'log_return',       # Will be dropped - skip processing
+        'spread',           # Will be dropped - skip processing
     ]
     
     standardizable = []
@@ -163,7 +169,10 @@ def filter_standardizable_features(feature_names: List[str]) -> List[str]:
         
         standardizable.append(feat_name)
     
-    logger(f'Filtered to {len(standardizable)} standardizable features '
-           f'(excluded {len(feature_names) - len(standardizable)})', "INFO")
+    excluded_count = len(feature_names) - len(standardizable)
+    logger(f'Filtered to {len(standardizable)} standardizable features (excluded {excluded_count})', "INFO")
+    
+    if excluded_count > 0:
+        logger(f'Excluded features: targets, volatility features, intermediate features', "INFO")
     
     return standardizable

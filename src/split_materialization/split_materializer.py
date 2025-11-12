@@ -3,7 +3,7 @@ from pyspark.sql import DataFrame, SparkSession
 from pyspark.sql.functions import col, lit
 
 from src.utils.logging import logger
-from src.utils.database import write_to_mongodb
+from src.utils.database import write_to_mongodb_preserve_objectid
 
 from .batch_processor import BatchProcessor
 
@@ -34,6 +34,12 @@ class SplitMaterializer:
         
         self.all_hours = None
         self.split_ids = None
+        
+        # Get MongoDB URI from Spark config
+        self.mongo_uri = self.spark.sparkContext.getConf().get(
+            'spark.mongodb.read.connection.uri', 
+            'mongodb://127.0.0.1:27017/'
+        )
     
     def discover_splits(self):
         """Discover all split IDs from the input collection."""
@@ -75,6 +81,8 @@ class SplitMaterializer:
     def materialize_all_splits(self):
         """Materialize all splits by processing hourly batches."""
         logger(f'Materializing {len(self.split_ids)} splits across {len(self.all_hours)} hours', "INFO")
+        logger('ObjectId preservation: ENABLED', "INFO")
+        logger('Temporal ordering preservation: ENABLED', "INFO")
         
         # Statistics tracking
         split_stats = {split_id: 0 for split_id in self.split_ids}
@@ -133,7 +141,7 @@ class SplitMaterializer:
         logger('=' * 60, "INFO")
         
         for split_id in self.split_ids:
-            logger(f'split_{split_id}: {split_stats[split_id]:,} documents', "INFO")
+            logger(f'split_{split_id}_input: {split_stats[split_id]:,} documents', "INFO")
         
         if self.config.get('create_test_collection', False):
             logger(f'test_data: {test_count:,} documents', "INFO")
@@ -202,24 +210,25 @@ class SplitMaterializer:
     
     def _write_to_collection(self, df: DataFrame, collection_name: str):
         """
-        Write DataFrame to MongoDB collection.
+        Write DataFrame to MongoDB collection with ObjectId and timestamp preservation.
         
         Args:
-            df: DataFrame to write
+            df: DataFrame to write (must have timestamp_str column)
             collection_name: Target collection name
         """
-        # Drop timestamp_str (only used for processing), keep timestamp as-is
-        if "timestamp_str" in df.columns:
-            df = df.drop("timestamp_str")
-        
         # Sort by timestamp for proper ordering
         df = df.orderBy("timestamp")
         
-        # Write to MongoDB (timestamp is already in correct format)
-        write_to_mongodb(
-            df,
-            self.db_name,
-            collection_name,
+        # Apply feature projection if configured
+        if hasattr(self, 'projected_features') and hasattr(self, 'apply_projection_func'):
+            df = self.apply_projection_func(df, self.projected_features)
+        
+        # Write using ObjectId-preserving function
+        write_to_mongodb_preserve_objectid(
+            df=df,
+            database=self.db_name,
+            collection=collection_name,
+            mongo_uri=self.mongo_uri,
             mode="append"
         )
     
@@ -230,7 +239,7 @@ class SplitMaterializer:
         Returns:
             List of collection names
         """
-        collections = [f"split_{split_id}" for split_id in self.split_ids]
+        collections = [f"split_{split_id}_input" for split_id in self.split_ids]
         
         if self.config.get('create_test_collection', False):
             collections.append("test_data")

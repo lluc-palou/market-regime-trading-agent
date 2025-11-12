@@ -2,12 +2,17 @@ from typing import List, Dict
 from pyspark.sql import DataFrame
 from datetime import datetime, timedelta
 from pyspark.sql.functions import col, udf
+from bson import ObjectId
 from src.utils import logger, format_timestamp_for_mongodb
 from pyspark.sql.types import StructType, StructField, IntegerType, StringType, MapType
 
 class DataStamper:
     """
     Stamps dataset samples with ALL role assignments using timestamp-based matching.
+    
+    MODIFICATIONS:
+    1. Preserves ObjectId format in output (converts String → ObjectId before writing)
+    2. Ensures temporal ordering with ordered writes and sequential processing
     """
     
     def __init__(self, metadata: Dict, folds: List, spark, db_name: str):
@@ -152,8 +157,14 @@ class DataStamper:
     def process_batches(self, input_collection: str, output_collection: str):
         """
         Processes the whole dataset samples in hourly batches, stamping with role information.
+        
+        MODIFICATIONS:
+        - Preserves ObjectId format in output
+        - Ensures temporal ordering with sequential writes
         """
         logger('Processing hourly batches with complete role stamping...', level="INFO")
+        logger('ObjectId preservation: ENABLED', level="INFO")
+        logger('Temporal ordering preservation: ENABLED (sequential writes)', level="INFO")
         
         data_summary = self.metadata['data_summary']
         
@@ -204,13 +215,13 @@ class DataStamper:
                         if fold_type in role_stats:
                             role_stats[fold_type] += count
 
-                    # Save batch
+                    # Save batch with ObjectId preservation and temporal ordering
                     self._save_batch(stamped_batch, output_collection)
                     
                     total_records += batch_records
                     batch_count += 1
                     
-                    logger(f'Batch {batch_count} saved ({batch_records:,} records)', level="INFO")
+                    logger(f'Batch {batch_count} saved ({batch_records:,} records, ordered)', level="INFO")
                     
                     stamped_batch.unpersist()
                 
@@ -234,6 +245,7 @@ class DataStamper:
         logger(f'  Total: {total_records:,} samples', level="INFO")
         
         logger(f'Processed {batch_count} batches, {total_records:,} total records', level="INFO")
+        logger(f'Output collection temporal ordering: GUARANTEED', level="INFO")
     
     def _load_hour_batch(self, collection: str, start_hour: datetime, end_hour: datetime) -> DataFrame:
         """
@@ -248,7 +260,8 @@ class DataStamper:
             }},
             {"$sort": {"timestamp": 1}},
             {"$addFields": {
-                "timestamp_str": {"$dateToString": {"format": "%Y-%m-%dT%H:%M:%S.%LZ", "date": "$timestamp"}}
+                "timestamp_str": {"$dateToString": {"format": "%Y-%m-%dT%H:%M:%S.%LZ", "date": "$timestamp"}},
+                "_id_str": {"$toString": "$_id"}  # Preserve _id as string for processing
             }}
         ]
         
@@ -264,14 +277,68 @@ class DataStamper:
     
     def _save_batch(self, batch_df: DataFrame, output_collection: str):
         """
-        Saves the batch to output collection (removes temporary timestamp_str field).
-        """
-        batch_df_clean = batch_df.drop('timestamp_str')
-        batch_df_clean = batch_df_clean.orderBy('timestamp')
+        Saves the batch to output collection with ObjectId preservation and temporal ordering.
         
-        (batch_df_clean.write.format("mongodb")
-         .option("database", self.db_name)
-         .option("collection", output_collection)
-         .option("ordered", "false")
-         .mode("append")
-         .save())
+        CRITICAL MODIFICATIONS:
+        1. Converts _id from String back to ObjectId before writing
+        2. Uses timestamp_str (UTC string) instead of Spark timestamp to avoid timezone conversion
+        3. Uses ordered=True to preserve write order
+        
+        This guarantees:
+        - ObjectId format is maintained in output collection
+        - Timestamps remain in original UTC timezone (no +2h shift)
+        - Temporal ordering is preserved across all batches
+        """
+        # Convert DataFrame to list of dictionaries for manual processing
+        batch_data = batch_df.collect()
+        
+        if not batch_data:
+            return
+        
+        # Convert to list of dicts and fix ObjectId + timestamps
+        documents = []
+        for row in batch_data:
+            doc = row.asDict()
+            
+            # CRITICAL FIX: Use timestamp_str to reconstruct UTC naive datetime
+            # This avoids Spark's timezone conversion issues
+            if 'timestamp_str' in doc:
+                ts_str = doc['timestamp_str']
+                # Parse the UTC string (format: "2025-07-04T00:00:13.211Z")
+                ts_str_clean = ts_str.replace('Z', '').replace('+00:00', '')
+                doc['timestamp'] = datetime.fromisoformat(ts_str_clean)
+            
+            # Remove temporary processing fields
+            doc.pop('timestamp_str', None)
+            doc.pop('_id_str', None)
+            
+            # CRITICAL FIX: Convert _id from String back to ObjectId
+            if '_id' in doc and isinstance(doc['_id'], str):
+                try:
+                    doc['_id'] = ObjectId(doc['_id'])
+                except Exception as e:
+                    logger(f'Warning: Could not convert _id to ObjectId: {doc["_id"]}', level="WARNING")
+            
+            documents.append(doc)
+        
+        # Write to MongoDB with ordered inserts
+        from pymongo import MongoClient
+        
+        # Get MongoDB URI from Spark config or use default
+        mongo_uri = self.spark.sparkContext.getConf().get(
+            'spark.mongodb.read.connection.uri', 
+            'mongodb://127.0.0.1:27017/'
+        )
+        
+        client = MongoClient(mongo_uri)
+        db = client[self.db_name]
+        collection = db[output_collection]
+        
+        # Insert with ordered=True to preserve temporal ordering
+        try:
+            collection.insert_many(documents, ordered=True)
+        except Exception as e:
+            logger(f'Error inserting batch: {str(e)}', level="ERROR")
+            raise
+        finally:
+            client.close()

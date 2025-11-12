@@ -96,7 +96,7 @@ class VolumeQuantizer:
                 [np.inf]
             ])
             
-            # Assign prices to bins (lower price → lower index)
+            # Assign prices to bins (lower price -> lower index)
             idx = np.digitize(prices, edges, right=False) - 1
             idx = np.clip(idx, 0, B_total - 1)
             

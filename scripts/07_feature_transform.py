@@ -1,10 +1,18 @@
 """
-Feature Transformation Selection Script
+Feature Transformation Selection Script (Stage 07)
 
 Selects optimal normalization transformations for LOB features using CPCV splits.
 
+Input: split_X collections with 18 features
+Processes: 16 features (excludes volatility and fwd_logret_1)
+Output: Transformation selections for 16 features
+
+Exclusions from transformation:
+- volatility: Keep original scale (meaningful interpretation)
+- fwd_logret_1: Target variable, keep original scale
+
 Usage:
-    python scripts/07_select_feature_transforms.py
+    python scripts/07_feature_transform.py
 """
 
 import os
@@ -16,15 +24,49 @@ SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 REPO_ROOT = os.path.dirname(SCRIPT_DIR)
 sys.path.insert(0, REPO_ROOT)
 
+# =================================================================================================
+# Unicode/MLflow Fix for Windows
+# =================================================================================================
+if sys.platform == 'win32':
+    os.environ['PYTHONIOENCODING'] = 'utf-8:replace'
+    os.environ['PYTHONUTF8'] = '1'
+    
+    if hasattr(sys.stdout, 'reconfigure'):
+        try:
+            sys.stdout.reconfigure(encoding='utf-8', errors='replace')
+            sys.stderr.reconfigure(encoding='utf-8', errors='replace')
+        except:
+            pass
+
+try:
+    from mlflow.tracking._tracking_service import client as mlflow_client
+    
+    _original_log_url = mlflow_client.TrackingServiceClient._log_url
+    
+    def _patched_log_url(self, run_id):
+        try:
+            run = self.get_run(run_id)
+            run_name = run.info.run_name or run_id
+            run_url = self._get_run_url(run.info.experiment_id, run_id)
+            sys.stdout.write(f"[RUN] View run {run_name} at: {run_url}\n")
+            sys.stdout.flush()
+        except:
+            pass
+    
+    mlflow_client.TrackingServiceClient._log_url = _patched_log_url
+except:
+    pass
+# =================================================================================================
+
 import mlflow
 
-from src.utils.logging import logger
+from src.utils.logging import logger, log_section
 from src.utils.spark import create_spark_session
 from src.feature_transformation import (
     FeatureTransformProcessor,
     aggregate_across_splits,
     select_final_transforms,
-    identify_feature_names
+    identify_feature_names_from_collection  # FIXED: Use aggregation-based function
 )
 from src.feature_transformation.mlflow_logger import (
     log_split_results,
@@ -37,17 +79,63 @@ from src.feature_transformation.mlflow_logger import (
 
 DB_NAME = "raw"
 INPUT_COLLECTION_PREFIX = "split_"
-INPUT_COLLECTION_SUFFIX = "_input"  # Read from split_X_input collections
+INPUT_COLLECTION_SUFFIX = "_input"  # Split collections are named split_X_input
 
 MLFLOW_TRACKING_URI = "http://127.0.0.1:5000"
-MLFLOW_EXPERIMENT_NAME = "LOB_Feature_Transform_Selection"
+MLFLOW_EXPERIMENT_NAME = "Feature_Transformation"
 
-MAX_SPLITS = 5
-TRAIN_SAMPLE_RATE = 1.0  # 1.0 = all data, 0.1 = 10%
+MAX_SPLITS = 3
+TRAIN_SAMPLE_RATE = 1.0
 
 MONGO_URI = "mongodb://127.0.0.1:27017/"
 JAR_FILES_PATH = "file:///C:/Users/llucp/spark_jars/"
 DRIVER_MEMORY = "4g"
+
+# =================================================================================================
+# Feature Filtering
+# =================================================================================================
+
+def filter_transformable_features(feature_names):
+    """
+    Filter features to only include those that should be transformed.
+    
+    Excludes:
+    - volatility: Keep original scale (meaningful interpretation)
+    - fwd_logret_*: Target variable, keep original scale
+    
+    Args:
+        feature_names: List of all feature names (18 features from materialization)
+        
+    Returns:
+        List of features to transform (16 features)
+    """
+    EXCLUDE_PATTERNS = [
+        'fwd_logret_',      # Forward returns (targets)
+    ]
+    
+    EXCLUDE_EXACT = []       # Keep original scale
+    
+    transformable = []
+    
+    for feat_name in feature_names:
+        # Skip exact matches
+        if feat_name in EXCLUDE_EXACT:
+            continue
+        
+        # Skip pattern matches
+        if any(feat_name.startswith(pattern) for pattern in EXCLUDE_PATTERNS):
+            continue
+        
+        transformable.append(feat_name)
+    
+    excluded_count = len(feature_names) - len(transformable)
+    logger(f'Filtered to {len(transformable)} transformable features (excluded {excluded_count})', "INFO")
+    
+    if excluded_count > 0:
+        logger(f'Excluded from transformation: volatility, fwd_logret_1', "INFO")
+    
+    return transformable
+
 
 # =================================================================================================
 # Main Execution
@@ -55,9 +143,7 @@ DRIVER_MEMORY = "4g"
 
 def main():
     """Main execution function."""
-    logger('=' * 80, "INFO")
-    logger('FEATURE TRANSFORMATION SELECTION', "INFO")
-    logger('=' * 80, "INFO")
+    log_section('FEATURE TRANSFORMATION SELECTION (STAGE 07)')
     
     # Setup MLflow
     mlflow.set_tracking_uri(MLFLOW_TRACKING_URI)
@@ -65,6 +151,7 @@ def main():
     logger(f'MLflow experiment: {MLFLOW_EXPERIMENT_NAME}', "INFO")
     
     # Create Spark session
+    logger('', "INFO")
     logger('Initializing Spark...', "INFO")
     spark = create_spark_session(
         app_name="FeatureTransformSelection",
@@ -75,19 +162,23 @@ def main():
     )
     
     try:
-        # Get feature names from first split
+        # Get feature names from first split using aggregation
+        logger('', "INFO")
         logger('Identifying features...', "INFO")
         first_split = f"{INPUT_COLLECTION_PREFIX}0{INPUT_COLLECTION_SUFFIX}"
-        sample_df = (
-            spark.read.format("mongodb")
-            .option("database", DB_NAME)
-            .option("collection", first_split)
-            .load()
-            .limit(1)
-        )
+        logger(f'Reading feature names from collection: {first_split}', "INFO")
         
-        feature_names = identify_feature_names(sample_df)
-        logger(f'Processing {len(feature_names)} features across {MAX_SPLITS} splits', "INFO")
+        # FIXED: Use aggregation-based function to avoid Spark schema inference issues
+        all_feature_names = identify_feature_names_from_collection(
+            spark=spark,
+            db_name=DB_NAME,
+            collection=first_split
+        )
+        logger(f'Total features in split collections: {len(all_feature_names)}', "INFO")
+        
+        # Filter to transformable features only
+        feature_names = filter_transformable_features(all_feature_names)
+        logger(f'Processing {len(feature_names)} transformable features across {MAX_SPLITS} splits', "INFO")
         
         # Initialize processor
         processor = FeatureTransformProcessor(
@@ -109,28 +200,55 @@ def main():
             # Log to MLflow
             log_split_results(split_id, split_results, TRAIN_SAMPLE_RATE)
         
-        # Aggregate across splits
-        logger('', "INFO")  # Blank line
+        # Aggregate results across splits
+        logger('', "INFO")
+        log_section('AGGREGATING RESULTS ACROSS SPLITS')
         aggregated = aggregate_across_splits(all_split_results)
         
-        # Select final transforms
-        final_transforms = select_final_transforms(aggregated, strategy='most_frequent')
+        # Select final transformations
+        logger('', "INFO")
+        logger('Selecting final transformations...', "INFO")
+        final_transforms = select_final_transforms(aggregated)
         
         # Log aggregated results
         log_aggregated_results(aggregated, final_transforms)
         
-        # Summary
-        logger('', "INFO")
-        logger('=' * 80, "INFO")
-        logger('TRANSFORMATION SELECTION COMPLETE', "INFO")
-        logger('=' * 80, "INFO")
-        logger(f'Results logged to MLflow experiment: {MLFLOW_EXPERIMENT_NAME}', "INFO")
-        logger(f'Final transforms saved to: final_transforms.json', "INFO")
+        # Save results
+        results_dir = Path(REPO_ROOT) / 'artifacts' / 'feature_transformation'
+        results_dir.mkdir(parents=True, exist_ok=True)
         
+        import json
+        results_file = results_dir / 'transformation_selection.json'
+        with open(results_file, 'w') as f:
+            json.dump({
+                'final_transforms': final_transforms,
+                'aggregated_metrics': {
+                    feat: {
+                        'mean_pearson': float(agg['mean_pearson']),
+                        'mean_df': float(agg['mean_df'])
+                    }
+                    for feat, agg in aggregated.items()
+                }
+            }, f, indent=2)
+        
+        logger(f'Results saved to: {results_file}', "INFO")
+        
+        log_section('TRANSFORMATION SELECTION COMPLETED')
+        logger(f'Selected transformations for {len(final_transforms)} features', "INFO")
+        logger(f'Excluded features (keep original scale): volatility, fwd_logret_1', "INFO")
+        
+    except Exception as e:
+        logger(f'Error during transformation selection: {str(e)}', "ERROR")
+        import traceback
+        traceback.print_exc()
+        sys.exit(1)
+    
     finally:
-        spark.stop()
-        logger('Spark session stopped', "INFO")
+        # Only stop Spark if not orchestrated
+        if not is_orchestrated:
+            spark.stop()
 
 
 if __name__ == "__main__":
+    is_orchestrated = os.environ.get('PIPELINE_ORCHESTRATED', 'false') == 'true'
     main()

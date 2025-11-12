@@ -2,7 +2,7 @@
 Stage 8: Apply Feature Transformations
 
 Applies selected transformations to split data using per-split cyclic pattern:
-  split_X_input → split_X_working → SWAP → split_X_output
+  split_X_input -> split_X_working -> SWAP -> split_X_output
 
 Usage:
     python scripts/08_apply_feature_transforms.py
@@ -48,7 +48,7 @@ ARTIFACTS_DIR = REPO_ROOT / "artifacts" / "feature_transformation"
 
 # MLflow configuration (for reference, but we read from artifacts/)
 MLFLOW_TRACKING_URI = "mlruns/"
-MLFLOW_EXPERIMENT_NAME = "LOB_Feature_Transform_Selection"
+MLFLOW_EXPERIMENT_NAME = "Feature_Transformation"
 
 # Spark configuration
 MONGO_URI = "mongodb://127.0.0.1:27017/"
@@ -68,7 +68,7 @@ def load_final_transforms() -> dict:
     Load final transformation selections from artifacts directory.
     
     Returns:
-        Dictionary mapping feature_name → transform_type
+        Dictionary mapping feature_name -> transform_type
     """
     logger("Loading transformation selections from artifacts...", "INFO")
     
@@ -285,7 +285,7 @@ def main():
                 # Load fitted parameters for this split
                 fitted_params = load_split_fitted_params(split_id)
                 
-                # Apply transformations: split_X_input → split_X_output
+                # Apply transformations: split_X_input -> split_X_output
                 apply_transformations_to_split(
                     spark, 
                     split_id, 
@@ -293,7 +293,7 @@ def main():
                     fitted_params
                 )
                 
-                # Swap: split_X_output → split_X_input (transformed data becomes new input)
+                # Swap: split_X_output -> split_X_input (transformed data becomes new input)
                 logger("", "INFO")
                 manager.swap_split_to_input(split_id)
                 
@@ -317,12 +317,16 @@ def main():
             return 0
             
         finally:
-            spark.stop()
-            logger("Spark session stopped", "INFO")
+            # Only stop Spark if not orchestrated
+            if not is_orchestrated:
+                spark.stop()
+                logger('Spark session stopped', "INFO")
     
     finally:
         manager.close()
 
 
 if __name__ == "__main__":
+    # Checks if runned from orchestrator
+    is_orchestrated = os.environ.get('PIPELINE_ORCHESTRATED', 'false') == 'true'
     sys.exit(main())

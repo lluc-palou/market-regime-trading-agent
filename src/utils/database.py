@@ -2,6 +2,9 @@ from pyspark.sql.functions import expr
 from typing import Optional, List, Dict, Any
 from pyspark.sql import DataFrame, SparkSession
 from pyspark.sql.types import StructType, StructField, IntegerType, StringType
+from datetime import datetime
+from bson import ObjectId
+from pymongo import MongoClient
 
 # =================================================================================================
 # Read Operations
@@ -108,6 +111,9 @@ def write_to_mongodb(
 ) -> None:
     """
     Writes DataFrame to MongoDB collection.
+    
+    IMPORTANT: This function does NOT preserve ObjectId format.
+    Use write_to_mongodb_preserve_objectid() if you need to maintain ObjectId type.
     """
     df_output = df
     
@@ -125,6 +131,122 @@ def write_to_mongodb(
      .mode(mode)
      .save())
 
+def write_to_mongodb_preserve_objectid(
+    df: DataFrame,
+    database: str,
+    collection: str,
+    mongo_uri: str = "mongodb://127.0.0.1:27017/",
+    mode: str = "append"
+) -> None:
+    """
+    Writes DataFrame to MongoDB while preserving ObjectId format and timestamp UTC naive format.
+    
+    This function:
+    1. Collects Spark DataFrame to Python
+    2. Converts _id from String back to ObjectId
+    3. Parses timestamp from timestamp_str (if present) to avoid timezone shifts
+    4. Writes using PyMongo with ordered inserts (skips duplicates if in append mode)
+    
+    Args:
+        df: DataFrame to write (should have timestamp_str if timestamp needs to be preserved)
+        database: Database name
+        collection: Collection name
+        mongo_uri: MongoDB connection URI
+        mode: Write mode ('append' or 'overwrite')
+    
+    Note: This is slower than Spark writes but guarantees data integrity.
+    """
+    from pymongo.errors import BulkWriteError
+    
+    # Collect DataFrame to Python
+    batch_data = df.collect()
+    
+    if not batch_data:
+        return
+    
+    # Convert to list of dicts with proper types
+    documents = []
+    skipped_ids = []
+    
+    for row in batch_data:
+        doc = row.asDict()
+        
+        # FIX 1: Convert timestamp from timestamp_str (UTC string) to avoid timezone shifts
+        if 'timestamp_str' in doc:
+            ts_str = doc['timestamp_str']
+            # Parse the UTC string (format: "2025-07-04T00:00:13.211Z")
+            ts_str_clean = ts_str.replace('Z', '').replace('+00:00', '')
+            doc['timestamp'] = datetime.fromisoformat(ts_str_clean)
+        
+        # Remove temporary processing fields
+        doc.pop('timestamp_str', None)
+        doc.pop('_id_str', None)
+        
+        # FIX 2: Convert _id from String back to ObjectId
+        if '_id' in doc and isinstance(doc['_id'], str):
+            try:
+                doc['_id'] = ObjectId(doc['_id'])
+            except Exception as e:
+                # If conversion fails, skip this document
+                print(f'Warning: Could not convert _id to ObjectId: {doc["_id"]} - {e}')
+                skipped_ids.append(doc.get('_id', 'unknown'))
+                continue
+        
+        documents.append(doc)
+    
+    if skipped_ids:
+        print(f'Warning: Skipped {len(skipped_ids)} documents with invalid ObjectIds')
+    
+    if not documents:
+        print('Warning: No valid documents to insert')
+        return
+    
+    # Connect to MongoDB
+    client = MongoClient(mongo_uri)
+    db = client[database]
+    coll = db[collection]
+    
+    try:
+        # Handle mode
+        if mode == "overwrite":
+            # Drop collection first
+            coll.drop()
+            # Insert all documents
+            if documents:
+                coll.insert_many(documents, ordered=True)
+        else:  # append mode
+            # In append mode, handle duplicate key errors gracefully
+            try:
+                coll.insert_many(documents, ordered=False)  # ordered=False to continue on duplicates
+            except BulkWriteError as bwe:
+                # Extract detailed error information
+                write_errors = bwe.details.get('writeErrors', [])
+                duplicate_count = sum(1 for err in write_errors if err.get('code') == 11000)
+                other_errors = [err for err in write_errors if err.get('code') != 11000]
+                
+                # If only duplicate key errors, that's expected in append mode
+                if other_errors:
+                    print(f'Error: Non-duplicate write errors occurred:')
+                    for err in other_errors[:5]:  # Show first 5 errors
+                        print(f"  - Code {err.get('code')}: {err.get('errmsg', 'Unknown error')}")
+                    raise
+                else:
+                    # Only duplicates - log but continue
+                    inserted_count = bwe.details.get('nInserted', 0)
+                    print(f'Info: Inserted {inserted_count} documents, skipped {duplicate_count} duplicates')
+    
+    except Exception as e:
+        print(f'Error inserting documents to {database}.{collection}: {str(e)}')
+        # Print first document structure for debugging
+        if documents:
+            print('Sample document structure:')
+            sample = {k: type(v).__name__ for k, v in list(documents[0].items())[:10]}
+            print(f'  {sample}')
+        raise
+    
+    finally:
+        client.close()
+
 def write_with_timestamp_conversion(
     df: DataFrame,
     database: str,
@@ -134,6 +256,9 @@ def write_with_timestamp_conversion(
 ) -> None:
     """
     Writes DataFrame to MongoDB, converting timestamp string back to timestamp type.
+    
+    IMPORTANT: This function does NOT preserve ObjectId format.
+    Use write_to_mongodb_preserve_objectid() if you need to maintain ObjectId type.
     """
     df_output = df.withColumn(
         timestamp_col,

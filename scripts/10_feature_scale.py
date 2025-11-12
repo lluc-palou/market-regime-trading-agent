@@ -1,12 +1,18 @@
 """
-EWMA Half-Life Selection Script
+Feature Standardization Selection Script (Stage 10)
 
-Selects optimal EWMA half-life parameters for LOB feature standardization using CPCV splits.
+Selects optimal EWMA half-life for feature standardization using CPCV splits.
 
-This is Stage 10 in the pipeline - it follows feature transformation (Stage 8).
+Input: split_X_output collections with 18 features (after transformation)
+Processes: 16 features (excludes volatility and fwd_logret_1)
+Output: Half-life selections for 16 features
+
+Exclusions from standardization:
+- volatility: Keep original scale (meaningful interpretation)
+- fwd_logret_1: Target variable, keep original scale
 
 Usage:
-    python scripts/10_select_ewma_halflife.py
+    python scripts/10_feature_scale.py
 """
 
 import os
@@ -18,16 +24,49 @@ SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 REPO_ROOT = os.path.dirname(SCRIPT_DIR)
 sys.path.insert(0, REPO_ROOT)
 
+# =================================================================================================
+# Unicode/MLflow Fix for Windows
+# =================================================================================================
+if sys.platform == 'win32':
+    os.environ['PYTHONIOENCODING'] = 'utf-8:replace'
+    os.environ['PYTHONUTF8'] = '1'
+    
+    if hasattr(sys.stdout, 'reconfigure'):
+        try:
+            sys.stdout.reconfigure(encoding='utf-8', errors='replace')
+            sys.stderr.reconfigure(encoding='utf-8', errors='replace')
+        except:
+            pass
+
+try:
+    from mlflow.tracking._tracking_service import client as mlflow_client
+    
+    _original_log_url = mlflow_client.TrackingServiceClient._log_url
+    
+    def _patched_log_url(self, run_id):
+        try:
+            run = self.get_run(run_id)
+            run_name = run.info.run_name or run_id
+            run_url = self._get_run_url(run.info.experiment_id, run_id)
+            sys.stdout.write(f"[RUN] View run {run_name} at: {run_url}\n")
+            sys.stdout.flush()
+        except:
+            pass
+    
+    mlflow_client.TrackingServiceClient._log_url = _patched_log_url
+except:
+    pass
+# =================================================================================================
+
 import mlflow
 
-from src.utils.logging import logger
+from src.utils.logging import logger, log_section
 from src.utils.spark import create_spark_session
 from src.feature_standardization import (
-    EWMAHalfLifeProcessor,
+    FeatureStandardizationProcessor,
     aggregate_across_splits,
-    select_final_half_lives,
-    identify_feature_names,
-    filter_standardizable_features
+    select_best_half_life,
+    identify_feature_names
 )
 from src.feature_standardization.mlflow_logger import (
     log_split_results,
@@ -40,18 +79,63 @@ from src.feature_standardization.mlflow_logger import (
 
 DB_NAME = "raw"
 INPUT_COLLECTION_PREFIX = "split_"
-INPUT_COLLECTION_SUFFIX = "_input"  # Read from transformation output (renamed to _input)
+INPUT_COLLECTION_SUFFIX = "_output"  # Read from transformation output
 
 MLFLOW_TRACKING_URI = "http://127.0.0.1:5000"
-MLFLOW_EXPERIMENT_NAME = "LOB_EWMA_HalfLife_Selection"
+MLFLOW_EXPERIMENT_NAME = "Feature_Standardization"
 
 MAX_SPLITS = 5
-TRAIN_SAMPLE_RATE = 0.1  # 10% sampling for efficiency
-CLIP_STD = 3.0
+HALF_LIFE_CANDIDATES = [5, 10, 20, 40, 60]
 
 MONGO_URI = "mongodb://127.0.0.1:27017/"
 JAR_FILES_PATH = "file:///C:/Users/llucp/spark_jars/"
 DRIVER_MEMORY = "4g"
+
+# =================================================================================================
+# Feature Filtering
+# =================================================================================================
+
+def filter_standardizable_features(feature_names):
+    """
+    Filter features to only include those that should be standardized.
+    
+    Excludes:
+    - volatility: Keep original scale (meaningful interpretation)
+    - fwd_logret_*: Target variable, keep original scale
+    
+    Args:
+        feature_names: List of all feature names (18 features from transformation)
+        
+    Returns:
+        List of features to standardize (16 features)
+    """
+    EXCLUDE_PATTERNS = [
+        'fwd_logret_',      # Forward returns (targets)
+    ]
+    
+    EXCLUDE_EXACT = []       # Keep original scale
+    
+    standardizable = []
+    
+    for feat_name in feature_names:
+        # Skip exact matches
+        if feat_name in EXCLUDE_EXACT:
+            continue
+        
+        # Skip pattern matches
+        if any(feat_name.startswith(pattern) for pattern in EXCLUDE_PATTERNS):
+            continue
+        
+        standardizable.append(feat_name)
+    
+    excluded_count = len(feature_names) - len(standardizable)
+    logger(f'Filtered to {len(standardizable)} standardizable features (excluded {excluded_count})', "INFO")
+    
+    if excluded_count > 0:
+        logger(f'Excluded from standardization: volatility, fwd_logret_1', "INFO")
+    
+    return standardizable
+
 
 # =================================================================================================
 # Main Execution
@@ -59,9 +143,7 @@ DRIVER_MEMORY = "4g"
 
 def main():
     """Main execution function."""
-    logger('=' * 80, "INFO")
-    logger('EWMA HALF-LIFE SELECTION', "INFO")
-    logger('=' * 80, "INFO")
+    log_section('FEATURE STANDARDIZATION SELECTION (STAGE 10)')
     
     # Setup MLflow
     mlflow.set_tracking_uri(MLFLOW_TRACKING_URI)
@@ -69,9 +151,10 @@ def main():
     logger(f'MLflow experiment: {MLFLOW_EXPERIMENT_NAME}', "INFO")
     
     # Create Spark session
+    logger('', "INFO")
     logger('Initializing Spark...', "INFO")
     spark = create_spark_session(
-        app_name="EWMAHalfLifeSelection",
+        app_name="FeatureStandardizationSelection",
         db_name=DB_NAME,
         mongo_uri=MONGO_URI,
         driver_memory=DRIVER_MEMORY,
@@ -80,11 +163,9 @@ def main():
     
     try:
         # Get feature names from first split
+        logger('', "INFO")
         logger('Identifying features...', "INFO")
         first_split = f"{INPUT_COLLECTION_PREFIX}0{INPUT_COLLECTION_SUFFIX}"
-        logger(f'Loading from collection: {first_split}', "INFO")
-        
-        # Load one document to get feature_names
         sample_df = (
             spark.read.format("mongodb")
             .option("database", DB_NAME)
@@ -93,74 +174,83 @@ def main():
             .limit(1)
         )
         
-        # Check if collection has data
-        count = sample_df.count()
-        if count == 0:
-            raise ValueError(f"Collection '{first_split}' is empty! Ensure Stage 8 (transformation) completed successfully.")
-        
         all_feature_names = identify_feature_names(sample_df)
+        logger(f'Total features in split collections: {len(all_feature_names)}', "INFO")
         
-        # Don't filter yet - we need all features to match the features array indices
-        # We'll filter which ones to standardize during processing
-        feature_names = all_feature_names
-        standardizable_features = filter_standardizable_features(all_feature_names)
-        
-        logger(f'Processing {len(feature_names)} total features', "INFO")
-        logger(f'Will standardize {len(standardizable_features)} features '
-               f'(excluded {len(feature_names) - len(standardizable_features)})', "INFO")
+        # Filter to standardizable features only
+        feature_names = filter_standardizable_features(all_feature_names)
+        logger(f'Processing {len(feature_names)} standardizable features across {MAX_SPLITS} splits', "INFO")
+        logger(f'Testing half-life values: {HALF_LIFE_CANDIDATES}', "INFO")
         
         # Initialize processor
-        processor = EWMAHalfLifeProcessor(
+        processor = FeatureStandardizationProcessor(
             spark=spark,
             db_name=DB_NAME,
             input_collection_prefix=INPUT_COLLECTION_PREFIX,
-            input_collection_suffix=INPUT_COLLECTION_SUFFIX,
-            train_sample_rate=TRAIN_SAMPLE_RATE,
-            clip_std=CLIP_STD
+            input_collection_suffix=INPUT_COLLECTION_SUFFIX
         )
         
         # Process each split
         all_split_results = {}
         
         for split_id in range(MAX_SPLITS):
-            # Process split - pass both full feature names and standardizable subset
-            split_results = processor.process_split(split_id, feature_names, standardizable_features)
+            # Process split
+            split_results = processor.process_split(split_id, feature_names, HALF_LIFE_CANDIDATES)
             all_split_results[split_id] = split_results
             
             # Log to MLflow
-            log_split_results(split_id, split_results, TRAIN_SAMPLE_RATE)
+            log_split_results(split_id, split_results)
         
-        # Aggregate across splits
-        logger('', "INFO")  # Blank line
-        aggregated = aggregate_across_splits(all_split_results)
+        # Aggregate results across splits
+        logger('', "INFO")
+        log_section('AGGREGATING RESULTS ACROSS SPLITS')
+        aggregated = aggregate_across_splits(all_split_results, HALF_LIFE_CANDIDATES)
         
-        # Select final half-lives
-        final_half_lives = select_final_half_lives(aggregated, strategy='most_frequent')
+        # Select best half-life
+        logger('', "INFO")
+        logger('Selecting optimal half-life...', "INFO")
+        best_half_life = select_best_half_life(aggregated, HALF_LIFE_CANDIDATES)
         
         # Log aggregated results
-        log_aggregated_results(aggregated, final_half_lives)
+        log_aggregated_results(aggregated, best_half_life, HALF_LIFE_CANDIDATES)
         
-        # Summary
-        logger('', "INFO")
-        logger('=' * 80, "INFO")
-        logger('HALF-LIFE SELECTION COMPLETE', "INFO")
-        logger('=' * 80, "INFO")
-        logger(f'Results logged to MLflow experiment: {MLFLOW_EXPERIMENT_NAME}', "INFO")
-        logger(f'Final half-lives saved to: artifacts/ewma_halflife_selection/aggregation/final_halflifes.json', "INFO")
+        # Save results
+        results_dir = Path(REPO_ROOT) / 'artifacts' / 'feature_standardization'
+        results_dir.mkdir(parents=True, exist_ok=True)
         
-        # Show sample of selected half-lives
-        logger('', "INFO")
-        logger('Sample of selected half-lives:', "INFO")
-        sample_features = list(final_half_lives.items())[:10]
-        for feat, hl in sample_features:
-            logger(f'  {feat}: {hl}', "INFO")
-        if len(final_half_lives) > 10:
-            logger(f'  ... and {len(final_half_lives) - 10} more', "INFO")
+        import json
+        results_file = results_dir / 'standardization_selection.json'
+        with open(results_file, 'w') as f:
+            json.dump({
+                'best_half_life': best_half_life,
+                'aggregated_metrics': {
+                    str(hl): {
+                        'mean_pearson': float(agg['mean_pearson']),
+                        'mean_df': float(agg['mean_df'])
+                    }
+                    for hl, agg in aggregated.items()
+                }
+            }, f, indent=2)
         
+        logger(f'Results saved to: {results_file}', "INFO")
+        
+        log_section('STANDARDIZATION SELECTION COMPLETED')
+        logger(f'Selected half-life: {best_half_life}', "INFO")
+        logger(f'Applied to {len(feature_names)} features', "INFO")
+        logger(f'Excluded features (keep original scale): volatility, fwd_logret_1', "INFO")
+        
+    except Exception as e:
+        logger(f'Error during standardization selection: {str(e)}', "ERROR")
+        import traceback
+        traceback.print_exc()
+        sys.exit(1)
+    
     finally:
-        spark.stop()
-        logger('Spark session stopped', "INFO")
+        # Only stop Spark if not orchestrated
+        if not is_orchestrated:
+            spark.stop()
 
 
 if __name__ == "__main__":
+    is_orchestrated = os.environ.get('PIPELINE_ORCHESTRATED', 'false') == 'true'
     main()

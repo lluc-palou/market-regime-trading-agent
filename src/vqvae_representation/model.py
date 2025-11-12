@@ -1,0 +1,414 @@
+"""
+VQ-VAE Model Architecture
+
+Components:
+- VectorQuantizer: Codebook with straight-through estimator
+- Encoder: Convolutional encoder with dropout regularization
+- Decoder: Transposed convolutional decoder with dropout regularization
+- VQVAEModel: Complete model wrapper
+"""
+
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+from typing import Tuple, Dict
+
+from .config import MODEL_CONFIG
+
+
+class VectorQuantizer(nn.Module):
+    """
+    Vector quantization layer with learnable codebook.
+    
+    Uses straight-through estimator for gradient flow during backprop.
+    """
+    
+    def __init__(self, num_embeddings: int, embedding_dim: int):
+        """
+        Initialize vector quantizer.
+        
+        Args:
+            num_embeddings: Number of codebook vectors (K)
+            embedding_dim: Dimension of each codebook vector (D)
+        """
+        super().__init__()
+        self.num_embeddings = num_embeddings
+        self.embedding_dim = embedding_dim
+        
+        # Learnable codebook
+        self.embedding = nn.Embedding(num_embeddings, embedding_dim)
+        self.embedding.weight.data.uniform_(-1/num_embeddings, 1/num_embeddings)
+    
+    def forward(self, z_e: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+        """
+        Quantize encoder outputs to nearest codebook vectors.
+        
+        Args:
+            z_e: Encoder output (batch_size, embedding_dim)
+            
+        Returns:
+            z_q: Quantized vectors (batch_size, embedding_dim)
+            commitment_loss: Commitment loss for encoder
+            codebook_loss: Codebook loss for embeddings
+            encoding_indices: Indices of selected codebook vectors (batch_size,)
+        """
+        B, D = z_e.shape
+        
+        # Compute distances to all codebook vectors
+        # ||z_e - e||^2 = ||z_e||^2 + ||e||^2 - 2*z_e·e
+        distances = (
+            torch.sum(z_e**2, dim=1, keepdim=True) +
+            torch.sum(self.embedding.weight**2, dim=1) -
+            2 * torch.matmul(z_e, self.embedding.weight.t())
+        )
+        
+        # Find nearest codebook vectors
+        encoding_indices = torch.argmin(distances, dim=1)
+        z_q = self.embedding(encoding_indices)
+        
+        # Compute VQ losses
+        # Commitment loss: encoder commits to codebook
+        commitment_loss = F.mse_loss(z_e, z_q.detach())
+        
+        # Codebook loss: codebook moves toward encoder outputs
+        codebook_loss = F.mse_loss(z_e.detach(), z_q)
+        
+        # Straight-through estimator: copy gradients from decoder to encoder
+        z_q = z_e + (z_q - z_e).detach()
+        
+        return z_q, commitment_loss, codebook_loss, encoding_indices
+    
+    def get_codebook_usage(self, encoding_indices: torch.Tensor) -> float:
+        """
+        Compute fraction of codebook used in current batch.
+        
+        Args:
+            encoding_indices: Indices selected in current batch
+            
+        Returns:
+            Usage fraction (0.0 to 1.0)
+        """
+        unique_codes = torch.unique(encoding_indices)
+        usage = len(unique_codes) / self.num_embeddings
+        return usage
+    
+    def compute_perplexity(self, encoding_indices: torch.Tensor) -> float:
+        """
+        Compute perplexity of codebook usage.
+        
+        Higher perplexity = more diverse usage.
+        
+        Args:
+            encoding_indices: Indices selected in current batch
+            
+        Returns:
+            Perplexity value
+        """
+        encodings = F.one_hot(encoding_indices, self.num_embeddings).float()
+        avg_probs = encodings.mean(0)
+        perplexity = torch.exp(-torch.sum(avg_probs * torch.log(avg_probs + 1e-10)))
+        return perplexity.item()
+
+
+class Encoder(nn.Module):
+    """
+    Convolutional encoder with dropout regularization.
+    
+    Architecture:
+    - Progressive downsampling with strided convolutions
+    - Batch normalization for stability
+    - Dropout for regularization
+    - Final FC projection to embedding space
+    """
+    
+    def __init__(self, input_dim: int, embedding_dim: int, n_conv_layers: int, dropout: float = 0.2):
+        """
+        Initialize encoder.
+        
+        Args:
+            input_dim: Input dimension (B bins)
+            embedding_dim: Output embedding dimension (D)
+            n_conv_layers: Number of convolutional layers (2 or 3)
+            dropout: Dropout probability
+        """
+        super().__init__()
+        
+        self.input_dim = input_dim
+        self.embedding_dim = embedding_dim
+        self.n_conv_layers = n_conv_layers
+        
+        channels = MODEL_CONFIG['conv_channels']
+        kernels = MODEL_CONFIG['kernel_sizes']
+        strides = MODEL_CONFIG['strides']
+        paddings = MODEL_CONFIG['paddings']
+        
+        layers = []
+        
+        # Conv layer 1: 1 -> 32 channels
+        layers.extend([
+            nn.Conv1d(1, channels[0], kernel_size=kernels[0], stride=strides[0], padding=paddings[0]),
+            nn.BatchNorm1d(channels[0]),
+            nn.ReLU(),
+            nn.Dropout(dropout)
+        ])
+        current_channels = channels[0]
+        current_length = (input_dim + 2*paddings[0] - kernels[0]) // strides[0] + 1
+        
+        # Conv layer 2: 32 -> 64 channels
+        layers.extend([
+            nn.Conv1d(channels[0], channels[1], kernel_size=kernels[1], stride=strides[1], padding=paddings[1]),
+            nn.BatchNorm1d(channels[1]),
+            nn.ReLU(),
+            nn.Dropout(dropout)
+        ])
+        current_channels = channels[1]
+        current_length = (current_length + 2*paddings[1] - kernels[1]) // strides[1] + 1
+        
+        # Conv layer 3: 64 -> 128 channels (always present)
+        layers.extend([
+            nn.Conv1d(channels[1], channels[2], kernel_size=kernels[2], stride=strides[2], padding=paddings[2]),
+            nn.BatchNorm1d(channels[2]),
+            nn.ReLU(),
+            nn.Dropout(dropout)
+        ])
+        current_channels = channels[2]
+        current_length = (current_length + 2*paddings[2] - kernels[2]) // strides[2] + 1
+        
+        # Optional conv layer 4: 128 -> 256 channels
+        if n_conv_layers == 3:
+            layers.extend([
+                nn.Conv1d(channels[2], channels[3], kernel_size=kernels[3], stride=strides[3], padding=paddings[3]),
+                nn.BatchNorm1d(channels[3]),
+                nn.ReLU(),
+                nn.Dropout(dropout)
+            ])
+            current_channels = channels[3]
+            current_length = (current_length + 2*paddings[3] - kernels[3]) // strides[3] + 1
+        
+        self.conv_layers = nn.Sequential(*layers)
+        self.flatten_size = current_channels * current_length
+        self.fc = nn.Linear(self.flatten_size, embedding_dim)
+    
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """
+        Encode input to latent space.
+        
+        Args:
+            x: Input tensor (batch_size, B)
+            
+        Returns:
+            z_e: Encoded representation (batch_size, D)
+        """
+        x = x.unsqueeze(1)  # (batch_size, 1, B)
+        x = self.conv_layers(x)  # (batch_size, C, L)
+        x = x.view(x.size(0), -1)  # (batch_size, C*L)
+        z_e = self.fc(x)  # (batch_size, D)
+        return z_e
+
+
+class Decoder(nn.Module):
+    """
+    Transposed convolutional decoder with dropout regularization.
+    
+    Architecture:
+    - FC expansion from embedding space
+    - Progressive upsampling with transposed convolutions
+    - Batch normalization for stability
+    - Dropout for regularization
+    - Final projection to output dimension
+    """
+    
+    def __init__(
+        self, 
+        embedding_dim: int, 
+        output_dim: int, 
+        n_conv_layers: int, 
+        encoder_flatten_size: int,
+        dropout: float = 0.2
+    ):
+        """
+        Initialize decoder.
+        
+        Args:
+            embedding_dim: Input embedding dimension (D)
+            output_dim: Output dimension (B bins)
+            n_conv_layers: Number of convolutional layers (must match encoder)
+            encoder_flatten_size: Flattened size from encoder (for reshape)
+            dropout: Dropout probability
+        """
+        super().__init__()
+        
+        self.embedding_dim = embedding_dim
+        self.output_dim = output_dim
+        self.n_conv_layers = n_conv_layers
+        self.encoder_flatten_size = encoder_flatten_size
+        
+        channels = MODEL_CONFIG['conv_channels']
+        kernels = MODEL_CONFIG['kernel_sizes']
+        strides = MODEL_CONFIG['strides']
+        paddings = MODEL_CONFIG['paddings']
+        
+        # Determine reshape dimensions
+        if n_conv_layers == 3:
+            self.reshape_channels = channels[3]
+            self.reshape_length = encoder_flatten_size // channels[3]
+        else:
+            self.reshape_channels = channels[2]
+            self.reshape_length = encoder_flatten_size // channels[2]
+        
+        # FC expansion
+        self.fc = nn.Linear(embedding_dim, encoder_flatten_size)
+        
+        layers = []
+        
+        # Build decoder layers (reverse order of encoder)
+        if n_conv_layers == 3:
+            # ConvTranspose layer 4: 256 -> 128 channels
+            layers.extend([
+                nn.ConvTranspose1d(channels[3], channels[2], kernel_size=kernels[3], 
+                                  stride=strides[3], padding=paddings[3], output_padding=1),
+                nn.BatchNorm1d(channels[2]),
+                nn.ReLU(),
+                nn.Dropout(dropout)
+            ])
+        
+        # ConvTranspose layer 3: 128 -> 64 channels
+        layers.extend([
+            nn.ConvTranspose1d(channels[2], channels[1], kernel_size=kernels[2], 
+                              stride=strides[2], padding=paddings[2], output_padding=1),
+            nn.BatchNorm1d(channels[1]),
+            nn.ReLU(),
+            nn.Dropout(dropout)
+        ])
+        
+        # ConvTranspose layer 2: 64 -> 32 channels
+        layers.extend([
+            nn.ConvTranspose1d(channels[1], channels[0], kernel_size=kernels[1], 
+                              stride=strides[1], padding=paddings[1], output_padding=1),
+            nn.BatchNorm1d(channels[0]),
+            nn.ReLU(),
+            nn.Dropout(dropout)
+        ])
+        
+        # ConvTranspose layer 1: 32 -> 1 channel (final reconstruction)
+        layers.append(
+            nn.ConvTranspose1d(channels[0], 1, kernel_size=kernels[0], 
+                              stride=strides[0], padding=paddings[0], output_padding=1)
+        )
+        
+        self.conv_layers = nn.Sequential(*layers)
+    
+    def forward(self, z_q: torch.Tensor) -> torch.Tensor:
+        """
+        Decode quantized vectors to reconstruct input.
+        
+        Args:
+            z_q: Quantized representation (batch_size, D)
+            
+        Returns:
+            x_recon: Reconstructed input (batch_size, B)
+        """
+        x = self.fc(z_q)  # (batch_size, flatten_size)
+        x = x.view(x.size(0), self.reshape_channels, self.reshape_length)  # (batch_size, C, L)
+        x = self.conv_layers(x)  # (batch_size, 1, B')
+        x = x.squeeze(1)  # (batch_size, B')
+        
+        # Trim or pad to exact output dimension
+        if x.size(1) > self.output_dim:
+            x = x[:, :self.output_dim]
+        elif x.size(1) < self.output_dim:
+            padding = torch.zeros(x.size(0), self.output_dim - x.size(1), device=x.device)
+            x = torch.cat([x, padding], dim=1)
+        
+        return x
+
+
+class VQVAEModel(nn.Module):
+    """
+    Complete VQ-VAE model for LOB representation learning.
+    
+    Architecture:
+    - Encoder: LOB bins -> latent continuous space
+    - Vector Quantizer: Continuous -> discrete codebook vectors
+    - Decoder: Discrete codes -> reconstructed LOB bins
+    """
+    
+    def __init__(self, config: Dict):
+        """
+        Initialize VQ-VAE model.
+        
+        Args:
+            config: Hyperparameter configuration with keys:
+                - B: Number of LOB bins
+                - K: Codebook size
+                - D: Embedding dimension
+                - n_conv_layers: Number of conv layers (2 or 3)
+                - dropout: Dropout probability
+        """
+        super().__init__()
+        
+        self.config = config
+        
+        B = config['B']
+        K = config['K']
+        D = config['D']
+        n_conv_layers = config['n_conv_layers']
+        dropout = config['dropout']
+        
+        # Initialize components
+        self.encoder = Encoder(B, D, n_conv_layers, dropout)
+        self.vq = VectorQuantizer(K, D)
+        self.decoder = Decoder(D, B, n_conv_layers, self.encoder.flatten_size, dropout)
+    
+    def forward(self, x: torch.Tensor) -> Tuple[torch.Tensor, Dict]:
+        """
+        Forward pass through VQ-VAE.
+        
+        Args:
+            x: Input LOB vectors (batch_size, B)
+            
+        Returns:
+            x_recon: Reconstructed LOB vectors (batch_size, B)
+            loss_dict: Dictionary with individual loss components
+        """
+        # Encode
+        z_e = self.encoder(x)
+        
+        # Quantize
+        z_q, commitment_loss, codebook_loss, encoding_indices = self.vq(z_e)
+        
+        # Decode
+        x_recon = self.decoder(z_q)
+        
+        # Compute reconstruction loss
+        recon_loss = F.mse_loss(x_recon, x)
+        
+        # Compute codebook usage
+        codebook_usage = self.vq.get_codebook_usage(encoding_indices)
+        perplexity = self.vq.compute_perplexity(encoding_indices)
+        
+        loss_dict = {
+            'recon_loss': recon_loss,
+            'commitment_loss': commitment_loss,
+            'codebook_loss': codebook_loss,
+            'encoding_indices': encoding_indices,
+            'codebook_usage': codebook_usage,
+            'perplexity': perplexity
+        }
+        
+        return x_recon, loss_dict
+    
+    def encode(self, x: torch.Tensor) -> torch.Tensor:
+        """
+        Encode input to discrete latent codes (for production inference).
+        
+        Args:
+            x: Input LOB vectors (batch_size, B)
+            
+        Returns:
+            encoding_indices: Discrete codebook indices (batch_size,)
+        """
+        with torch.no_grad():
+            z_e = self.encoder(x)
+            _, _, _, encoding_indices = self.vq(z_e)
+        return encoding_indices

@@ -17,9 +17,9 @@ class CyclicPipelineManager:
     - lob_output: Working output (written by current stage)
     
     Workflow:
-    1. Initialize: raw_lob → lob_input
-    2. Stage: lob_input → process → lob_output
-    3. Swap: lob_output → lob_input (prepare for next stage)
+    1. Initialize: raw_lob -> lob_input
+    2. Stage: lob_input -> process -> lob_output
+    3. Swap: lob_output -> lob_input (prepare for next stage)
     4. Repeat steps 2-3 for each stage
     """
     
@@ -165,7 +165,7 @@ class CyclicPipelineManager:
                 raise ValueError(f"Target collection '{new_name}' already exists")
         
         count = self.get_collection_count(old_name)
-        logger(f"Renaming '{old_name}' → '{new_name}' ({count:,} docs)", "INFO")
+        logger(f"Renaming '{old_name}' -> '{new_name}' ({count:,} docs)", "INFO")
         
         self.db[old_name].rename(new_name, dropTarget=drop_target)
         logger(f"Collection renamed successfully", "INFO")
@@ -201,7 +201,7 @@ class CyclicPipelineManager:
         source_count = self.get_collection_count(source)
         source_size = self.get_collection_size_mb(source)
         
-        logger(f"Copying '{source}' → '{target}' ({source_count:,} docs, {source_size:.2f} MB)", "INFO")
+        logger(f"Copying '{source}' -> '{target}' ({source_count:,} docs, {source_size:.2f} MB)", "INFO")
         
         # Use aggregation $out for efficient copy
         self.db[source].aggregate([{"$out": target}])
@@ -278,9 +278,9 @@ class CyclicPipelineManager:
         
         for coll_name, coll_info in state["collections"].items():
             if coll_info["exists"]:
-                logger(f"✓ {coll_name:20s} | {coll_info['count']:>10,} docs | {coll_info['size_mb']:>8.2f} MB", "INFO")
+                logger(f"[OK] {coll_name:20s} | {coll_info['count']:>10,} docs | {coll_info['size_mb']:>8.2f} MB", "INFO")
             else:
-                logger(f"✗ {coll_name:20s} | Does not exist", "INFO")
+                logger(f"[FAIL] {coll_name:20s} | Does not exist", "INFO")
         
         logger("-" * 80, "INFO")
         logger(f"Current Stage: {state['current_stage']}", "INFO")
@@ -337,7 +337,7 @@ class CyclicPipelineManager:
                 raise ValueError(f"Output collection '{self.OUTPUT_COLLECTION}' already exists! Use force=True to override")
         
         # Copy archive to input
-        logger("Copying archive → input...", "INFO")
+        logger("Copying archive -> input...", "INFO")
         self.copy_collection(self.ARCHIVE_COLLECTION, self.INPUT_COLLECTION, drop_target=False)
         
         # Verify
@@ -355,7 +355,7 @@ class CyclicPipelineManager:
     
     def swap_working_collections(self) -> bool:
         """
-        Swap working collections: output → input.
+        Swap working collections: output -> input.
         
         This prepares the pipeline for the next stage by:
         1. Dropping current input (no longer needed)
@@ -390,7 +390,7 @@ class CyclicPipelineManager:
         self.drop_collection(self.INPUT_COLLECTION, safe=False)
         
         # Rename output to input
-        logger(f"Step 2: Renaming '{self.OUTPUT_COLLECTION}' → '{self.INPUT_COLLECTION}'", "INFO")
+        logger(f"Step 2: Renaming '{self.OUTPUT_COLLECTION}' -> '{self.INPUT_COLLECTION}'", "INFO")
         self.rename_collection(self.OUTPUT_COLLECTION, self.INPUT_COLLECTION, drop_target=False)
         
         # Verify
@@ -518,7 +518,7 @@ class CyclicPipelineManager:
                 f"Run swap or drop it first."
             )
         
-        logger(f"✓ Prerequisites met for Stage {stage_number}", "INFO")
+        logger(f"[OK] Prerequisites met for Stage {stage_number}", "INFO")
         logger(f"  Input: {input_count:,} documents ready for processing", "INFO")
         
         return True

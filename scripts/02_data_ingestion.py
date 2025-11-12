@@ -132,7 +132,7 @@ def ingest_raw_lob_data() -> None:
             total_records += record_count
             processed_files += 1
             
-            logger(f"✓ {file} -> {record_count:,} records uploaded to {RAW_LOB_COLL}", level="INFO")
+            logger(f"[OK] {file} -> {record_count:,} records uploaded to {RAW_LOB_COLL}", level="INFO")
         
         except Exception as e:
             logger(f"Failed to process {file}: {e}", level="ERROR")
@@ -150,7 +150,7 @@ if __name__ == "__main__":
     log_section("STAGE 1: Raw LOB Data Ingestion to MongoDB")
     logger(f"Source directory: {os.path.abspath(LOB_DATA)}", level="INFO")
     logger(f"Target collection: {DB_NAME}.{RAW_LOB_COLL}", level="INFO")
-    logger(f"Timestamp handling: Collection data (timezone-aware) → MongoDB (naive UTC)", level="INFO")
+    logger(f"Timestamp handling: Collection data (timezone-aware) -> MongoDB (naive UTC)", level="INFO")
     log_section("", char="-")
     
     # Stage 1: Ingest raw LOB data

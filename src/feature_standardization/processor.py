@@ -401,7 +401,7 @@ class EWMAHalfLifeProcessor:
                 logger(f'  {feat}: {count:,} nulls ({pct:.2f}% of {val_samples_seen:,} validation samples)',
                        "WARNING")
         else:
-            logger(f'Pass 2 - No nulls found in validation data ✓', "INFO")
+            logger(f'Pass 2 - No nulls found in validation data [OK]', "INFO")
         
         results = {}
         

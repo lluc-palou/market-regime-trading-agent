@@ -1,0 +1,169 @@
+"""
+Prior Production Training
+
+Trains final prior models for each split using best configuration.
+"""
+
+import json
+import torch
+import mlflow
+from pathlib import Path
+from datetime import datetime
+from typing import Dict
+
+from src.utils.logging import logger
+from src.vqvae_representation.data_loader import discover_splits, get_all_hours
+from .prior_trainer import PriorTrainer
+
+
+def run_prior_production_training(
+    spark,
+    db_name: str,
+    collection_prefix: str,
+    collection_suffix: str,
+    device,
+    codebook_size: int,
+    best_config: Dict,
+    mlflow_experiment_name: str,
+    production_dir: Path
+) -> Dict:
+    """
+    Train production prior models for all splits.
+    
+    Args:
+        spark: SparkSession
+        db_name: Database name
+        collection_prefix: Split collection prefix
+        collection_suffix: Split collection suffix
+        device: torch device
+        codebook_size: VQ-VAE codebook size
+        best_config: Best hyperparameter configuration
+        mlflow_experiment_name: MLflow experiment name
+        production_dir: Directory for production artifacts
+        
+    Returns:
+        Production training results
+    """
+    logger('=' * 100, "INFO")
+    logger('PRIOR PRODUCTION TRAINING', "INFO")
+    logger('=' * 100, "INFO")
+    
+    # Discover splits
+    split_ids = discover_splits(spark, db_name, collection_prefix, collection_suffix)
+    
+    if not split_ids:
+        raise ValueError(f"No splits found")
+    
+    logger(f'Found {len(split_ids)} splits: {split_ids}', "INFO")
+    logger(f'Best config: {best_config}', "INFO")
+    
+    # Create production directory
+    production_dir.mkdir(parents=True, exist_ok=True)
+    
+    all_split_results = []
+    
+    with mlflow.start_run(run_name=f"prior_production_{datetime.now().strftime('%Y%m%d_%H%M%S')}"):
+        # Log parameters
+        mlflow.log_param("db_name", db_name)
+        mlflow.log_param("num_splits", len(split_ids))
+        mlflow.log_param("codebook_size", codebook_size)
+        
+        for key, value in best_config.items():
+            mlflow.log_param(f"config_{key}", value)
+        
+        # Train each split
+        for split_id in split_ids:
+            split_collection = f"{collection_prefix}{split_id}{collection_suffix}"
+            
+            logger('', "INFO")
+            logger('=' * 100, "INFO")
+            logger(f'SPLIT {split_id}', "INFO")
+            logger('=' * 100, "INFO")
+            
+            # Get hours
+            all_hours = get_all_hours(spark, db_name, split_collection)
+            
+            if not all_hours:
+                logger(f'No hours in {split_collection}, skipping', "WARNING")
+                continue
+            
+            # Train production model
+            with mlflow.start_run(
+                run_name=f"split_{split_id}_production",
+                nested=True
+            ):
+                logger(f'Training production prior for split {split_id}...', "INFO")
+                
+                trainer = PriorTrainer(
+                    spark=spark,
+                    db_name=db_name,
+                    split_collection=split_collection,
+                    device=device,
+                    config=best_config,
+                    codebook_size=codebook_size
+                )
+                
+                result = trainer.train_split(all_hours)
+                
+                if result is None:
+                    logger(f'Training failed for split {split_id}', "WARNING")
+                    continue
+                
+                # Log to MLflow
+                mlflow.log_param("split_id", split_id)
+                mlflow.log_metric("best_val_loss", result['best_val_loss'])
+                mlflow.log_metric("best_epoch", result['best_epoch'])
+                mlflow.log_metric("epochs_trained", result['epochs_trained'])
+                
+                # Save model
+                model_path = production_dir / f"split_{split_id}_prior.pth"
+                torch.save({
+                    'model_state_dict': trainer.model.state_dict(),
+                    'config': best_config,
+                    'codebook_size': codebook_size,
+                    'split_id': split_id,
+                    'training_result': result
+                }, model_path)
+                
+                logger(f'Model saved to: {model_path}', "INFO")
+                mlflow.log_artifact(str(model_path))
+                
+                all_split_results.append({
+                    'split_id': split_id,
+                    'best_val_loss': result['best_val_loss'],
+                    'best_epoch': result['best_epoch'],
+                    'model_path': str(model_path)
+                })
+        
+        # Compute average
+        avg_val_loss = sum(r['best_val_loss'] for r in all_split_results) / len(all_split_results)
+        
+        mlflow.log_metric("avg_val_loss_across_splits", avg_val_loss)
+        
+        # Save summary
+        summary_path = production_dir / 'prior_production_summary.json'
+        with open(summary_path, 'w') as f:
+            json.dump({
+                'training_date': datetime.now().isoformat(),
+                'num_splits': len(split_ids),
+                'codebook_size': codebook_size,
+                'best_config': best_config,
+                'avg_val_loss': float(avg_val_loss),
+                'split_results': [
+                    {
+                        'split_id': r['split_id'],
+                        'best_val_loss': float(r['best_val_loss']),
+                        'best_epoch': r['best_epoch']
+                    }
+                    for r in all_split_results
+                ]
+            }, f, indent=2)
+        
+        mlflow.log_artifact(str(summary_path))
+        logger(f'Summary saved to: {summary_path}', "INFO")
+    
+    return {
+        'num_splits': len(split_ids),
+        'avg_val_loss': avg_val_loss,
+        'split_results': all_split_results
+    }

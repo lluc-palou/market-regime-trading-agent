@@ -221,7 +221,7 @@ class FeatureTransformProcessor:
             if len(features_with_nulls) > 5:
                 logger(f'  ... and {len(features_with_nulls) - 5} more features', "WARNING")
         else:
-            logger(f'Pass 1 - No nulls found in training data ✓', "INFO")
+            logger(f'Pass 1 - No nulls found in training data', "INFO")
         
         fitted_transforms = {}
         
@@ -374,7 +374,7 @@ class FeatureTransformProcessor:
             if len(features_with_nulls) > 5:
                 logger(f'  ... and {len(features_with_nulls) - 5} more features', "WARNING")
         else:
-            logger(f'Pass 2 - No nulls found in validation data ✓', "INFO")
+            logger(f'Pass 2 - No nulls found in validation data', "INFO")
         
         results = {}
         

@@ -3,25 +3,38 @@ import time
 from typing import Optional
 from datetime import datetime, timezone
 
+# Standard logging configuration
+STANDARD_SEPARATOR_LENGTH = 80
+STANDARD_SEPARATOR_CHAR = "="
+
 def logger(msg: str, level: str) -> None:
     """
     Logs a message with timestamp and level. This is the main logging function.
+    Uses ASCII characters only, no unicode/emojis.
     """
     ts = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
     print(f"[{ts}] [{level}] {msg}")
     sys.stdout.flush()
 
-def log_separator(char: str = "=", length: int = 100) -> None:
+def log_separator(char: str = None, length: int = None) -> None:
     """
-    Logs a visual separator line. Useful for separating sections in log output.
+    Logs a visual separator line. Uses standard configuration if not specified.
     """
+    if char is None:
+        char = STANDARD_SEPARATOR_CHAR
+    if length is None:
+        length = STANDARD_SEPARATOR_LENGTH
     logger(char * length, "INFO")
 
-def log_section(title: str, char: str = "=", length: int = 100) -> None:
+def log_section(title: str, char: str = None, length: int = None) -> None:
     """
-    Logs a section header with separators above and below. Creates a visually 
-    distinct section in log output.
+    Logs a section header with separators above and below. 
+    Uses standard configuration (100 chars, '=') if not specified.
     """
+    if char is None:
+        char = STANDARD_SEPARATOR_CHAR
+    if length is None:
+        length = STANDARD_SEPARATOR_LENGTH
     log_separator(char, length)
     logger(title, "INFO")
     log_separator(char, length)

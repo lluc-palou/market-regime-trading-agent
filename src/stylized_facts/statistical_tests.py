@@ -146,7 +146,7 @@ class FeaturePreprocessor:
         
         # Log exclusions
         if excluded_features:
-            logger(f"  ⚠️  Excluded {len(excluded_features)} features with insufficient samples:", "WARNING")
+            logger(f"Excluded {len(excluded_features)} features with insufficient samples:", "WARNING")
             for feat, count, reason in excluded_features[:5]:  # Show first 5
                 logger(f"      - {feat}: {count} samples ({reason})", "WARNING")
             if len(excluded_features) > 5:
@@ -240,9 +240,9 @@ class FeaturePreprocessor:
         Apply feature-specific stride based on lookback period.
         
         CORRECTED LOGIC:
-        - past_logret_1: lookback=1, stride=1 → all samples independent
-        - past_logret_10: lookback=10, stride=10 → no overlap
-        - past_logret_240: lookback=240, stride=240 → no overlap
+        - past_logret_1: lookback=1, stride=1 -> all samples independent
+        - past_logret_10: lookback=10, stride=10 -> no overlap
+        - past_logret_240: lookback=240, stride=240 -> no overlap
         
         Returns one DataFrame per feature with appropriate stride.
         
@@ -266,7 +266,7 @@ class FeaturePreprocessor:
                 lookback = int(lookback_match.group(1))
             else:
                 # Default to forecast_horizon if can't extract
-                logger(f"    ⚠️  Cannot extract lookback from '{feature}', using stride={self.forecast_horizon}", "WARNING")
+                logger(f"Cannot extract lookback from '{feature}', using stride={self.forecast_horizon}", "WARNING")
                 lookback = self.forecast_horizon
             
             # Stride = lookback to ensure no overlap
@@ -283,15 +283,15 @@ class FeaturePreprocessor:
                 samples_before = len(df)
                 samples_after = len(feature_df)
                 
-                logger(f"    {feature}: stride={stride}, {samples_before} → {samples_after} samples", "DEBUG")
+                logger(f"    {feature}: stride={stride}, {samples_before} to {samples_after} samples", "DEBUG")
                 
                 # Warn if still too few samples
                 if samples_after < self.MIN_SAMPLES_FOR_TESTING:
-                    logger(f"      ⚠️  Only {samples_after} samples after stride, less than {self.MIN_SAMPLES_FOR_TESTING}", "WARNING")
+                    logger(f"Only {samples_after} samples after stride, less than {self.MIN_SAMPLES_FOR_TESTING}", "WARNING")
                 
                 feature_dfs[feature] = feature_df
             else:
-                logger(f"    ⚠️  Invalid stride {stride} for {feature}", "WARNING")
+                logger(f"Invalid stride {stride} for {feature}", "WARNING")
         
         return feature_dfs
     
@@ -304,8 +304,8 @@ class FeaturePreprocessor:
         
         Kept for backward compatibility but logs a warning.
         """
-        logger("⚠️  WARNING: apply_stride() applies same stride to all features", "WARNING")
-        logger("   Use apply_stride_per_feature() for correct per-feature stride", "WARNING")
+        logger("WARNING: apply_stride() applies same stride to all features", "WARNING")
+        logger("Use apply_stride_per_feature() for correct per-feature stride", "WARNING")
         
         # Apply uniform stride (original behavior)
         strided_df = df.iloc[::self.forecast_horizon].copy()

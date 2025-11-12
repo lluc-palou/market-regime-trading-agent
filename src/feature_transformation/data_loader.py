@@ -95,6 +95,8 @@ def identify_feature_names(df: DataFrame) -> List[str]:
     """
     Get feature names from the feature_names array in the first document.
     
+    FIXED: Added better error handling and column existence check.
+    
     Args:
         df: DataFrame from split collection
         
@@ -104,6 +106,22 @@ def identify_feature_names(df: DataFrame) -> List[str]:
     Raises:
         ValueError: If no data found in collection
     """
+    # Check if DataFrame is empty
+    if df.count() == 0:
+        raise ValueError("No data found in collection - DataFrame is empty")
+    
+    # Check if feature_names column exists
+    if "feature_names" not in df.columns:
+        available_cols = df.columns
+        raise ValueError(
+            f"feature_names column not found in DataFrame.\n"
+            f"Available columns: {available_cols}\n"
+            f"This means either:\n"
+            f"1. The split collection doesn't have feature_names field\n"
+            f"2. Spark-MongoDB connector didn't load it (schema inference issue)\n"
+            f"3. Use identify_feature_names_from_collection() instead"
+        )
+    
     first_row = df.select("feature_names").first()
     
     if first_row is None:
@@ -114,3 +132,120 @@ def identify_feature_names(df: DataFrame) -> List[str]:
     logger(f'Identified {len(feature_names)} features from feature_names array', "INFO")
     
     return feature_names
+
+
+def identify_feature_names_from_collection(
+    spark: SparkSession, 
+    db_name: str, 
+    collection: str
+) -> List[str]:
+    """
+    Load feature names directly from collection using aggregation pipeline.
+    
+    This is MORE RELIABLE than identify_feature_names() because it uses
+    MongoDB aggregation to explicitly project the feature_names field,
+    avoiding Spark schema inference issues with array fields.
+    
+    USE THIS FUNCTION if identify_feature_names() fails with column not found error.
+    
+    Args:
+        spark: SparkSession instance
+        db_name: Database name  
+        collection: Collection name
+        
+    Returns:
+        List of feature names
+    """
+    logger(f'Loading feature_names from {collection} using aggregation...', "INFO")
+    
+    # Use aggregation pipeline to explicitly project feature_names
+    pipeline = [
+        {"$limit": 1},
+        {"$project": {
+            "feature_names": 1,
+            "_id": 0
+        }}
+    ]
+    
+    df = (
+        spark.read.format("mongodb")
+        .option("database", db_name)
+        .option("collection", collection)
+        .option("aggregation.pipeline", str(pipeline).replace("'", '"'))
+        .load()
+    )
+    
+    if df.count() == 0:
+        raise ValueError(f"Collection {collection} is empty")
+    
+    first_row = df.first()
+    
+    if first_row is None:
+        raise ValueError(f"Could not retrieve first document from {collection}")
+    
+    row_dict = first_row.asDict()
+    
+    if 'feature_names' not in row_dict:
+        raise ValueError(
+            f"feature_names field not found in collection {collection}.\n"
+            f"Available fields: {list(row_dict.keys())}\n"
+            f"Make sure Stage 6 (materialization) completed successfully."
+        )
+    
+    feature_names = row_dict['feature_names']
+    
+    if feature_names is None or len(feature_names) == 0:
+        raise ValueError(f"feature_names is empty in collection {collection}")
+    
+    logger(f'Identified {len(feature_names)} features', "INFO")
+    
+    return list(feature_names)
+
+
+def filter_transformable_features(feature_names: List[str]) -> List[str]:
+    """
+    Filter feature names to only include those that should be transformed.
+    
+    Excludes features that:
+    - Are targets (forward returns)
+    - Need to keep original scale (volatility, variance_proxy)
+    - Will be dropped before materialization (mid_price, log_return, spread)
+    
+    Args:
+        feature_names: List of all feature names
+        
+    Returns:
+        List of feature names to transform
+    """
+    EXCLUDE_PATTERNS = [
+        'fwd_logret_',      # Forward returns (targets)
+    ]
+    
+    EXCLUDE_EXACT = [
+        'variance_proxy',   # Keep original scale
+        'volatility',       # Keep original scale
+        'mid_price',        # Will be dropped - skip processing
+        'log_return',       # Will be dropped - skip processing
+        'spread',           # Will be dropped - skip processing
+    ]
+    
+    transformable = []
+    
+    for feat_name in feature_names:
+        # Skip exact matches
+        if feat_name in EXCLUDE_EXACT:
+            continue
+        
+        # Skip pattern matches
+        if any(feat_name.startswith(pattern) for pattern in EXCLUDE_PATTERNS):
+            continue
+        
+        transformable.append(feat_name)
+    
+    excluded_count = len(feature_names) - len(transformable)
+    logger(f'Filtered to {len(transformable)} transformable features (excluded {excluded_count})', "INFO")
+    
+    if excluded_count > 0:
+        logger(f'Excluded features: targets, volatility features, intermediate features', "INFO")
+    
+    return transformable

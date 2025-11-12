@@ -172,9 +172,13 @@ def main():
         logger(f'Next stage will read from: {INPUT_COLLECTION_PREFIX}{{0-{MAX_SPLITS-1}}}{INPUT_COLLECTION_SUFFIX}', "INFO")
         
     finally:
-        spark.stop()
-        logger('Spark session stopped', "INFO")
+        # Only stop Spark if not orchestrated
+        if not is_orchestrated:
+            spark.stop()
+            logger('Spark session stopped', "INFO")
 
 
 if __name__ == "__main__":
+    # Check if running from orchestrator
+    is_orchestrated = os.environ.get('PIPELINE_ORCHESTRATED', 'false') == 'true'
     main()

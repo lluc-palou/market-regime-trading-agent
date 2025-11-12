@@ -92,9 +92,9 @@ class StageRunner:
             
             # Log results
             if success:
-                logger(f"✓ Stage completed successfully in {duration:.2f}s", "INFO")
+                logger(f"[OK] Stage completed successfully in {duration:.2f}s", "INFO")
             else:
-                logger(f"✗ Stage failed with return code {result.returncode}", "ERROR")
+                logger(f"[FAIL] Stage failed with return code {result.returncode}", "ERROR")
                 logger(f"Duration: {duration:.2f}s", "ERROR")
             
             # Log stdout if present
@@ -127,7 +127,7 @@ class StageRunner:
             
         except Exception as e:
             duration = time.time() - start_time
-            logger(f"✗ Stage execution failed with exception: {str(e)}", "ERROR")
+            logger(f"[FAIL] Stage execution failed with exception: {str(e)}", "ERROR")
             
             execution_record = {
                 "script_name": script_name,
@@ -162,7 +162,7 @@ class StageRunner:
         summary.append("=" * 80)
         
         for i, record in enumerate(self.execution_history, 1):
-            status = "✓ SUCCESS" if record["success"] else "✗ FAILED"
+            status = "[OK] SUCCESS" if record["success"] else "[FAIL] FAILED"
             summary.append(f"{i}. {record['script_name']}")
             summary.append(f"   Status: {status}")
             summary.append(f"   Duration: {record['duration']:.2f}s")

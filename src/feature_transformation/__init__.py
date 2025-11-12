@@ -14,7 +14,8 @@ from .transforms import (
 from .data_loader import (
     get_all_hours,
     load_hour_batch,
-    identify_feature_names
+    identify_feature_names,
+    identify_feature_names_from_collection
 )
 from .processor import FeatureTransformProcessor
 from .aggregator import aggregate_across_splits, select_final_transforms

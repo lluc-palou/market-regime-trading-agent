@@ -60,8 +60,8 @@ CONFIG = {
     'db_name': "raw",
 
     # Pipeline control
-    'start_from': 14,       # Start from stage 2-14
-    'stop_at': 14,         # Stop at stage 2-14
+    'start_from': 3,       # Start from stage 2-14
+    'stop_at': 3,         # Stop at stage 2-14
 
     # Stylized facts testing
     'enable_stylized_facts': True,  # Enable stylized facts analysis

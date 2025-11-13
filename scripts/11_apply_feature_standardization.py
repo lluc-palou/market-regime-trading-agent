@@ -41,7 +41,7 @@ OUTPUT_COLLECTION_SUFFIX = "_output"  # Write for next stage (cyclic pattern)
 # Path to half-life selection results (relative to repository root)
 HALFLIFE_RESULTS_PATH = Path(REPO_ROOT) / "artifacts" / "ewma_halflife_selection" / "aggregation" / "final_halflifes.json"
 
-MAX_SPLITS = 5
+MAX_SPLITS = 1
 CLIP_STD = 3.0
 
 MONGO_URI = "mongodb://127.0.0.1:27017/"

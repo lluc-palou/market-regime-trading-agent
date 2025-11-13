@@ -34,8 +34,9 @@ LOB_DATA = os.path.join(REPO_ROOT, "lob_data")
 MONGO_URI = "mongodb://localhost:27017/"
 DB_NAME = "raw"
 
-# Collections
-RAW_LOB_COLL = "raw_lob"
+# Collections - Using cyclic naming pattern (output → input)
+OUTPUT_COLLECTION = "output"  # Temporary output during processing
+INPUT_COLLECTION = "input"    # Final collection name after rename
 INGESTION_LOG_COLL = "ingestion_log"
 
 # Create Spark session with UTC timezone
@@ -77,7 +78,8 @@ def parse_lob(df: DataFrame) -> DataFrame:
 
 def ingest_raw_lob_data() -> None:
     """
-    Ingests raw LOB Parquet files into MongoDB raw collection.
+    Ingests raw LOB Parquet files into MongoDB output collection.
+    At the end, output collection is renamed to input for next stage.
     """
     if not os.path.isdir(LOB_DATA):
         logger(f"LOB data folder not found: {LOB_DATA}. No data to ingest.", level="WARN")
@@ -116,12 +118,12 @@ def ingest_raw_lob_data() -> None:
                 update_log_collection(spark, DB_NAME, INGESTION_LOG_COLL, file, "Raw LOB", 0)
                 continue
 
-            # Upload to MongoDB RAW collection
+            # Upload to MongoDB output collection
             # Timestamps will be stored as UTC (Spark session configured for UTC)
             (
                 df.write.format("mongodb")
                 .option("database", DB_NAME)
-                .option("collection", RAW_LOB_COLL)
+                .option("collection", OUTPUT_COLLECTION)
                 .option("replaceDocument", "false")
                 .mode("append")
                 .save()
@@ -131,32 +133,71 @@ def ingest_raw_lob_data() -> None:
             update_log_collection(spark, DB_NAME, INGESTION_LOG_COLL, file, "Raw LOB", record_count)
             total_records += record_count
             processed_files += 1
-            
-            logger(f"[OK] {file} -> {record_count:,} records uploaded to {RAW_LOB_COLL}", level="INFO")
+
+            logger(f"[OK] {file} -> {record_count:,} records uploaded to {OUTPUT_COLLECTION}", level="INFO")
         
         except Exception as e:
             logger(f"Failed to process {file}: {e}", level="ERROR")
             # Continue with next file instead of stopping entire process
 
-    logger(f"STAGE 1 INGESTION SUMMARY: {processed_files} files processed, {total_records:,} total records in {RAW_LOB_COLL}", level="INFO")
+    logger(f"STAGE 2 INGESTION SUMMARY: {processed_files} files processed, {total_records:,} total records in {OUTPUT_COLLECTION}", level="INFO")
 
 # =================================================================================================
 # Main Entry Point
 # =================================================================================================
 
 if __name__ == "__main__":
+    # Check if running from orchestrator
+    is_orchestrated = os.environ.get('PIPELINE_ORCHESTRATED', 'false') == 'true'
+
     start_time = time.time()
-    
-    log_section("STAGE 1: Raw LOB Data Ingestion to MongoDB")
+
+    log_section("STAGE 2: Raw LOB Data Ingestion to MongoDB")
     logger(f"Source directory: {os.path.abspath(LOB_DATA)}", level="INFO")
-    logger(f"Target collection: {DB_NAME}.{RAW_LOB_COLL}", level="INFO")
+    logger(f"Target collection: {DB_NAME}.{OUTPUT_COLLECTION} (temp)", level="INFO")
+    logger(f"Final collection: {DB_NAME}.{INPUT_COLLECTION} (after rename)", level="INFO")
     logger(f"Timestamp handling: Collection data (timezone-aware) -> MongoDB (naive UTC)", level="INFO")
     log_section("", char="-")
-    
-    # Stage 1: Ingest raw LOB data
-    ingest_raw_lob_data()
-    
-    end_time = time.time()
-    logger(f"STAGE 1 ingestion completed in {end_time - start_time:.2f} seconds.", level="INFO")
-    
-    spark.stop()
+
+    try:
+        # Stage 2: Ingest raw LOB data
+        ingest_raw_lob_data()
+
+        # Collection renaming (output -> input) will be handled by pipeline orchestrator
+        # if swap_after=True is set in run_pipeline.py
+
+        end_time = time.time()
+        logger(f"STAGE 2 ingestion completed in {end_time - start_time:.2f} seconds.", level="INFO")
+        logger(f"Output collection: {OUTPUT_COLLECTION}", level="INFO")
+
+        if not is_orchestrated:
+            # If running standalone, do the rename manually
+            logger("", level="INFO")
+            logger("Running standalone - performing collection rename...", level="INFO")
+
+            from pymongo import MongoClient
+            client = MongoClient(MONGO_URI)
+            db = client[DB_NAME]
+
+            # Drop old input collection if exists
+            if INPUT_COLLECTION in db.list_collection_names():
+                db[INPUT_COLLECTION].drop()
+                logger(f"  Dropped old {INPUT_COLLECTION}", level="INFO")
+
+            # Rename output -> input
+            if OUTPUT_COLLECTION in db.list_collection_names():
+                db[OUTPUT_COLLECTION].rename(INPUT_COLLECTION)
+                logger(f"  Renamed {OUTPUT_COLLECTION} -> {INPUT_COLLECTION}", level="INFO")
+            else:
+                logger(f"  Warning: {OUTPUT_COLLECTION} collection not found (no data ingested?)", level="WARN")
+
+            client.close()
+            logger(f"Next stage will read from: {INPUT_COLLECTION}", level="INFO")
+        else:
+            logger("Running in orchestrated mode - collection swap will be handled by orchestrator", level="INFO")
+
+    finally:
+        # Only stop Spark if not orchestrated
+        if not is_orchestrated:
+            spark.stop()
+            logger('Spark session stopped', level="INFO")

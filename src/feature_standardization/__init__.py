@@ -23,6 +23,7 @@ from .data_loader import (
     get_all_hours,
     load_hour_batch,
     identify_feature_names,
+    identify_feature_names_from_collection,
     filter_standardizable_features
 )
 
@@ -53,6 +54,7 @@ __all__ = [
     'get_all_hours',
     'load_hour_batch',
     'identify_feature_names',
+    'identify_feature_names_from_collection',
     'filter_standardizable_features',
     
     # Aggregation

@@ -304,44 +304,29 @@ class ResultsAggregator:
         return "\n".join(lines)
     
     def save_summary(
-        self, 
+        self,
         combined_df: pd.DataFrame,
         summary_stats: Dict,
         violations: Dict
     ):
         """
-        Save all summary outputs.
-        
+        Save summary outputs (minimal version - enhanced versions preferred).
+
         Args:
             combined_df: Combined results DataFrame
-            summary_stats: Summary statistics dict
-            violations: Violations dict
+            summary_stats: Summary statistics dict (not saved - use enhanced version)
+            violations: Violations dict (not saved - use enhanced version)
         """
         logger("Saving summary outputs...", "INFO")
-        
-        # Save combined results
+
+        # Save combined results (still useful for raw data)
         combined_path = self.output_dir / "summary_all_splits.csv"
         combined_df.to_csv(combined_path, index=False)
         logger(f"  Saved combined results: {combined_path}", "INFO")
-        
-        # Save summary statistics JSON
-        stats_path = self.output_dir / "summary_statistics.json"
-        with open(stats_path, 'w', encoding='utf-8') as f:
-            json.dump(summary_stats, f, indent=2)
-        logger(f"  Saved summary statistics: {stats_path}", "INFO")
-        
-        # Save violations JSON
-        violations_path = self.output_dir / "violations.json"
-        with open(violations_path, 'w', encoding='utf-8') as f:
-            json.dump(violations, f, indent=2)
-        logger(f"  Saved violations: {violations_path}", "INFO")
-        
-        # Save text report
-        report = self.create_summary_report(combined_df, summary_stats, violations)
-        report_path = self.output_dir / "summary_report.txt"
-        with open(report_path, 'w', encoding='utf-8') as f:
-            f.write(report)
-        logger(f"  Saved text report: {report_path}", "INFO")
-        
-        # Also print report
-        print("\n" + report)
+
+        # NOTE: Removed redundant outputs (use enhanced versions instead):
+        # - summary_statistics.json → use enhanced_summary_statistics.json
+        # - violations.json → use enhanced_violations.json
+        # - summary_report.txt → use enhanced_summary_by_feature.csv
+
+        logger(f"  (Standard summary files removed - use enhanced versions instead)", "INFO")

@@ -44,8 +44,7 @@ if sys.platform == 'win32':
 # =================================================================================================
 
 from pyspark.sql import SparkSession
-from pyspark.sql.functions import col, udf, array, lit
-from pyspark.sql.types import ArrayType, DoubleType
+from pyspark.sql.functions import col, array, lit
 
 from src.utils.logging import logger, log_section
 from src.utils.spark import create_spark_session
@@ -99,38 +98,49 @@ def filter_projected_features(feature_names):
 def apply_feature_projection(df, projected_features):
     """
     Apply feature projection to DataFrame by filtering feature arrays.
-    
+    Uses native PySpark array indexing (much faster than UDFs).
+
     Args:
         df: PySpark DataFrame with feature_names and features columns
         projected_features: List of features to keep (18 features)
-        
+
     Returns:
         DataFrame with filtered features
     """
     logger('Applying feature projection to DataFrame...', "INFO")
-    
-    # Create UDF to filter features based on projected list
-    def filter_features_udf(names, values):
-        if names is None or values is None:
-            return None
-        
-        # Create mapping
-        feature_map = dict(zip(names, values))
-        
-        # Project only selected features in order
-        return [feature_map.get(name, 0.0) for name in projected_features]
-    
-    filter_udf_func = udf(filter_features_udf, ArrayType(DoubleType()))
-    
-    # Apply filtering
-    df = df.withColumn('features', filter_udf_func(col('feature_names'), col('features')))
-    
+
+    # Get feature names from first row to determine indices
+    first_row = df.select('feature_names').first()
+    all_feature_names = first_row['feature_names']
+
+    # Build index mapping: projected feature -> array index
+    feature_indices = []
+    for feat in projected_features:
+        try:
+            idx = all_feature_names.index(feat)
+            feature_indices.append(idx)
+        except ValueError:
+            logger(f'Warning: Feature {feat} not found in data, using 0.0', "WARNING")
+            feature_indices.append(None)  # Will handle missing features
+
+    # Create projected array using native PySpark array indexing
+    # Build array by indexing into the features array
+    projected_values = []
+    for idx in feature_indices:
+        if idx is not None:
+            projected_values.append(col('features')[idx])
+        else:
+            projected_values.append(lit(0.0))
+
+    # Replace features column with projected array
+    df = df.withColumn('features', array(*projected_values))
+
     # Update feature_names to projected list
     projected_array = array([lit(name) for name in projected_features])
     df = df.withColumn('feature_names', projected_array)
-    
+
     logger(f'Projection applied: {len(projected_features)} features in final arrays', "INFO")
-    
+
     return df
 
 
@@ -150,7 +160,7 @@ def main():
     
     # Split materialization configuration
     CONFIG = {
-        "max_splits": 3,  # Materialize only first N splits (None for all)
+        "max_splits": 1,  # Materialize only first N splits (None for all)
         "create_test_collection": True,  # Create separate test_data collection
     }
     

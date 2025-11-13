@@ -50,7 +50,7 @@ JAR_FILES_PATH = "file:///C:/Users/llucp/spark_jars/"
 DRIVER_MEMORY = "4g"
 
 # Temporary collection suffix for safe overwrite
-TEMP_SUFFIX = "_temp_filtered"
+TEMP_SUFFIX = "_output"
 
 # =================================================================================================
 # Utility Functions

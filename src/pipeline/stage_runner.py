@@ -83,6 +83,8 @@ class StageRunner:
                 cmd,
                 capture_output=True,
                 text=True,
+                encoding='utf-8',  # Force UTF-8 encoding on Windows
+                errors='replace',  # Replace problematic bytes instead of crashing
                 check=False,  # Don't raise exception on non-zero return
                 env=env
             )

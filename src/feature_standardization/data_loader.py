@@ -127,6 +127,75 @@ def identify_feature_names(df: DataFrame) -> List[str]:
     return feature_names
 
 
+def identify_feature_names_from_collection(
+    spark: SparkSession,
+    db_name: str,
+    collection: str
+) -> List[str]:
+    """
+    Load feature names directly from collection using aggregation pipeline.
+
+    This is MORE RELIABLE than identify_feature_names() because it uses
+    MongoDB aggregation to explicitly project the feature_names field,
+    avoiding Spark schema inference issues with array fields.
+
+    USE THIS FUNCTION if identify_feature_names() fails with collection not found
+    or feature_names field not found errors.
+
+    Args:
+        spark: SparkSession instance
+        db_name: Database name
+        collection: Collection name
+
+    Returns:
+        List of feature names
+    """
+    logger(f'Loading feature_names from {collection} using aggregation...', "INFO")
+
+    # Use aggregation pipeline to explicitly project feature_names
+    pipeline = [
+        {"$limit": 1},
+        {"$project": {
+            "feature_names": 1,
+            "_id": 0
+        }}
+    ]
+
+    df = (
+        spark.read.format("mongodb")
+        .option("database", db_name)
+        .option("collection", collection)
+        .option("aggregation.pipeline", str(pipeline).replace("'", '"'))
+        .load()
+    )
+
+    if df.count() == 0:
+        raise ValueError(f"Collection {collection} is empty or does not exist")
+
+    first_row = df.first()
+
+    if first_row is None:
+        raise ValueError(f"Could not retrieve first document from {collection}")
+
+    row_dict = first_row.asDict()
+
+    if 'feature_names' not in row_dict:
+        raise ValueError(
+            f"feature_names field not found in collection {collection}.\n"
+            f"Available fields: {list(row_dict.keys())}\n"
+            f"Make sure Stage 8 (transformation application) completed successfully."
+        )
+
+    feature_names = row_dict['feature_names']
+
+    if feature_names is None or len(feature_names) == 0:
+        raise ValueError(f"feature_names is empty in collection {collection}")
+
+    logger(f'Identified {len(feature_names)} features', "INFO")
+
+    return list(feature_names)
+
+
 def filter_standardizable_features(feature_names: List[str]) -> List[str]:
     """
     Filter feature names to only include those that should be standardized.

@@ -58,13 +58,11 @@ CONFIG = {
     # MongoDB settings
     'mongo_uri': "mongodb://127.0.0.1:27017/",
     'db_name': "raw",
-    
+
     # Pipeline control
-    'reset': False,        # Reset pipeline to archive state before running
-    'start_from': 8,       # Start from stage 3-13
-    'stop_at': 8,         # Stop at stage 3-13
-    'skip_init': True,     # Skip initialization check (only if you know pipeline is ready)
-    
+    'start_from': 14,       # Start from stage 2-14
+    'stop_at': 14,         # Stop at stage 2-14
+
     # Stylized facts testing
     'enable_stylized_facts': True,  # Enable stylized facts analysis
 }
@@ -74,6 +72,13 @@ CONFIG = {
 # =================================================================================================
 
 STAGES = {
+    2: {
+        "name": "Data Ingestion",
+        "script": "02_data_ingestion.py",
+        "swap_after": True,
+        "description": "Ingest raw LOB data from parquet files to output collection",
+        "stage_type": "pipeline"
+    },
     3: {
         "name": "Data Splitting",
         "script": "03_data_splitting.py",
@@ -220,8 +225,10 @@ def run_stage_with_swap(pipeline_mgr: CyclicPipelineManager,
         deps = stage_info["depends_on"]
         logger(f"Dependencies: {deps}", "DEBUG")
     
-    # Validate prerequisites (skip for stages 6+ as they work with split collections)
-    if stage_num <= 5:
+    # Validate prerequisites (skip for stage 2 and stages 6+ as they work differently)
+    # Stage 2: reads from files, not collections
+    # Stages 6+: work with split collections
+    if 3 <= stage_num <= 5:
         try:
             pipeline_mgr.validate_can_run_stage(stage_num)
         except ValueError as e:
@@ -253,12 +260,34 @@ def run_stage_with_swap(pipeline_mgr: CyclicPipelineManager,
         return False
     
     logger(f"Stage {stage_num} completed successfully in {result['duration']:.2f}s", "INFO")
-    
-    # Swap if needed (only for stages 3-5 with cyclic lob_input/lob_output pattern)
+
+    # Swap if needed (for stages with cyclic input/output pattern)
     if stage_info["swap_after"]:
         log_section(f"Swapping Collections After Stage {stage_num}")
         try:
-            pipeline_mgr.swap_working_collections()
+            # Stage 2 is special: it's the first stage, so input doesn't exist yet
+            # Just rename output -> input (no drop needed)
+            if stage_num == 2:
+                from pymongo import MongoClient
+                client = MongoClient(CONFIG['mongo_uri'])
+                db = client[CONFIG['db_name']]
+
+                # Drop old input if it exists (cleanup from previous runs)
+                if 'input' in db.list_collection_names():
+                    db['input'].drop()
+                    logger("Dropped existing 'input' collection", "INFO")
+
+                # Rename output -> input
+                if 'output' in db.list_collection_names():
+                    db['output'].rename('input')
+                    logger("Renamed 'output' -> 'input'", "INFO")
+                else:
+                    raise ValueError("Output collection 'output' does not exist!")
+
+                client.close()
+            else:
+                # Stages 3-5: normal swap (drop input, rename output -> input)
+                pipeline_mgr.swap_working_collections()
         except Exception as e:
             logger(f"Swap failed: {str(e)}", "ERROR")
             return False
@@ -280,8 +309,8 @@ def main():
         logger("Error: start_from must be <= stop_at", "ERROR")
         return 1
     
-    if not (3 <= CONFIG['start_from'] <= 14 and 3 <= CONFIG['stop_at'] <= 14):
-        logger("Error: stages must be between 3 and 14", "ERROR")
+    if not (2 <= CONFIG['start_from'] <= 14 and 2 <= CONFIG['stop_at'] <= 14):
+        logger("Error: stages must be between 2 and 14", "ERROR")
         return 1
     
     # Check if requested stages exist
@@ -296,8 +325,6 @@ def main():
     logger(f"Database: {CONFIG['db_name']}", "INFO")
     logger(f"Stage range: {CONFIG['start_from']} to {CONFIG['stop_at']}", "INFO")
     logger(f"Stages to run: {stages_to_run}", "INFO")
-    logger(f"Reset mode: {CONFIG['reset']}", "INFO")
-    logger(f"Skip init: {CONFIG['skip_init']}", "INFO")
     logger(f"Stylized facts enabled: {CONFIG['enable_stylized_facts']}", "INFO")
     log_section("", char="=")
     
@@ -308,48 +335,18 @@ def main():
             db_name=CONFIG['db_name']
         )
         stage_runner = StageRunner(scripts_dir=SCRIPT_DIR)
-        
-        # Show initial state (only for stages 3-5)
-        if CONFIG['start_from'] <= 5:
-            log_section("Initial Pipeline State")
-            pipeline_mgr.print_pipeline_state()
-        
-        # Reset if requested
-        if CONFIG['reset'] and CONFIG['start_from'] <= 5:
-            log_section("Resetting Pipeline")
-            logger("Resetting to archive state...", "INFO")
-            pipeline_mgr.reset_to_archive(force=True)
-        
-        # Initialize if needed
-        if not CONFIG['skip_init'] and not CONFIG['reset'] and CONFIG['start_from'] <= 5:
-            log_section("Checking Initialization")
-            state = pipeline_mgr.get_pipeline_state()
-            
-            if not state["collections"]["lob_input"]["exists"]:
-                logger("Pipeline not initialized, initializing now...", "INFO")
-                pipeline_mgr.initialize_pipeline(force=False)
-            elif state["collections"]["lob_input"]["count"] == 0:
-                logger("lob_input is empty, re-initializing...", "WARNING")
-                pipeline_mgr.initialize_pipeline(force=True)
-            else:
-                logger("Pipeline already initialized", "INFO")
-        
+
         # Run stages
         logger(f"Running {len(stages_to_run)} stages: {stages_to_run}", "INFO")
         
         for stage_num in stages_to_run:
             success = run_stage_with_swap(pipeline_mgr, stage_runner, stage_num)
-            
+
             if not success:
                 logger(f"Pipeline stopped at Stage {stage_num} due to failure", "ERROR")
                 stage_runner.print_execution_summary()
                 return 1
-        
-        # Show final state (only for stages 3-5)
-        if CONFIG['stop_at'] <= 5:
-            log_section("Final Pipeline State")
-            pipeline_mgr.print_pipeline_state()
-        
+
         # Show execution summary
         stage_runner.print_execution_summary()
         

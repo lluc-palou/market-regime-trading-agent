@@ -56,17 +56,23 @@ class FeatureTransformProcessor:
         self.input_collection_suffix = input_collection_suffix
         self.train_sample_rate = train_sample_rate
     
-    def process_split(self, split_id: int, feature_names: List[str]) -> Dict:
+    def process_split(self, split_id: int, feature_names: List[str],
+                     all_feature_names: List[str] = None) -> Dict:
         """
         Process a single split with true two-pass approach.
-        
+
         Args:
             split_id: Split ID to process
-            feature_names: List of feature names
-            
+            feature_names: List of feature names to transform (subset)
+            all_feature_names: Full list of feature names from DB (for array validation)
+                              If None, assumes feature_names is the full list
+
         Returns:
             Dictionary with results per feature
         """
+        # Use all_feature_names for validation, feature_names for processing
+        if all_feature_names is None:
+            all_feature_names = feature_names
         logger(f'=' * 80, "INFO")
         logger(f'PROCESSING SPLIT {split_id}', "INFO")
         logger(f'=' * 80, "INFO")
@@ -84,33 +90,36 @@ class FeatureTransformProcessor:
         # PASS 1: Fit transformations on training data
         logger(f'Pass 1: Fitting transformations on training data...', "INFO")
         fitted_transforms = self._pass1_fit_transforms(
-            split_collection, all_hours, feature_names
+            split_collection, all_hours, feature_names, all_feature_names
         )
-        
+
         # PASS 2: Evaluate transformations on validation data
         logger(f'Pass 2: Evaluating transformations on validation data...', "INFO")
         results = self._pass2_evaluate_transforms(
-            split_collection, all_hours, feature_names, fitted_transforms
+            split_collection, all_hours, feature_names, fitted_transforms, all_feature_names
         )
         
         return results
     
     def _pass1_fit_transforms(self, split_collection: str, all_hours: List,
-                             feature_names: List[str]) -> Dict:
+                             feature_names: List[str], all_feature_names: List[str]) -> Dict:
         """
         Pass 1: Fit transformations by accumulating training data per hour.
-        
+
         Strategy: For each hour, accumulate training samples, then aggregate
         across hours to fit final transformations. Memory efficient.
-        
+
         Args:
             split_collection: Split collection name
             all_hours: List of hour datetimes
-            feature_names: List of feature names
-            
+            feature_names: List of transformable feature names (subset)
+            all_feature_names: Full list of feature names from DB (for validation)
+
         Returns:
             Dictionary of fitted transformation parameters per feature
         """
+        # Build index mapping from feature name to array index
+        feature_indices = {name: all_feature_names.index(name) for name in feature_names}
         # Initialize online accumulators (for computing mean/std incrementally)
         train_accumulators = {feat: [] for feat in feature_names}
         train_sample_counts = {feat: 0 for feat in feature_names}
@@ -159,25 +168,27 @@ class FeatureTransformProcessor:
                 if random.random() > self.train_sample_rate:
                     continue
                 
-                # Validate features array
-                if features_array is None or len(features_array) != len(feature_names):
-                    logger(f'Pass 1 - Invalid features array (expected {len(feature_names)}, '
+                # Validate features array against full feature list
+                if features_array is None or len(features_array) != len(all_feature_names):
+                    logger(f'Pass 1 - Invalid features array (expected {len(all_feature_names)}, '
                           f'got {len(features_array) if features_array else "None"}) for role={role}',
                           "WARNING")
                     continue
-                
-                # Check if sample has ANY nulls - if so, skip entire sample
+
+                # Check if sample has ANY nulls in transformable features - if so, skip entire sample
                 has_nulls = False
-                for feat_idx, feat_name in enumerate(feature_names):
+                for feat_name in feature_names:
+                    feat_idx = feature_indices[feat_name]
                     if features_array[feat_idx] is None:
                         has_nulls = True
                         null_counts[feat_name] += 1
                 
                 if has_nulls:
                     continue  # Skip this entire sample
-                
+
                 # Accumulate samples for this hour (no nulls present)
-                for feat_idx, feat_name in enumerate(feature_names):
+                for feat_name in feature_names:
+                    feat_idx = feature_indices[feat_name]
                     raw_value = features_array[feat_idx]
                     
                     try:
@@ -247,23 +258,26 @@ class FeatureTransformProcessor:
         return fitted_transforms
     
     def _pass2_evaluate_transforms(self, split_collection: str, all_hours: List,
-                                  feature_names: List[str], 
-                                  fitted_transforms: Dict) -> Dict:
+                                  feature_names: List[str],
+                                  fitted_transforms: Dict, all_feature_names: List[str]) -> Dict:
         """
         Pass 2: Evaluate fitted transformations on validation data.
-        
+
         Strategy: Stream through validation hours, accumulate transformed values
         per hour, compute final P/DF scores. Memory efficient.
-        
+
         Args:
             split_collection: Split collection name
             all_hours: List of hour datetimes
-            feature_names: List of feature names
+            feature_names: List of transformable feature names (subset)
             fitted_transforms: Fitted transformation parameters from pass 1
-            
+            all_feature_names: Full list of feature names from DB (for validation)
+
         Returns:
             Dictionary with evaluation results per feature
         """
+        # Build index mapping from feature name to array index
+        feature_indices = {name: all_feature_names.index(name) for name in feature_names}
         # Initialize validation accumulators (accumulate transformed values)
         validation_accumulators = {
             feat: {transform: [] for transform in TRANSFORM_TYPES}
@@ -308,28 +322,30 @@ class FeatureTransformProcessor:
                 
                 val_samples_seen += 1
                 
-                # Validate features array
-                if features_array is None or len(features_array) != len(feature_names):
-                    logger(f'Pass 2 - Invalid features array (expected {len(feature_names)}, '
+                # Validate features array against full feature list
+                if features_array is None or len(features_array) != len(all_feature_names):
+                    logger(f'Pass 2 - Invalid features array (expected {len(all_feature_names)}, '
                           f'got {len(features_array) if features_array else "None"}) for role={role}',
                           "WARNING")
                     continue
-                
-                # Check if sample has ANY nulls - if so, skip entire sample
+
+                # Check if sample has ANY nulls in transformable features - if so, skip entire sample
                 has_nulls = False
-                for feat_idx, feat_name in enumerate(feature_names):
+                for feat_name in feature_names:
+                    feat_idx = feature_indices[feat_name]
                     if features_array[feat_idx] is None:
                         has_nulls = True
                         val_null_counts[feat_name] += 1
                 
                 if has_nulls:
                     continue  # Skip this entire sample
-                
+
                 # Process each feature (no nulls present)
-                for feat_idx, feat_name in enumerate(feature_names):
+                for feat_name in feature_names:
                     if feat_name not in fitted_transforms:
                         continue
-                    
+
+                    feat_idx = feature_indices[feat_name]
                     raw_value = features_array[feat_idx]
                     
                     try:

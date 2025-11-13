@@ -84,7 +84,7 @@ INPUT_COLLECTION_SUFFIX = "_input"  # Split collections are named split_X_input
 MLFLOW_TRACKING_URI = "http://127.0.0.1:5000"
 MLFLOW_EXPERIMENT_NAME = "Feature_Transformation"
 
-MAX_SPLITS = 3
+MAX_SPLITS = 1
 TRAIN_SAMPLE_RATE = 1.0
 
 MONGO_URI = "mongodb://127.0.0.1:27017/"
@@ -191,10 +191,14 @@ def main():
         
         # Process each split
         all_split_results = {}
-        
+
         for split_id in range(MAX_SPLITS):
-            # Process split
-            split_results = processor.process_split(split_id, feature_names)
+            # Process split - pass both filtered and full feature lists
+            split_results = processor.process_split(
+                split_id=split_id,
+                feature_names=feature_names,  # Transformable features only
+                all_feature_names=all_feature_names  # Full list for array validation
+            )
             all_split_results[split_id] = split_results
             
             # Log to MLflow
@@ -216,7 +220,7 @@ def main():
         # Save results
         results_dir = Path(REPO_ROOT) / 'artifacts' / 'feature_transformation'
         results_dir.mkdir(parents=True, exist_ok=True)
-        
+
         import json
         results_file = results_dir / 'transformation_selection.json'
         with open(results_file, 'w') as f:
@@ -224,8 +228,12 @@ def main():
                 'final_transforms': final_transforms,
                 'aggregated_metrics': {
                     feat: {
-                        'mean_pearson': float(agg['mean_pearson']),
-                        'mean_df': float(agg['mean_df'])
+                        'selected_transform': final_transforms.get(feat, 'identity'),
+                        'most_frequent_transform': agg['most_frequent_transform'],
+                        'stability': float(agg['stability']),
+                        'n_splits': agg['n_splits'],
+                        'avg_scores': {k: float(v) for k, v in agg['avg_scores'].items()},
+                        'frequency_count': agg['frequency_count']
                     }
                     for feat, agg in aggregated.items()
                 }

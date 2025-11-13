@@ -388,13 +388,11 @@ def run_stylized_facts_pipeline(output_dir: Path = None):
         logger(f"Results saved to: {OUTPUT_DIR}", "INFO")
         logger("", "INFO")
         logger("Output files:", "INFO")
-        logger(f"  Standard summary:", "INFO")
-        logger(f"    - summary_all_splits.csv", "INFO")
-        logger(f"    - summary_statistics.json", "INFO")
-        logger(f"    - violations.json", "INFO")
-        
+        logger(f"  Raw data:", "INFO")
+        logger(f"    - summary_all_splits.csv (combined raw results)", "INFO")
+
         if ENHANCED_CONFIG['enable_enhanced_stats']:
-            logger(f"  Enhanced summary (with confidence intervals):", "INFO")
+            logger(f"  Enhanced summary (with statistical confidence):", "INFO")
             logger(f"    - enhanced_summary_statistics.json", "INFO")
             logger(f"    - enhanced_summary_by_feature.csv ← Use this for analysis!", "INFO")
             logger(f"    - enhanced_violations.json", "INFO")

@@ -63,10 +63,10 @@ import mlflow
 from src.utils.logging import logger, log_section
 from src.utils.spark import create_spark_session
 from src.feature_standardization import (
-    FeatureStandardizationProcessor,
+    EWMAHalfLifeProcessor,
     aggregate_across_splits,
-    select_best_half_life,
-    identify_feature_names
+    select_final_half_lives,
+    identify_feature_names_from_collection
 )
 from src.feature_standardization.mlflow_logger import (
     log_split_results,
@@ -79,12 +79,12 @@ from src.feature_standardization.mlflow_logger import (
 
 DB_NAME = "raw"
 INPUT_COLLECTION_PREFIX = "split_"
-INPUT_COLLECTION_SUFFIX = "_output"  # Read from transformation output
+INPUT_COLLECTION_SUFFIX = "_input"  # Read from transformation output
 
 MLFLOW_TRACKING_URI = "http://127.0.0.1:5000"
 MLFLOW_EXPERIMENT_NAME = "Feature_Standardization"
 
-MAX_SPLITS = 5
+MAX_SPLITS = 1
 HALF_LIFE_CANDIDATES = [5, 10, 20, 40, 60]
 
 MONGO_URI = "mongodb://127.0.0.1:27017/"
@@ -162,19 +162,18 @@ def main():
     )
     
     try:
-        # Get feature names from first split
+        # Get feature names from first split using aggregation
         logger('', "INFO")
         logger('Identifying features...', "INFO")
         first_split = f"{INPUT_COLLECTION_PREFIX}0{INPUT_COLLECTION_SUFFIX}"
-        sample_df = (
-            spark.read.format("mongodb")
-            .option("database", DB_NAME)
-            .option("collection", first_split)
-            .load()
-            .limit(1)
+        logger(f'Reading feature names from collection: {first_split}', "INFO")
+
+        # Use aggregation-based function to avoid Spark schema inference issues
+        all_feature_names = identify_feature_names_from_collection(
+            spark=spark,
+            db_name=DB_NAME,
+            collection=first_split
         )
-        
-        all_feature_names = identify_feature_names(sample_df)
         logger(f'Total features in split collections: {len(all_feature_names)}', "INFO")
         
         # Filter to standardizable features only
@@ -183,7 +182,7 @@ def main():
         logger(f'Testing half-life values: {HALF_LIFE_CANDIDATES}', "INFO")
         
         # Initialize processor
-        processor = FeatureStandardizationProcessor(
+        processor = EWMAHalfLifeProcessor(
             spark=spark,
             db_name=DB_NAME,
             input_collection_prefix=INPUT_COLLECTION_PREFIX,
@@ -194,49 +193,57 @@ def main():
         all_split_results = {}
         
         for split_id in range(MAX_SPLITS):
-            # Process split
-            split_results = processor.process_split(split_id, feature_names, HALF_LIFE_CANDIDATES)
+            # Process split - pass both full and standardizable feature lists
+            split_results = processor.process_split(
+                split_id=split_id,
+                feature_names=all_feature_names,  # Full list for array validation
+                standardizable_features=feature_names  # Standardizable features only
+            )
             all_split_results[split_id] = split_results
-            
+
             # Log to MLflow
-            log_split_results(split_id, split_results)
+            # Note: processor doesn't expose train_sample_rate, default is 0.1 (10%)
+            log_split_results(split_id, split_results, train_sample_rate=0.1)
         
         # Aggregate results across splits
         logger('', "INFO")
         log_section('AGGREGATING RESULTS ACROSS SPLITS')
-        aggregated = aggregate_across_splits(all_split_results, HALF_LIFE_CANDIDATES)
+        aggregated = aggregate_across_splits(all_split_results)
         
-        # Select best half-life
+        # Select best half-lives per feature
         logger('', "INFO")
-        logger('Selecting optimal half-life...', "INFO")
-        best_half_life = select_best_half_life(aggregated, HALF_LIFE_CANDIDATES)
-        
+        logger('Selecting optimal half-lives per feature...', "INFO")
+        final_half_lives = select_final_half_lives(aggregated, strategy='most_frequent')
+
         # Log aggregated results
-        log_aggregated_results(aggregated, best_half_life, HALF_LIFE_CANDIDATES)
+        log_aggregated_results(aggregated, final_half_lives)
         
         # Save results
-        results_dir = Path(REPO_ROOT) / 'artifacts' / 'feature_standardization'
+        results_dir = Path(REPO_ROOT) / 'artifacts' / 'ewma_halflife_selection'
         results_dir.mkdir(parents=True, exist_ok=True)
         
         import json
         results_file = results_dir / 'standardization_selection.json'
         with open(results_file, 'w') as f:
             json.dump({
-                'best_half_life': best_half_life,
+                'final_half_lives': final_half_lives,
                 'aggregated_metrics': {
-                    str(hl): {
-                        'mean_pearson': float(agg['mean_pearson']),
-                        'mean_df': float(agg['mean_df'])
+                    feat: {
+                        'selected_half_life': final_half_lives.get(feat, 20),
+                        'most_frequent_half_life': agg['most_frequent_half_life'],
+                        'stability': float(agg['stability']),
+                        'n_splits': agg['n_splits'],
+                        'avg_scores': {int(k): float(v) for k, v in agg['avg_scores'].items()},
+                        'frequency_count': agg['frequency_count']
                     }
-                    for hl, agg in aggregated.items()
+                    for feat, agg in aggregated.items()
                 }
             }, f, indent=2)
         
         logger(f'Results saved to: {results_file}', "INFO")
         
         log_section('STANDARDIZATION SELECTION COMPLETED')
-        logger(f'Selected half-life: {best_half_life}', "INFO")
-        logger(f'Applied to {len(feature_names)} features', "INFO")
+        logger(f'Selected half-lives for {len(final_half_lives)} features', "INFO")
         logger(f'Excluded features (keep original scale): volatility, fwd_logret_1', "INFO")
         
     except Exception as e:

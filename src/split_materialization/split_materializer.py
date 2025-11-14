@@ -62,13 +62,7 @@ class SplitMaterializer:
         split_ids = sorted([int(field.name) for field in split_roles_schema.fields])
         
         logger(f'Found {len(split_ids)} splits: {split_ids}', "INFO")
-        
-        # Apply max_splits limit
-        max_splits = self.config.get('max_splits')
-        if max_splits is not None:
-            split_ids = split_ids[:max_splits]
-            logger(f'Limiting to first {max_splits} splits: {split_ids}', "INFO")
-        
+
         self.split_ids = split_ids
     
     def discover_hours(self):

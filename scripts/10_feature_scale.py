@@ -84,7 +84,6 @@ INPUT_COLLECTION_SUFFIX = "_input"  # Read from transformation output
 MLFLOW_TRACKING_URI = "http://127.0.0.1:5000"
 MLFLOW_EXPERIMENT_NAME = "Feature_Standardization"
 
-MAX_SPLITS = 1
 HALF_LIFE_CANDIDATES = [5, 10, 20, 40, 60]
 
 MONGO_URI = "mongodb://127.0.0.1:27017/"
@@ -178,9 +177,31 @@ def main():
         
         # Filter to standardizable features only
         feature_names = filter_standardizable_features(all_feature_names)
-        logger(f'Processing {len(feature_names)} standardizable features across {MAX_SPLITS} splits', "INFO")
+
+        # Discover all split collections
+        from pymongo import MongoClient
+        client = MongoClient(MONGO_URI)
+        db = client[DB_NAME]
+        all_collections = db.list_collection_names()
+
+        # Extract split IDs from collection names matching pattern
+        import re
+        split_pattern = re.compile(rf'^{INPUT_COLLECTION_PREFIX}(\d+){INPUT_COLLECTION_SUFFIX}$')
+        split_ids = []
+        for coll_name in all_collections:
+            match = split_pattern.match(coll_name)
+            if match:
+                split_ids.append(int(match.group(1)))
+        split_ids = sorted(split_ids)
+        client.close()
+
+        if not split_ids:
+            raise ValueError(f'No split collections found matching pattern: {INPUT_COLLECTION_PREFIX}X{INPUT_COLLECTION_SUFFIX}')
+
+        logger(f'Found {len(split_ids)} split collections: {split_ids}', "INFO")
+        logger(f'Processing {len(feature_names)} standardizable features across {len(split_ids)} splits', "INFO")
         logger(f'Testing half-life values: {HALF_LIFE_CANDIDATES}', "INFO")
-        
+
         # Initialize processor
         processor = EWMAHalfLifeProcessor(
             spark=spark,
@@ -188,11 +209,11 @@ def main():
             input_collection_prefix=INPUT_COLLECTION_PREFIX,
             input_collection_suffix=INPUT_COLLECTION_SUFFIX
         )
-        
+
         # Process each split
         all_split_results = {}
-        
-        for split_id in range(MAX_SPLITS):
+
+        for split_id in split_ids:
             # Process split - pass both full and standardizable feature lists
             split_results = processor.process_split(
                 split_id=split_id,

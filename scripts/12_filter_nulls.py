@@ -43,8 +43,6 @@ DB_NAME = "raw"
 COLLECTION_PREFIX = "split_"
 COLLECTION_SUFFIX = "_input"  # Read/write to same collections (after Stage 11 cyclic swap)
 
-MAX_SPLITS = 5
-
 MONGO_URI = "mongodb://127.0.0.1:27017/"
 JAR_FILES_PATH = "file:///C:/spark/spark-3.4.1-bin-hadoop3/jars/"
 DRIVER_MEMORY = "4g"
@@ -400,17 +398,40 @@ def main():
     
     logger('This stage removes documents with null/NaN/Inf values from standardized splits', "INFO")
     logger(f'Database: {DB_NAME}', "INFO")
-    logger(f'Collections: {COLLECTION_PREFIX}{{0-{MAX_SPLITS-1}}}{COLLECTION_SUFFIX}', "INFO")
-    logger(f'Processing {MAX_SPLITS} splits', "INFO")
+
+    # Discover all split collections
+    from pymongo import MongoClient
+    client = MongoClient(MONGO_URI)
+    db = client[DB_NAME]
+    all_collections = db.list_collection_names()
+
+    # Extract split IDs from collection names matching pattern
+    import re
+    split_pattern = re.compile(rf'^{COLLECTION_PREFIX}(\d+){COLLECTION_SUFFIX}$')
+    split_ids = []
+    for coll_name in all_collections:
+        match = split_pattern.match(coll_name)
+        if match:
+            split_ids.append(int(match.group(1)))
+    split_ids = sorted(split_ids)
+    client.close()
+
+    if not split_ids:
+        logger('No split collections found!', "ERROR")
+        return
+
+    logger(f'Found {len(split_ids)} split collections: {split_ids}', "INFO")
+    logger(f'Collections: {COLLECTION_PREFIX}{{0-{split_ids[-1]}}}{COLLECTION_SUFFIX}', "INFO")
+    logger(f'Processing {len(split_ids)} splits', "INFO")
     logger('', "INFO")
-    
+
     logger('Processing strategy:', "INFO")
     logger('  - Load data in hourly batches', "INFO")
     logger('  - Filter documents with null values in features array', "INFO")
     logger('  - Write to temporary collection with temporal ordering', "INFO")
     logger('  - Atomically replace original collection', "INFO")
     logger('', "INFO")
-    
+
     # Create Spark session
     logger('Initializing Spark...', "INFO")
     spark = create_spark_session(
@@ -420,15 +441,15 @@ def main():
         driver_memory=DRIVER_MEMORY,
         jar_files_path=JAR_FILES_PATH
     )
-    
+
     logger('Spark session created', "INFO")
     logger('', "INFO")
-    
+
     try:
         # Process each split
         split_results = []
-        
-        for split_id in range(MAX_SPLITS):
+
+        for split_id in split_ids:
             result = filter_split_nulls_hourly(
                 spark,
                 DB_NAME,

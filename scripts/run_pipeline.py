@@ -60,8 +60,8 @@ CONFIG = {
     'db_name': "raw",
 
     # Pipeline control
-    'start_from': 14,       # Start from stage 2-14
-    'stop_at': 14,         # Stop at stage 2-14
+    'start_from': 14,       # Start from stage 2-16
+    'stop_at': 14,         # Stop at stage 2-16
 
     # Stylized facts testing
     'enable_stylized_facts': True,  # Enable stylized facts analysis
@@ -167,6 +167,20 @@ STAGES = {
         "script": "12_filter_nulls.py",
         "swap_after": False,
         "description": "Apply Null Filtering and rename: split_X_output -> split_X_input",
+        "stage_type": "pipeline"
+    },
+    15: {
+        "name": "Export Splits to S3",
+        "script": "15_export_splits_to_s3.py",
+        "swap_after": False,
+        "description": "Export all split collections to S3 for checkpoint/portability",
+        "stage_type": "pipeline"
+    },
+    16: {
+        "name": "Import Splits from S3",
+        "script": "16_import_splits_from_s3.py",
+        "swap_after": False,
+        "description": "Import split collections from S3 and restore to MongoDB",
         "stage_type": "pipeline"
     }
 }
@@ -309,8 +323,8 @@ def main():
         logger("Error: start_from must be <= stop_at", "ERROR")
         return 1
     
-    if not (2 <= CONFIG['start_from'] <= 14 and 2 <= CONFIG['stop_at'] <= 14):
-        logger("Error: stages must be between 2 and 14", "ERROR")
+    if not (2 <= CONFIG['start_from'] <= 16 and 2 <= CONFIG['stop_at'] <= 16):
+        logger("Error: stages must be between 2 and 16", "ERROR")
         return 1
     
     # Check if requested stages exist

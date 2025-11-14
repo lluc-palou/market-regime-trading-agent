@@ -52,7 +52,7 @@ from src.utils.logging import logger, log_section
 # =================================================================================================
 
 S3_CONFIG = {
-    "bucket": "your-drl-lob-bucket",           # S3 bucket name
+    "bucket": "lluc-tfg-data",           # S3 bucket name
     "prefix": "lob-data",                      # Prefix for LOB data (different from processed-splits)
     "region": "us-east-1",                     # AWS region
     # IAM role will be used for authentication (no keys needed in code)
@@ -74,7 +74,7 @@ LOCAL_CONFIG = {
 SPARK_CONFIG = {
     "app_name": "UploadLobDataToS3",
     "driver_memory": "4g",
-    "jar_files_path": "file:///C:/Users/llucp/spark_jars/",
+    "jar_files_path": "file:///C:/spark/jars/",
 }
 
 # =================================================================================================

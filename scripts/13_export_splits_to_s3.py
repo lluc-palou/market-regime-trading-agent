@@ -54,7 +54,7 @@ from src.utils.spark import create_spark_session
 # =================================================================================================
 
 S3_CONFIG = {
-    "bucket": "your-drl-lob-bucket",           # S3 bucket name
+    "bucket": "lluc-tfg-data",           # S3 bucket name
     "prefix": "processed-splits",              # Prefix for all split exports
     "region": "us-east-1",                     # AWS region
     # IAM role will be used for authentication (no keys needed in code)
@@ -78,7 +78,7 @@ MONGO_CONFIG = {
 SPARK_CONFIG = {
     "app_name": "ExportSplitsToS3",
     "driver_memory": "8g",
-    "jar_files_path": "file:///C:/Users/llucp/spark_jars/",
+    "jar_files_path": "file:///C:/spark/spark-3.4.1-bin-hadoop3/jars/",
 }
 
 # =================================================================================================

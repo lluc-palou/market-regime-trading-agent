@@ -7,7 +7,7 @@ def create_spark_session(
     db_name: str,
     mongo_uri: str = "mongodb://127.0.0.1:27017/",
     driver_memory: str = "8g",
-    jar_files_path: str = "file:///C:/Users/llucp/spark_jars/",
+    jar_files_path: str = "file:///C:/spark/spark-3.4.1-bin-hadoop3/jars/",
     additional_configs: Optional[Dict[str, Any]] = None
 ) -> SparkSession:
     """

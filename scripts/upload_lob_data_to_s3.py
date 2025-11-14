@@ -74,7 +74,7 @@ LOCAL_CONFIG = {
 SPARK_CONFIG = {
     "app_name": "UploadLobDataToS3",
     "driver_memory": "4g",
-    "jar_files_path": "file:///C:/spark/jars/",
+    "jar_files_path": "file:///C:/spark/spark-3.4.1-bin-hadoop3/jars/",
 }
 
 # =================================================================================================

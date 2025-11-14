@@ -54,7 +54,7 @@ CONFIG = {
     },
     
     'cpcv': {
-        'n_folds': 10,
+        'n_folds': 8,
         'k_validation_folds': 2,
     },
     

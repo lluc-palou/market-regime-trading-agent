@@ -1,9 +1,6 @@
 # Ignore data and output folders
 artifacts/
-
-# Ignore .parquet files in lob_data but track the directory structure
-lob_data/*.parquet
-lob_data/**/*.parquet
+lob_data/
 
 # Ignore Python cache and environment files
 __pycache__/

@@ -33,7 +33,7 @@ CONFIG = {
     'variance_half_life': 20,
     'depth_bands': [5, 50],  # top_5 and top_50 only
     'decision_lag': 0,
-    'required_past_hours': 3,
+    'required_past_hours': 1,
     'required_future_hours': 1,  # Only need 1 step ahead now
 }
 

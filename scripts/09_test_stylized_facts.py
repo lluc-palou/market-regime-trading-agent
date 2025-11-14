@@ -93,7 +93,7 @@ METADATA_PATH = Path(REPO_ROOT) / "artifacts" / "fold_assignment" / "reproducibi
 DEFAULT_OUTPUT_DIR = Path(REPO_ROOT) / "artifacts" / "stylized_facts"
 
 CONFIG = {
-    'forecast_horizon': 240,
+    'forecast_horizon': 120,
     'significance_level': 0.05
 }
 

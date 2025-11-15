@@ -1,7 +1,7 @@
 from typing import List, Dict
 from pyspark.sql import DataFrame
 from datetime import datetime, timedelta
-from pyspark.sql.functions import col, udf
+from pyspark.sql.functions import col, udf, monotonically_increasing_id
 from bson import ObjectId
 from src.utils import logger, format_timestamp_for_mongodb
 from pyspark.sql.types import StructType, StructField, IntegerType, StringType, MapType
@@ -287,67 +287,96 @@ class DataStamper:
     def _save_batch(self, batch_df: DataFrame, output_collection: str):
         """
         Saves the batch to output collection with ObjectId preservation and temporal ordering.
-        
+
         CRITICAL MODIFICATIONS:
         1. Converts _id from String back to ObjectId before writing
         2. Uses timestamp_str (UTC string) instead of Spark timestamp to avoid timezone conversion
         3. Uses ordered=True to preserve write order
-        
+        4. Processes in smaller sub-batches to avoid socket timeouts
+
         This guarantees:
         - ObjectId format is maintained in output collection
         - Timestamps remain in original UTC timezone (no +2h shift)
         - Temporal ordering is preserved across all batches
         """
-        # Convert DataFrame to list of dictionaries for manual processing
-        batch_data = batch_df.collect()
-        
-        if not batch_data:
+        # Get total count first
+        total_count = batch_df.count()
+
+        if total_count == 0:
             return
-        
-        # Convert to list of dicts and fix ObjectId + timestamps
-        documents = []
-        for row in batch_data:
-            doc = row.asDict()
-            
-            # CRITICAL FIX: Use timestamp_str to reconstruct UTC naive datetime
-            # This avoids Spark's timezone conversion issues
-            if 'timestamp_str' in doc:
-                ts_str = doc['timestamp_str']
-                # Parse the UTC string (format: "2025-07-04T00:00:13.211Z")
-                ts_str_clean = ts_str.replace('Z', '').replace('+00:00', '')
-                doc['timestamp'] = datetime.fromisoformat(ts_str_clean)
-            
-            # Remove temporary processing fields
-            doc.pop('timestamp_str', None)
-            doc.pop('_id_str', None)
-            
-            # CRITICAL FIX: Convert _id from String back to ObjectId
-            if '_id' in doc and isinstance(doc['_id'], str):
-                try:
-                    doc['_id'] = ObjectId(doc['_id'])
-                except Exception as e:
-                    logger(f'Warning: Could not convert _id to ObjectId: {doc["_id"]}', level="WARNING")
-            
-            documents.append(doc)
-        
-        # Write to MongoDB with ordered inserts
+
+        # Process in smaller sub-batches to avoid socket timeouts (max 1000 rows per collect)
+        batch_size = 1000
+        num_partitions = (total_count + batch_size - 1) // batch_size
+
+        # Add a row number for batching
+        batch_df_indexed = batch_df.withColumn("_batch_row_id", monotonically_increasing_id())
+
+        # Get MongoDB connection ready
         from pymongo import MongoClient
-        
-        # Get MongoDB URI from Spark config or use default
+
         mongo_uri = self.spark.sparkContext.getConf().get(
-            'spark.mongodb.read.connection.uri', 
+            'spark.mongodb.read.connection.uri',
             'mongodb://127.0.0.1:27017/'
         )
-        
+
         client = MongoClient(mongo_uri)
         db = client[self.db_name]
         collection = db[output_collection]
-        
-        # Insert with ordered=True to preserve temporal ordering
-        try:
-            collection.insert_many(documents, ordered=True)
-        except Exception as e:
-            logger(f'Error inserting batch: {str(e)}', level="ERROR")
-            raise
-        finally:
-            client.close()
+
+        # Process each sub-batch separately to avoid socket timeouts
+        for partition_idx in range(num_partitions):
+            start_id = partition_idx * batch_size
+            end_id = start_id + batch_size
+
+            # Filter to get this sub-batch
+            sub_batch_df = batch_df_indexed.filter(
+                (col("_batch_row_id") >= start_id) & (col("_batch_row_id") < end_id)
+            )
+
+            # Collect this smaller sub-batch (should be fast enough to avoid timeout)
+            try:
+                batch_data = sub_batch_df.collect()
+            except Exception as e:
+                logger(f'Error collecting sub-batch {partition_idx + 1}/{num_partitions}: {e}', level="ERROR")
+                continue
+
+            if not batch_data:
+                continue
+
+            # Convert to list of dicts and fix ObjectId + timestamps
+            documents = []
+            for row in batch_data:
+                doc = row.asDict()
+
+                # CRITICAL FIX: Use timestamp_str to reconstruct UTC naive datetime
+                # This avoids Spark's timezone conversion issues
+                if 'timestamp_str' in doc:
+                    ts_str = doc['timestamp_str']
+                    # Parse the UTC string (format: "2025-07-04T00:00:13.211Z")
+                    ts_str_clean = ts_str.replace('Z', '').replace('+00:00', '')
+                    doc['timestamp'] = datetime.fromisoformat(ts_str_clean)
+
+                # Remove temporary processing fields
+                doc.pop('timestamp_str', None)
+                doc.pop('_id_str', None)
+                doc.pop('_batch_row_id', None)  # Remove the batching row ID
+
+                # CRITICAL FIX: Convert _id from String back to ObjectId
+                if '_id' in doc and isinstance(doc['_id'], str):
+                    try:
+                        doc['_id'] = ObjectId(doc['_id'])
+                    except Exception as e:
+                        logger(f'Warning: Could not convert _id to ObjectId: {doc["_id"]}', level="WARNING")
+
+                documents.append(doc)
+
+            # Insert this sub-batch with ordered=True to preserve temporal ordering
+            try:
+                collection.insert_many(documents, ordered=True)
+            except Exception as e:
+                logger(f'Error inserting sub-batch {partition_idx + 1}/{num_partitions}: {str(e)}', level="ERROR")
+                raise
+
+        # Close MongoDB connection after all sub-batches are processed
+        client.close()

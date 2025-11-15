@@ -6,13 +6,15 @@ def create_spark_session(
     app_name: str,
     db_name: str,
     mongo_uri: str = "mongodb://127.0.0.1:27017/",
-    driver_memory: str = "8g",
+    driver_memory: str = "12g",  # Increased from 8g to 12g for 16GB RAM system
     jar_files_path: str = "file:///C:/spark/spark-3.4.1-bin-hadoop3/jars/",
     additional_configs: Optional[Dict[str, Any]] = None
 ) -> SparkSession:
     """
-    Given an app name and a database name creates a Spark session with MongoDB connector 
+    Given an app name and a database name creates a Spark session with MongoDB connector
     and standard configuration settings.
+
+    Optimized for 16GB RAM system.
     """
     # Standard JAR files for MongoDB connector
     jar_files = [
@@ -21,7 +23,7 @@ def create_spark_session(
         "mongodb-driver-sync-4.10.1.jar",
         "bson-4.10.1.jar"
     ]
-    
+
     # Builds Spark session with base configuration settings
     builder = (
         SparkSession.builder
@@ -33,11 +35,21 @@ def create_spark_session(
         .config("spark.mongodb.write.database", db_name)
         .config("spark.mongodb.write.ordered", "false")
         .config("spark.mongodb.write.writeConcern.w", "1")
-        .config("spark.driver.memory", driver_memory)
+        # Memory configurations (optimized for 16GB RAM)
+        .config("spark.driver.memory", driver_memory)  # 12GB driver memory
+        .config("spark.executor.memory", "2g")  # 2GB executor memory
+        .config("spark.driver.maxResultSize", "2g")  # Max result size before spilling
+        .config("spark.memory.fraction", "0.8")  # 80% of heap for execution/storage
+        .config("spark.memory.storageFraction", "0.3")  # 30% of memory.fraction for caching
+        # Performance configurations
         .config("spark.sql.execution.arrow.pyspark.enabled", "false")
         .config("spark.sql.adaptive.enabled", "true")
-        .config("spark.sql.shuffle.partitions", "16")
+        .config("spark.sql.shuffle.partitions", "32")  # Increased from 16 for better parallelism
+        .config("spark.default.parallelism", "8")  # Better parallelism for local mode
         .config("spark.sql.session.timeZone", "UTC")
+        # Garbage collection tuning for better memory management
+        .config("spark.executor.extraJavaOptions", "-XX:+UseG1GC -XX:InitiatingHeapOccupancyPercent=35")
+        .config("spark.driver.extraJavaOptions", "-XX:+UseG1GC -XX:InitiatingHeapOccupancyPercent=35")
         # Timeout configurations to prevent socket timeouts
         .config("spark.network.timeout", "600s")  # 10 minutes for network operations
         .config("spark.executor.heartbeatInterval", "60s")  # Heartbeat every 60s

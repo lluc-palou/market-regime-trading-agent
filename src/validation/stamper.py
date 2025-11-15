@@ -1,8 +1,7 @@
 from typing import List, Dict
 from pyspark.sql import DataFrame
 from datetime import datetime, timedelta
-from pyspark.sql.functions import col, udf, monotonically_increasing_id
-from bson import ObjectId
+from pyspark.sql.functions import col, udf
 from src.utils import logger, format_timestamp_for_mongodb
 from pyspark.sql.types import StructType, StructField, IntegerType, StringType, MapType
 
@@ -207,32 +206,17 @@ class DataStamper:
                     # Stamp batch samples with role information
                     stamped_batch = self.stamp_dataframe(batch_df)
 
-                    # Cache the stamped batch to avoid recomputation
-                    stamped_batch.cache()
+                    # Skip caching and statistics collection to avoid triggering UDF execution
+                    # Statistics collection was causing socket timeouts with the complex Python UDF
+                    # The UDF will only execute once during MongoDB write (much faster)
 
-                    # Collect role statistics with retry logic for timeout resilience
-                    try:
-                        # Use a more efficient approach - persist first, then collect
-                        role_counts = stamped_batch.groupBy('fold_type').count().collect()
-                        for row in role_counts:
-                            fold_type = row['fold_type']
-                            count = row['count']
-                            if fold_type in role_stats:
-                                role_stats[fold_type] += count
-                    except Exception as stats_error:
-                        # If statistics collection times out, log warning and continue
-                        logger(f'Warning: Could not collect statistics for batch {batch_count}: {stats_error}', level="WARNING")
-                        # Continue processing - statistics are not critical
-
-                    # Save batch with ObjectId preservation and temporal ordering
+                    # Save batch directly using Spark's MongoDB connector (no Python collect!)
                     self._save_batch(stamped_batch, output_collection)
 
                     total_records += batch_records
                     batch_count += 1
 
-                    logger(f'Batch {batch_count} saved ({batch_records:,} records, ordered)', level="INFO")
-
-                    stamped_batch.unpersist()
+                    logger(f'Batch {batch_count} saved ({batch_records:,} records)', level="INFO")
                 
                 batch_df.unpersist()
                 
@@ -286,97 +270,37 @@ class DataStamper:
     
     def _save_batch(self, batch_df: DataFrame, output_collection: str):
         """
-        Saves the batch to output collection with ObjectId preservation and temporal ordering.
+        Saves the batch to output collection using Spark's MongoDB connector directly.
 
-        CRITICAL MODIFICATIONS:
-        1. Converts _id from String back to ObjectId before writing
-        2. Uses timestamp_str (UTC string) instead of Spark timestamp to avoid timezone conversion
-        3. Uses ordered=True to preserve write order
-        4. Processes in smaller sub-batches to avoid socket timeouts
+        OPTIMIZED VERSION - NO COLLECT():
+        1. Uses Spark's MongoDB write connector (avoids Python worker timeout!)
+        2. Converts timestamp_str to timestamp using Spark SQL (not Python)
+        3. Preserves temporal ordering through sequential hour processing
+        4. Much faster - no data transfer from JVM to Python
 
-        This guarantees:
-        - ObjectId format is maintained in output collection
-        - Timestamps remain in original UTC timezone (no +2h shift)
-        - Temporal ordering is preserved across all batches
+        Trade-off: _id stored as string instead of ObjectId, but avoids timeouts.
         """
-        # Get total count first
-        total_count = batch_df.count()
+        from pyspark.sql.functions import to_timestamp
 
-        if total_count == 0:
-            return
-
-        # Process in smaller sub-batches to avoid socket timeouts (max 1000 rows per collect)
-        batch_size = 1000
-        num_partitions = (total_count + batch_size - 1) // batch_size
-
-        # Add a row number for batching
-        batch_df_indexed = batch_df.withColumn("_batch_row_id", monotonically_increasing_id())
-
-        # Get MongoDB connection ready
-        from pymongo import MongoClient
-
-        mongo_uri = self.spark.sparkContext.getConf().get(
-            'spark.mongodb.read.connection.uri',
-            'mongodb://127.0.0.1:27017/'
+        # Convert timestamp_str back to proper timestamp using Spark SQL
+        # This is much faster than doing it in Python
+        batch_df_final = batch_df.withColumn(
+            "timestamp",
+            to_timestamp(col("timestamp_str"), "yyyy-MM-dd'T'HH:mm:ss.SSS'Z'")
         )
 
-        client = MongoClient(mongo_uri)
-        db = client[self.db_name]
-        collection = db[output_collection]
+        # Drop temporary fields not needed in output
+        columns_to_drop = ["timestamp_str"]
+        if "_id_str" in batch_df_final.columns:
+            columns_to_drop.append("_id_str")
 
-        # Process each sub-batch separately to avoid socket timeouts
-        for partition_idx in range(num_partitions):
-            start_id = partition_idx * batch_size
-            end_id = start_id + batch_size
+        batch_df_final = batch_df_final.drop(*columns_to_drop)
 
-            # Filter to get this sub-batch
-            sub_batch_df = batch_df_indexed.filter(
-                (col("_batch_row_id") >= start_id) & (col("_batch_row_id") < end_id)
-            )
-
-            # Collect this smaller sub-batch (should be fast enough to avoid timeout)
-            try:
-                batch_data = sub_batch_df.collect()
-            except Exception as e:
-                logger(f'Error collecting sub-batch {partition_idx + 1}/{num_partitions}: {e}', level="ERROR")
-                continue
-
-            if not batch_data:
-                continue
-
-            # Convert to list of dicts and fix ObjectId + timestamps
-            documents = []
-            for row in batch_data:
-                doc = row.asDict()
-
-                # CRITICAL FIX: Use timestamp_str to reconstruct UTC naive datetime
-                # This avoids Spark's timezone conversion issues
-                if 'timestamp_str' in doc:
-                    ts_str = doc['timestamp_str']
-                    # Parse the UTC string (format: "2025-07-04T00:00:13.211Z")
-                    ts_str_clean = ts_str.replace('Z', '').replace('+00:00', '')
-                    doc['timestamp'] = datetime.fromisoformat(ts_str_clean)
-
-                # Remove temporary processing fields
-                doc.pop('timestamp_str', None)
-                doc.pop('_id_str', None)
-                doc.pop('_batch_row_id', None)  # Remove the batching row ID
-
-                # CRITICAL FIX: Convert _id from String back to ObjectId
-                if '_id' in doc and isinstance(doc['_id'], str):
-                    try:
-                        doc['_id'] = ObjectId(doc['_id'])
-                    except Exception as e:
-                        logger(f'Warning: Could not convert _id to ObjectId: {doc["_id"]}', level="WARNING")
-
-                documents.append(doc)
-
-            # Insert this sub-batch with ordered=True to preserve temporal ordering
-            try:
-                collection.insert_many(documents, ordered=True)
-            except Exception as e:
-                logger(f'Error inserting sub-batch {partition_idx + 1}/{num_partitions}: {str(e)}', level="ERROR")
-                raise
-
-        # Close MongoDB connection after all sub-batches are processed
-        client.close()
+        # Write directly to MongoDB using Spark connector (NO COLLECT!)
+        # This completely avoids Python worker communication and timeouts
+        batch_df_final.write \
+            .format("mongodb") \
+            .option("database", self.db_name) \
+            .option("collection", output_collection) \
+            .mode("append") \
+            .save()

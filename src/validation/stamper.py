@@ -5,31 +5,14 @@ from pyspark.sql.functions import col, udf
 from bson import ObjectId
 from src.utils import logger, format_timestamp_for_mongodb
 from pyspark.sql.types import StructType, StructField, IntegerType, StringType, MapType
-from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception_type
-import socket
 
 class DataStamper:
     """
     Stamps dataset samples with ALL role assignments using timestamp-based matching.
-
+    
     MODIFICATIONS:
     1. Preserves ObjectId format in output (converts String → ObjectId before writing)
     2. Ensures temporal ordering with ordered writes and sequential processing
-
-    OPTIMIZATIONS (from Stage 3 working patterns):
-    3. DataFrame caching to avoid re-reading from MongoDB during UDF execution
-    4. Pre-parsed fold timestamps in broadcast (eliminates 1,320+ redundant parses per batch)
-    5. Pre-parsed purge/embargo ranges in metadata (eliminates thousands of parses per batch)
-    6. Retry logic for socket timeouts (exponential backoff, pattern from TimelineAnalyzer)
-    7. Early-exit fold matching (reduces O(n) to O(1) average case)
-    8. Proper unpersist to free memory after batch completion
-
-    Performance impact:
-    - For 120 rows/batch × 11 folds × 28 splits:
-      * Eliminated ~1,320 fold timestamp parses per batch
-      * Eliminated ~3,360+ range timestamp parses per batch
-      * Early-exit reduces fold iteration from 11 checks to ~1-2 on average
-    - Total: Reduced UDF computation by an estimated 60-70% per batch
     """
     
     def __init__(self, metadata: Dict, folds: List, spark, db_name: str):
@@ -45,68 +28,9 @@ class DataStamper:
     def stamp_dataframe(self, df: DataFrame) -> DataFrame:
         """
         Stamps dataset samples with COMPLETE split role information using normalized timestamp strings.
-
-        OPTIMIZATION: Cache DataFrame and optimize broadcast variables for better UDF performance.
         """
-        # Cache DataFrame to avoid re-reading from MongoDB during UDF execution
-        df.cache()
-
-        # OPTIMIZATION: Pre-process fold data to avoid repeated parsing in UDF
-        # Parse timestamps once here instead of in every UDF call (120 rows × 11 folds = 1,320 parses saved!)
-        def prepare_fold_data(fold):
-            fold_dict = fold.to_dict()
-            # Pre-parse timestamps to naive datetime
-            if isinstance(fold_dict['start_ts'], datetime):
-                fold_dict['start_ts'] = fold_dict['start_ts'].replace(tzinfo=None) if fold_dict['start_ts'].tzinfo else fold_dict['start_ts']
-                fold_dict['end_ts'] = fold_dict['end_ts'].replace(tzinfo=None) if fold_dict['end_ts'].tzinfo else fold_dict['end_ts']
-            return fold_dict
-
-        preprocessed_folds = [prepare_fold_data(f) for f in self.folds]
-
-        # OPTIMIZATION: Pre-parse purge/embargo range timestamps in metadata
-        # Avoid repeated parsing in UDF (120 rows × 28 splits × ranges = thousands of parses saved!)
-        def preprocess_metadata(metadata):
-            """Pre-parse all timestamp ranges in metadata to naive datetime."""
-            processed_metadata = dict(metadata)
-            processed_splits = []
-
-            def parse_ts_safe(ts):
-                if isinstance(ts, datetime):
-                    return ts.replace(tzinfo=None) if ts.tzinfo else ts
-                # Handle string timestamps
-                ts_clean = str(ts).replace('Z', '').replace('+00:00', '')
-                return datetime.fromisoformat(ts_clean)
-
-            for split in metadata['cpcv_splits']:
-                processed_split = dict(split)
-
-                # Pre-parse purged ranges
-                if 'purged_ranges' in split:
-                    processed_purged = {}
-                    for fold_key, ranges in split['purged_ranges'].items():
-                        processed_purged[fold_key] = [
-                            (parse_ts_safe(r[0]), parse_ts_safe(r[1])) for r in ranges
-                        ]
-                    processed_split['purged_ranges'] = processed_purged
-
-                # Pre-parse embargoed ranges
-                if 'embargoed_ranges' in split:
-                    processed_embargoed = {}
-                    for fold_key, ranges in split['embargoed_ranges'].items():
-                        processed_embargoed[fold_key] = [
-                            (parse_ts_safe(r[0]), parse_ts_safe(r[1])) for r in ranges
-                        ]
-                    processed_split['embargoed_ranges'] = processed_embargoed
-
-                processed_splits.append(processed_split)
-
-            processed_metadata['cpcv_splits'] = processed_splits
-            return processed_metadata
-
-        preprocessed_metadata = preprocess_metadata(self.metadata)
-
-        metadata_broadcast = self.spark.sparkContext.broadcast(preprocessed_metadata)
-        folds_broadcast = self.spark.sparkContext.broadcast(preprocessed_folds)
+        metadata_broadcast = self.spark.sparkContext.broadcast(self.metadata)
+        folds_broadcast = self.spark.sparkContext.broadcast([f.to_dict() for f in self.folds])
         
         def assign_complete_roles(timestamp_str):
             """
@@ -128,23 +52,20 @@ class DataStamper:
                 return datetime.fromisoformat(ts_clean)
             
             timestamp = parse_ts(timestamp_str)
-
+            
             folds_data = folds_broadcast.value
             fold_id = None
             fold_type = None
-
-            # OPTIMIZATION: Find which fold this timestamp belongs to with early exit
-            # Fold timestamps are pre-parsed in broadcast, so no parsing needed here!
-            # This reduces average computation from O(n_folds) full checks to O(1)
+            
+            # Find which fold this timestamp belongs to
             for fold_dict in folds_data:
-                # Timestamps are already naive datetime objects from preprocessing
-                start_ts = fold_dict['start_ts']
-                end_ts = fold_dict['end_ts']
-
+                start_ts = parse_ts(fold_dict['start_ts'])
+                end_ts = parse_ts(fold_dict['end_ts'])
+                
                 if start_ts <= timestamp < end_ts:
                     fold_id = fold_dict['fold_id']
                     fold_type = fold_dict['fold_type']
-                    break  # Early exit - no need to check remaining folds
+                    break
             
             if fold_id is None:
                 return (-1, 'excluded', {})
@@ -154,13 +75,10 @@ class DataStamper:
             metadata = metadata_broadcast.value
             
             def in_ranges(ranges_list):
-                """Check if timestamp falls in any of the ranges.
-
-                OPTIMIZATION: Range timestamps are pre-parsed tuples (start_ts, end_ts).
-                No parsing needed here - just direct comparison!
-                """
-                for range_start, range_end in ranges_list:
-                    # Timestamps are already naive datetime objects from preprocessing
+                """Check if timestamp falls in any of the ranges."""
+                for range_pair in ranges_list:
+                    range_start = parse_ts(range_pair[0])
+                    range_end = parse_ts(range_pair[1])
                     if range_start <= timestamp < range_end:
                         return True
                 return False
@@ -230,13 +148,10 @@ class DataStamper:
         # Use the normalized timestamp_str column
         stamped_df = df.withColumn('role_data', assign_roles_udf(col('timestamp_str')))
         stamped_df = stamped_df.withColumn('fold_id', col('role_data.fold_id'))
-        stamped_df = stamped_df.withColumn('fold_type', col('role_data.fold_type'))
+        stamped_df = stamped_df.withColumn('fold_type', col('role_data.fold_type'))               
         stamped_df = stamped_df.withColumn('split_roles', col('role_data.split_roles'))
         stamped_df = stamped_df.drop('role_data')
-
-        # Unpersist the cached DataFrame to free memory
-        df.unpersist()
-
+        
         return stamped_df
     
     def process_batches(self, input_collection: str, output_collection: str):
@@ -363,33 +278,19 @@ class DataStamper:
     def _save_batch(self, batch_df: DataFrame, output_collection: str):
         """
         Saves the batch to output collection with ObjectId preservation and temporal ordering.
-
+        
         CRITICAL MODIFICATIONS:
         1. Converts _id from String back to ObjectId before writing
         2. Uses timestamp_str (UTC string) instead of Spark timestamp to avoid timezone conversion
         3. Uses ordered=True to preserve write order
-        4. OPTIMIZATION: Retry logic for socket timeouts (pattern from Stage 3)
-
+        
         This guarantees:
         - ObjectId format is maintained in output collection
         - Timestamps remain in original UTC timezone (no +2h shift)
         - Temporal ordering is preserved across all batches
         """
-        # Convert DataFrame to list of dictionaries with retry logic for socket timeouts
-        @retry(
-            stop=stop_after_attempt(3),
-            wait=wait_exponential(multiplier=1, min=2, max=10),
-            retry=retry_if_exception_type((socket.timeout, TimeoutError, OSError)),
-            reraise=True
-        )
-        def collect_with_retry():
-            return batch_df.collect()
-
-        try:
-            batch_data = collect_with_retry()
-        except Exception as e:
-            logger(f'Error collecting batch data after retries: {str(e)}', level="ERROR")
-            raise
+        # Convert DataFrame to list of dictionaries for manual processing
+        batch_data = batch_df.collect()
         
         if not batch_data:
             return

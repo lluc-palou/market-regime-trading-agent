@@ -37,9 +37,9 @@ class FeatureTransformProcessor:
     NO full data accumulation - only processes current hour batch in memory.
     """
     
-    def __init__(self, spark: SparkSession, db_name: str, 
+    def __init__(self, spark: SparkSession, db_name: str,
                  input_collection_prefix: str, input_collection_suffix: str = "",
-                 train_sample_rate: float = 1.0):
+                 train_sample_rate: float = 0.1):
         """
         Initialize processor.
         

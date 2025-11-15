@@ -77,7 +77,7 @@ MONGO_CONFIG = {
 
 SPARK_CONFIG = {
     "app_name": "ImportSplitsFromS3",
-    "driver_memory": "8g",
+    "driver_memory": "12g",  # Increased for 16GB RAM system
     "jar_files_path": "file:///C:/spark/spark-3.4.1-bin-hadoop3/jars/",
 }
 

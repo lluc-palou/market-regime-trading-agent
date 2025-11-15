@@ -84,7 +84,7 @@ INPUT_COLLECTION_SUFFIX = "_input"  # Split collections are named split_X_input
 MLFLOW_TRACKING_URI = "http://127.0.0.1:5000"
 MLFLOW_EXPERIMENT_NAME = "Feature_Transformation"
 
-TRAIN_SAMPLE_RATE = 1.0
+TRAIN_SAMPLE_RATE = 0.1
 
 MONGO_URI = "mongodb://127.0.0.1:27017/"
 JAR_FILES_PATH = "file:///C:/spark/spark-3.4.1-bin-hadoop3/jars/"

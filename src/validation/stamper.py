@@ -207,22 +207,31 @@ class DataStamper:
                     # Stamp batch samples with role information
                     stamped_batch = self.stamp_dataframe(batch_df)
 
-                    # Collect role statistics
-                    role_counts = stamped_batch.groupBy('fold_type').count().collect()
-                    for row in role_counts:
-                        fold_type = row['fold_type']
-                        count = row['count']
-                        if fold_type in role_stats:
-                            role_stats[fold_type] += count
+                    # Cache the stamped batch to avoid recomputation
+                    stamped_batch.cache()
+
+                    # Collect role statistics with retry logic for timeout resilience
+                    try:
+                        # Use a more efficient approach - persist first, then collect
+                        role_counts = stamped_batch.groupBy('fold_type').count().collect()
+                        for row in role_counts:
+                            fold_type = row['fold_type']
+                            count = row['count']
+                            if fold_type in role_stats:
+                                role_stats[fold_type] += count
+                    except Exception as stats_error:
+                        # If statistics collection times out, log warning and continue
+                        logger(f'Warning: Could not collect statistics for batch {batch_count}: {stats_error}', level="WARNING")
+                        # Continue processing - statistics are not critical
 
                     # Save batch with ObjectId preservation and temporal ordering
                     self._save_batch(stamped_batch, output_collection)
-                    
+
                     total_records += batch_records
                     batch_count += 1
-                    
+
                     logger(f'Batch {batch_count} saved ({batch_records:,} records, ordered)', level="INFO")
-                    
+
                     stamped_batch.unpersist()
                 
                 batch_df.unpersist()

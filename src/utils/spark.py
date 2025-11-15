@@ -38,6 +38,13 @@ def create_spark_session(
         .config("spark.sql.adaptive.enabled", "true")
         .config("spark.sql.shuffle.partitions", "16")
         .config("spark.sql.session.timeZone", "UTC")
+        # Timeout configurations to prevent socket timeouts
+        .config("spark.network.timeout", "600s")  # 10 minutes for network operations
+        .config("spark.executor.heartbeatInterval", "60s")  # Heartbeat every 60s
+        .config("spark.python.worker.reuse", "true")  # Reuse Python workers
+        .config("spark.rpc.askTimeout", "600s")  # 10 minutes for RPC calls
+        .config("spark.rpc.lookupTimeout", "600s")  # 10 minutes for RPC lookups
+        .config("spark.core.connection.ack.wait.timeout", "600s")  # Connection timeout
     )
     
     # Adds any additional configuration settings if provided

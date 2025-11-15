@@ -155,100 +155,90 @@ class DataStamper:
     
     def process_batches(self, input_collection: str, output_collection: str):
         """
-        Processes the whole dataset samples in hourly batches, stamping with role information.
-        
-        MODIFICATIONS:
-        - Preserves ObjectId format in output
-        - Ensures temporal ordering with sequential writes
+        Processes the whole dataset samples in daily batches, stamping with role information.
+
+        CHANGED FROM HOURLY TO DAILY BATCHES:
+        - Reduces number of batches from ~1,845 to ~77
+        - Each batch ~2,880 rows (24 hours × 120 rows/hour)
+        - Reduces overhead, better UDF amortization
+        - Still maintains temporal ordering
         """
-        logger('Processing hourly batches with complete role stamping...', level="INFO")
-        logger('ObjectId preservation: ENABLED', level="INFO")
+        logger('Processing daily batches with complete role stamping...', level="INFO")
+        logger('Batch size: 1 day (~2,880 rows per batch)', level="INFO")
         logger('Temporal ordering preservation: ENABLED (sequential writes)', level="INFO")
-        
+
         data_summary = self.metadata['data_summary']
-        
+
         # Parse timestamps manually (self-contained)
         def parse_ts(ts):
             if isinstance(ts, datetime):
                 return ts.replace(tzinfo=None) if ts.tzinfo else ts
             ts_clean = str(ts).replace('Z', '').replace('+00:00', '')
             return datetime.fromisoformat(ts_clean)
-        
+
         first_timestamp = parse_ts(data_summary['timestamp_range']['start'])
         last_timestamp = parse_ts(data_summary['timestamp_range']['end'])
-        current_hour = first_timestamp.replace(minute=0, second=0, microsecond=0)
-        end_boundary = last_timestamp.replace(minute=0, second=0, microsecond=0) + timedelta(hours=1)
-        
-        logger(f'Processing from {current_hour} to {end_boundary}', level="INFO")
-        
+
+        # Start at beginning of first day
+        current_day = first_timestamp.replace(hour=0, minute=0, second=0, microsecond=0)
+        # End at beginning of day after last timestamp
+        end_boundary = last_timestamp.replace(hour=0, minute=0, second=0, microsecond=0) + timedelta(days=1)
+
+        logger(f'Processing from {current_day} to {end_boundary}', level="INFO")
+        logger(f'Estimated batches: ~{(end_boundary - current_day).days} days', level="INFO")
+
         batch_count = 0
         total_records = 0
-        
-        # Log role statistics
-        role_stats = {
-            'train_warmup': 0,
-            'train': 0,
-            'train_test_embargo': 0,
-            'test': 0,
-            'test_horizon': 0,
-            'excluded': 0
-        }
-        
-        while current_hour < end_boundary:
-            next_hour = current_hour + timedelta(hours=1)
-            
+
+        while current_day < end_boundary:
+            next_day = current_day + timedelta(days=1)
+
             try:
-                # Load hour batch with normalized timestamps
-                batch_df = self._load_hour_batch(input_collection, current_hour, next_hour)
+                # Load day batch with normalized timestamps
+                batch_df = self._load_day_batch(input_collection, current_day, next_day)
                 batch_records = batch_df.count()
-                
+
                 if batch_records > 0:
                     # Stamp batch samples with role information
                     stamped_batch = self.stamp_dataframe(batch_df)
 
-                    # Skip caching and statistics collection to avoid triggering UDF execution
-                    # Statistics collection was causing socket timeouts with the complex Python UDF
-                    # The UDF will only execute once during MongoDB write (much faster)
-
-                    # Save batch directly using Spark's MongoDB connector (no Python collect!)
+                    # Save batch directly using Spark's MongoDB connector
                     self._save_batch(stamped_batch, output_collection)
 
                     total_records += batch_records
                     batch_count += 1
 
-                    logger(f'Batch {batch_count} saved ({batch_records:,} records)', level="INFO")
-                
+                    logger(f'Day {batch_count} saved: {current_day.strftime("%Y-%m-%d")} ({batch_records:,} records)', level="INFO")
+
                 batch_df.unpersist()
-                
+
             except Exception as e:
-                logger(f'Error processing batch {current_hour}: {str(e)}', level="ERROR")
+                logger(f'Error processing day {current_day.strftime("%Y-%m-%d")}: {str(e)}', level="ERROR")
                 import traceback
                 traceback.print_exc()
-            
-            current_hour = next_hour
-        
-        # Log final role statistics
-        logger(f'Fold-Level Role Statistics:', level="INFO")
-        logger(f'  Train warmup: {role_stats["train_warmup"]:,} samples', level="INFO")
-        logger(f'  Train: {role_stats["train"]:,} samples', level="INFO")
-        logger(f'  Train-test embargo: {role_stats["train_test_embargo"]:,} samples', level="INFO")
-        logger(f'  Test: {role_stats["test"]:,} samples', level="INFO")
-        logger(f'  Test horizon: {role_stats["test_horizon"]:,} samples', level="INFO")
-        logger(f'  Excluded: {role_stats["excluded"]:,} samples', level="INFO")
-        logger(f'  Total: {total_records:,} samples', level="INFO")
-        
-        logger(f'Processed {batch_count} batches, {total_records:,} total records', level="INFO")
+
+            current_day = next_day
+
+        logger(f'Processed {batch_count} daily batches, {total_records:,} total records', level="INFO")
         logger(f'Output collection temporal ordering: GUARANTEED', level="INFO")
     
-    def _load_hour_batch(self, collection: str, start_hour: datetime, end_hour: datetime) -> DataFrame:
+    def _load_day_batch(self, collection: str, start_day: datetime, end_day: datetime) -> DataFrame:
         """
-        Loads dataset samples by hour batches WITH NORMALIZED TIMESTAMP STRINGS.
+        Loads dataset samples by day batches WITH NORMALIZED TIMESTAMP STRINGS.
+
+        Args:
+            collection: MongoDB collection name
+            start_day: Start of day (00:00:00)
+            end_day: End of day / start of next day (00:00:00)
+
+        Returns:
+            DataFrame with normalized timestamp strings
         """
         pipeline = [
             {"$match": {
                 "timestamp": {
-                    "$gte": {"$date": format_timestamp_for_mongodb(start_hour)},
-                    "$lt": {"$date": format_timestamp_for_mongodb(end_hour)}
+                    "$gte": {"$date": format_timestamp_for_mongodb(start_day)},
+                    "$lt": {"$date": format_timestamp_for_mongodb(end_day)}
                 }
             }},
             {"$sort": {"timestamp": 1}},
@@ -257,7 +247,7 @@ class DataStamper:
                 "_id_str": {"$toString": "$_id"}  # Preserve _id as string for processing
             }}
         ]
-        
+
         batch_df = (
             self.spark.read.format("mongodb")
             .option("database", self.db_name)
@@ -265,7 +255,7 @@ class DataStamper:
             .option("aggregation.pipeline", str(pipeline).replace("'", '"'))
             .load()
         )
-        
+
         return batch_df
     
     def _save_batch(self, batch_df: DataFrame, output_collection: str):

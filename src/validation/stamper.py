@@ -2,6 +2,7 @@ from typing import List, Dict
 from pyspark.sql import DataFrame
 from datetime import datetime, timedelta
 from pyspark.sql.functions import col, udf
+from bson import ObjectId
 from src.utils import logger, format_timestamp_for_mongodb
 from pyspark.sql.types import StructType, StructField, IntegerType, StringType, MapType
 
@@ -155,90 +156,106 @@ class DataStamper:
     
     def process_batches(self, input_collection: str, output_collection: str):
         """
-        Processes the whole dataset samples in daily batches, stamping with role information.
-
-        CHANGED FROM HOURLY TO DAILY BATCHES:
-        - Reduces number of batches from ~1,845 to ~77
-        - Each batch ~2,880 rows (24 hours × 120 rows/hour)
-        - Reduces overhead, better UDF amortization
-        - Still maintains temporal ordering
+        Processes the whole dataset samples in hourly batches, stamping with role information.
+        
+        MODIFICATIONS:
+        - Preserves ObjectId format in output
+        - Ensures temporal ordering with sequential writes
         """
-        logger('Processing daily batches with complete role stamping...', level="INFO")
-        logger('Batch size: 1 day (~2,880 rows per batch)', level="INFO")
+        logger('Processing hourly batches with complete role stamping...', level="INFO")
+        logger('ObjectId preservation: ENABLED', level="INFO")
         logger('Temporal ordering preservation: ENABLED (sequential writes)', level="INFO")
-
+        
         data_summary = self.metadata['data_summary']
-
+        
         # Parse timestamps manually (self-contained)
         def parse_ts(ts):
             if isinstance(ts, datetime):
                 return ts.replace(tzinfo=None) if ts.tzinfo else ts
             ts_clean = str(ts).replace('Z', '').replace('+00:00', '')
             return datetime.fromisoformat(ts_clean)
-
+        
         first_timestamp = parse_ts(data_summary['timestamp_range']['start'])
         last_timestamp = parse_ts(data_summary['timestamp_range']['end'])
-
-        # Start at beginning of first day
-        current_day = first_timestamp.replace(hour=0, minute=0, second=0, microsecond=0)
-        # End at beginning of day after last timestamp
-        end_boundary = last_timestamp.replace(hour=0, minute=0, second=0, microsecond=0) + timedelta(days=1)
-
-        logger(f'Processing from {current_day} to {end_boundary}', level="INFO")
-        logger(f'Estimated batches: ~{(end_boundary - current_day).days} days', level="INFO")
-
+        current_hour = first_timestamp.replace(minute=0, second=0, microsecond=0)
+        end_boundary = last_timestamp.replace(minute=0, second=0, microsecond=0) + timedelta(hours=1)
+        
+        logger(f'Processing from {current_hour} to {end_boundary}', level="INFO")
+        
         batch_count = 0
         total_records = 0
-
-        while current_day < end_boundary:
-            next_day = current_day + timedelta(days=1)
-
+        
+        # Log role statistics
+        role_stats = {
+            'train_warmup': 0,
+            'train': 0,
+            'train_test_embargo': 0,
+            'test': 0,
+            'test_horizon': 0,
+            'excluded': 0
+        }
+        
+        while current_hour < end_boundary:
+            next_hour = current_hour + timedelta(hours=1)
+            
             try:
-                # Load day batch with normalized timestamps
-                batch_df = self._load_day_batch(input_collection, current_day, next_day)
+                # Load hour batch with normalized timestamps
+                batch_df = self._load_hour_batch(input_collection, current_hour, next_hour)
                 batch_records = batch_df.count()
-
+                
                 if batch_records > 0:
                     # Stamp batch samples with role information
                     stamped_batch = self.stamp_dataframe(batch_df)
 
-                    # Save batch directly using Spark's MongoDB connector
-                    self._save_batch(stamped_batch, output_collection)
+                    # Collect role statistics
+                    role_counts = stamped_batch.groupBy('fold_type').count().collect()
+                    for row in role_counts:
+                        fold_type = row['fold_type']
+                        count = row['count']
+                        if fold_type in role_stats:
+                            role_stats[fold_type] += count
 
+                    # Save batch with ObjectId preservation and temporal ordering
+                    self._save_batch(stamped_batch, output_collection)
+                    
                     total_records += batch_records
                     batch_count += 1
-
-                    logger(f'Day {batch_count} saved: {current_day.strftime("%Y-%m-%d")} ({batch_records:,} records)', level="INFO")
-
+                    
+                    logger(f'Batch {batch_count} saved ({batch_records:,} records, ordered)', level="INFO")
+                    
+                    stamped_batch.unpersist()
+                
                 batch_df.unpersist()
-
+                
             except Exception as e:
-                logger(f'Error processing day {current_day.strftime("%Y-%m-%d")}: {str(e)}', level="ERROR")
+                logger(f'Error processing batch {current_hour}: {str(e)}', level="ERROR")
                 import traceback
                 traceback.print_exc()
-
-            current_day = next_day
-
-        logger(f'Processed {batch_count} daily batches, {total_records:,} total records', level="INFO")
+            
+            current_hour = next_hour
+        
+        # Log final role statistics
+        logger(f'Fold-Level Role Statistics:', level="INFO")
+        logger(f'  Train warmup: {role_stats["train_warmup"]:,} samples', level="INFO")
+        logger(f'  Train: {role_stats["train"]:,} samples', level="INFO")
+        logger(f'  Train-test embargo: {role_stats["train_test_embargo"]:,} samples', level="INFO")
+        logger(f'  Test: {role_stats["test"]:,} samples', level="INFO")
+        logger(f'  Test horizon: {role_stats["test_horizon"]:,} samples', level="INFO")
+        logger(f'  Excluded: {role_stats["excluded"]:,} samples', level="INFO")
+        logger(f'  Total: {total_records:,} samples', level="INFO")
+        
+        logger(f'Processed {batch_count} batches, {total_records:,} total records', level="INFO")
         logger(f'Output collection temporal ordering: GUARANTEED', level="INFO")
     
-    def _load_day_batch(self, collection: str, start_day: datetime, end_day: datetime) -> DataFrame:
+    def _load_hour_batch(self, collection: str, start_hour: datetime, end_hour: datetime) -> DataFrame:
         """
-        Loads dataset samples by day batches WITH NORMALIZED TIMESTAMP STRINGS.
-
-        Args:
-            collection: MongoDB collection name
-            start_day: Start of day (00:00:00)
-            end_day: End of day / start of next day (00:00:00)
-
-        Returns:
-            DataFrame with normalized timestamp strings
+        Loads dataset samples by hour batches WITH NORMALIZED TIMESTAMP STRINGS.
         """
         pipeline = [
             {"$match": {
                 "timestamp": {
-                    "$gte": {"$date": format_timestamp_for_mongodb(start_day)},
-                    "$lt": {"$date": format_timestamp_for_mongodb(end_day)}
+                    "$gte": {"$date": format_timestamp_for_mongodb(start_hour)},
+                    "$lt": {"$date": format_timestamp_for_mongodb(end_hour)}
                 }
             }},
             {"$sort": {"timestamp": 1}},
@@ -247,7 +264,7 @@ class DataStamper:
                 "_id_str": {"$toString": "$_id"}  # Preserve _id as string for processing
             }}
         ]
-
+        
         batch_df = (
             self.spark.read.format("mongodb")
             .option("database", self.db_name)
@@ -255,42 +272,73 @@ class DataStamper:
             .option("aggregation.pipeline", str(pipeline).replace("'", '"'))
             .load()
         )
-
+        
         return batch_df
     
     def _save_batch(self, batch_df: DataFrame, output_collection: str):
         """
-        Saves the batch to output collection using Spark's MongoDB connector directly.
-
-        OPTIMIZED VERSION - NO COLLECT():
-        1. Uses Spark's MongoDB write connector (avoids Python worker timeout!)
-        2. Converts timestamp_str to timestamp using Spark SQL (not Python)
-        3. Preserves temporal ordering through sequential hour processing
-        4. Much faster - no data transfer from JVM to Python
-
-        Trade-off: _id stored as string instead of ObjectId, but avoids timeouts.
+        Saves the batch to output collection with ObjectId preservation and temporal ordering.
+        
+        CRITICAL MODIFICATIONS:
+        1. Converts _id from String back to ObjectId before writing
+        2. Uses timestamp_str (UTC string) instead of Spark timestamp to avoid timezone conversion
+        3. Uses ordered=True to preserve write order
+        
+        This guarantees:
+        - ObjectId format is maintained in output collection
+        - Timestamps remain in original UTC timezone (no +2h shift)
+        - Temporal ordering is preserved across all batches
         """
-        from pyspark.sql.functions import to_timestamp
-
-        # Convert timestamp_str back to proper timestamp using Spark SQL
-        # This is much faster than doing it in Python
-        batch_df_final = batch_df.withColumn(
-            "timestamp",
-            to_timestamp(col("timestamp_str"), "yyyy-MM-dd'T'HH:mm:ss.SSS'Z'")
+        # Convert DataFrame to list of dictionaries for manual processing
+        batch_data = batch_df.collect()
+        
+        if not batch_data:
+            return
+        
+        # Convert to list of dicts and fix ObjectId + timestamps
+        documents = []
+        for row in batch_data:
+            doc = row.asDict()
+            
+            # CRITICAL FIX: Use timestamp_str to reconstruct UTC naive datetime
+            # This avoids Spark's timezone conversion issues
+            if 'timestamp_str' in doc:
+                ts_str = doc['timestamp_str']
+                # Parse the UTC string (format: "2025-07-04T00:00:13.211Z")
+                ts_str_clean = ts_str.replace('Z', '').replace('+00:00', '')
+                doc['timestamp'] = datetime.fromisoformat(ts_str_clean)
+            
+            # Remove temporary processing fields
+            doc.pop('timestamp_str', None)
+            doc.pop('_id_str', None)
+            
+            # CRITICAL FIX: Convert _id from String back to ObjectId
+            if '_id' in doc and isinstance(doc['_id'], str):
+                try:
+                    doc['_id'] = ObjectId(doc['_id'])
+                except Exception as e:
+                    logger(f'Warning: Could not convert _id to ObjectId: {doc["_id"]}', level="WARNING")
+            
+            documents.append(doc)
+        
+        # Write to MongoDB with ordered inserts
+        from pymongo import MongoClient
+        
+        # Get MongoDB URI from Spark config or use default
+        mongo_uri = self.spark.sparkContext.getConf().get(
+            'spark.mongodb.read.connection.uri', 
+            'mongodb://127.0.0.1:27017/'
         )
-
-        # Drop temporary fields not needed in output
-        columns_to_drop = ["timestamp_str"]
-        if "_id_str" in batch_df_final.columns:
-            columns_to_drop.append("_id_str")
-
-        batch_df_final = batch_df_final.drop(*columns_to_drop)
-
-        # Write directly to MongoDB using Spark connector (NO COLLECT!)
-        # This completely avoids Python worker communication and timeouts
-        batch_df_final.write \
-            .format("mongodb") \
-            .option("database", self.db_name) \
-            .option("collection", output_collection) \
-            .mode("append") \
-            .save()
+        
+        client = MongoClient(mongo_uri)
+        db = client[self.db_name]
+        collection = db[output_collection]
+        
+        # Insert with ordered=True to preserve temporal ordering
+        try:
+            collection.insert_many(documents, ordered=True)
+        except Exception as e:
+            logger(f'Error inserting batch: {str(e)}', level="ERROR")
+            raise
+        finally:
+            client.close()

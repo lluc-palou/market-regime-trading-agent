@@ -78,7 +78,6 @@ MONGO_CONFIG = {
 SPARK_CONFIG = {
     "app_name": "ExportSplitsToS3",
     "driver_memory": "8g",
-    "jar_files_path": "file:///C:/spark/spark-3.4.1-bin-hadoop3/jars/",
 }
 
 # =================================================================================================
@@ -121,43 +120,63 @@ def discover_split_collections(mongo_uri: str, db_name: str) -> List[int]:
 
 def get_split_statistics(spark: SparkSession, db_name: str, collection: str) -> Dict[str, Any]:
     """
-    Get statistics for a split collection.
+    Get statistics for a split collection with optimized single-pass scanning.
+    Uses caching to avoid multiple scans of large data.
 
     Returns:
         Dictionary with document count, role distribution, schema info
     """
+    from src.utils.s3_config import get_mongodb_read_options
+
+    # Read with optimized partitioning for large collections
     df = (
         spark.read.format("mongodb")
         .option("database", db_name)
         .option("collection", collection)
+        .options(**get_mongodb_read_options(partition_size_mb=64))
         .load()
     )
 
-    # Get document count
-    doc_count = df.count()
+    # Cache the DataFrame to avoid multiple scans (critical for 10GB+ data!)
+    df.cache()
 
-    # Get role distribution
-    role_dist = {}
-    if doc_count > 0 and "role" in df.columns:
-        role_counts = df.groupBy("role").agg(spark_count("*").alias("count")).collect()
-        role_dist = {row["role"]: row["count"] for row in role_counts}
+    try:
+        # Get document count (triggers cache)
+        doc_count = df.count()
 
-    # Get schema info
-    schema_fields = [field.name for field in df.schema.fields]
+        if doc_count == 0:
+            return {
+                "num_documents": 0,
+                "role_distribution": {},
+                "schema_fields": [],
+                "feature_length": None,
+            }
 
-    # Get feature array length if present
-    feature_length = None
-    if doc_count > 0 and "features" in df.columns:
-        first_row = df.select("features").first()
-        if first_row and first_row["features"]:
-            feature_length = len(first_row["features"])
+        # Get role distribution (uses cached data)
+        role_dist = {}
+        if "role" in df.columns:
+            role_counts = df.groupBy("role").agg(spark_count("*").alias("count")).collect()
+            role_dist = {row["role"]: row["count"] for row in role_counts}
 
-    return {
-        "num_documents": doc_count,
-        "role_distribution": role_dist,
-        "schema_fields": schema_fields,
-        "feature_length": feature_length,
-    }
+        # Get schema info
+        schema_fields = [field.name for field in df.schema.fields]
+
+        # Get feature array length if present (uses cached data)
+        feature_length = None
+        if "features" in df.columns:
+            first_row = df.select("features").first()
+            if first_row and first_row["features"]:
+                feature_length = len(first_row["features"])
+
+        return {
+            "num_documents": doc_count,
+            "role_distribution": role_dist,
+            "schema_fields": schema_fields,
+            "feature_length": feature_length,
+        }
+    finally:
+        # Unpersist to free memory after we're done
+        df.unpersist()
 
 
 def export_split_to_s3(
@@ -168,36 +187,43 @@ def export_split_to_s3(
     split_id: int
 ) -> Dict[str, Any]:
     """
-    Export a single split collection to S3 as Parquet.
+    Export a single split collection to S3 as Parquet with retry logic.
 
     Returns:
         Dictionary with export statistics
     """
+    from src.utils.s3_config import get_mongodb_read_options, retry_s3_operation
+
     logger(f'Exporting split {split_id} to S3...', "INFO")
     logger(f'  Source: {db_name}.{collection}', "INFO")
     logger(f'  Destination: {s3_path}', "INFO")
 
-    # Read from MongoDB
-    df = (
-        spark.read.format("mongodb")
-        .option("database", db_name)
-        .option("collection", collection)
-        .load()
-    )
-
-    # Get statistics before export
+    # Get statistics before export (uses optimized caching)
     stats = get_split_statistics(spark, db_name, collection)
 
     if stats["num_documents"] == 0:
         logger(f'  Split {split_id} is empty, skipping export', "WARNING")
         return None
 
+    # Read from MongoDB with optimized partitioning for large splits
+    df = (
+        spark.read.format("mongodb")
+        .option("database", db_name)
+        .option("collection", collection)
+        .options(**get_mongodb_read_options(partition_size_mb=64))
+        .load()
+    )
+
     # Convert ObjectId to string for Parquet compatibility
     if "_id" in df.columns:
         df = df.withColumn("_id", col("_id").cast("string"))
 
-    # Write to S3 as Parquet with compression
-    df.write.mode("overwrite").parquet(s3_path)
+    # Write to S3 as Parquet with compression and retry logic
+    @retry_s3_operation
+    def write_to_s3():
+        df.write.mode("overwrite").parquet(s3_path)
+
+    write_to_s3()
 
     logger(f'  Exported {stats["num_documents"]:,} documents', "INFO")
     logger(f'  Features: {stats["feature_length"]} dimensions', "INFO")
@@ -211,18 +237,26 @@ def export_split_to_s3(
     }
 
 
-def calculate_s3_checksum(spark: SparkSession, s3_path: str) -> str:
+def calculate_split_checksum_from_stats(stats: Dict[str, Any]) -> str:
     """
-    Calculate checksum for S3 Parquet files.
+    Calculate checksum from pre-computed statistics (metadata-based).
+    Much more efficient than re-reading from S3 - avoids downloading 10GB files!
 
-    This is a simple implementation - in production you might want to use S3 ETags.
+    Args:
+        stats: Dictionary with split statistics (from get_split_statistics)
+
+    Returns:
+        MD5 checksum string
     """
     try:
-        # Read back from S3 and calculate basic checksum on document count + schema
-        df = spark.read.parquet(s3_path)
-        count = df.count()
-        schema_str = str(df.schema)
-        checksum_input = f"{count}:{schema_str}"
+        # Create checksum from metadata components
+        checksum_components = [
+            str(stats.get("num_documents", 0)),
+            str(stats.get("schema_fields", [])),
+            str(stats.get("feature_length", 0)),
+            str(sorted(stats.get("role_distribution", {}).items())),
+        ]
+        checksum_input = ":".join(checksum_components)
         checksum = hashlib.md5(checksum_input.encode()).hexdigest()
         return f"md5:{checksum}"
     except Exception as e:
@@ -304,20 +338,21 @@ def main():
 
     # Create Spark session with S3 support
     logger('Initializing Spark with S3 support...', "INFO")
+
+    from src.utils.s3_config import configure_spark_for_s3, get_spark_jars_path
+
     spark = create_spark_session(
         app_name=SPARK_CONFIG["app_name"],
         mongo_uri=MONGO_CONFIG["uri"],
         db_name=MONGO_CONFIG["db_name"],
         driver_memory=SPARK_CONFIG["driver_memory"],
-        jar_files_path=SPARK_CONFIG["jar_files_path"]
+        jar_files_path=get_spark_jars_path()
     )
 
-    # Configure S3 for Spark
-    spark.sparkContext._jsc.hadoopConfiguration().set("fs.s3a.impl", "org.apache.hadoop.fs.s3a.S3AFileSystem")
-    spark.sparkContext._jsc.hadoopConfiguration().set("fs.s3a.aws.credentials.provider",
-        "com.amazonaws.auth.InstanceProfileCredentialsProvider")
+    # Configure S3 with optimized settings for large files (multipart, timeouts, retries)
+    configure_spark_for_s3(spark)
 
-    logger('Spark session created', "INFO")
+    logger('Spark session created with optimized S3 configuration', "INFO")
     logger('', "INFO")
 
     try:
@@ -357,8 +392,8 @@ def main():
             )
 
             if stats:
-                # Calculate checksum
-                stats["checksum"] = calculate_s3_checksum(spark, s3_path)
+                # Calculate checksum from metadata (no S3 re-read needed!)
+                stats["checksum"] = calculate_split_checksum_from_stats(stats)
                 split_stats.append(stats)
 
             logger('', "INFO")

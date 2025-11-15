@@ -74,7 +74,6 @@ LOCAL_CONFIG = {
 SPARK_CONFIG = {
     "app_name": "UploadLobDataToS3",
     "driver_memory": "4g",
-    "jar_files_path": "file:///C:/spark/spark-3.4.1-bin-hadoop3/jars/",
 }
 
 # =================================================================================================
@@ -139,8 +138,8 @@ def calculate_file_checksum(file_path: str) -> str:
     md5_hash = hashlib.md5()
 
     with open(file_path, "rb") as f:
-        # Read file in chunks to handle large files
-        for chunk in iter(lambda: f.read(4096), b""):
+        # Read file in 8MB chunks for better performance with large files
+        for chunk in iter(lambda: f.read(8388608), b""):
             md5_hash.update(chunk)
 
     return md5_hash.hexdigest()
@@ -152,7 +151,7 @@ def upload_file_to_s3(
     s3_path: str
 ) -> Dict[str, Any]:
     """
-    Upload a single .parquet file to S3.
+    Upload a single .parquet file to S3 with retry logic.
 
     Args:
         spark: Spark session
@@ -162,6 +161,8 @@ def upload_file_to_s3(
     Returns:
         Dictionary with upload statistics
     """
+    from src.utils.s3_config import retry_s3_operation
+
     logger(f'Uploading: {file_info["filename"]}', "INFO")
     logger(f'  Source: {file_info["absolute_path"]}', "INFO")
     logger(f'  Destination: {s3_path}', "INFO")
@@ -178,8 +179,12 @@ def upload_file_to_s3(
         row_count = df.count()
         schema_fields = [field.name for field in df.schema.fields]
 
-        # Write to S3
-        df.write.mode("overwrite").parquet(s3_path)
+        # Write to S3 with retry logic for reliability
+        @retry_s3_operation
+        def write_to_s3():
+            df.write.mode("overwrite").parquet(s3_path)
+
+        write_to_s3()
 
         logger(f'  Uploaded successfully ({row_count:,} rows)', "INFO")
 
@@ -267,18 +272,21 @@ def upload_manifest_to_s3(spark: SparkSession, manifest: Dict[str, Any], s3_mani
     logger('Manifest uploaded successfully', "INFO")
 
 
-def create_spark_session_for_s3(app_name: str, driver_memory: str, jar_files_path: str) -> SparkSession:
+def create_spark_session_for_s3(app_name: str, driver_memory: str) -> SparkSession:
     """
-    Create Spark session configured for S3 access.
+    Create Spark session configured for S3 access with optimized settings for large files.
 
     Args:
         app_name: Name of the Spark application
         driver_memory: Driver memory allocation
-        jar_files_path: Path to JAR files
 
     Returns:
         Configured Spark session
     """
+    from src.utils.s3_config import get_spark_jars_path, configure_spark_for_s3
+
+    jar_files_path = get_spark_jars_path()
+
     # JAR files needed for S3 access
     aws_jars = [
         f"{jar_files_path}hadoop-aws-3.3.4.jar",
@@ -293,10 +301,8 @@ def create_spark_session_for_s3(app_name: str, driver_memory: str, jar_files_pat
         .getOrCreate()
     )
 
-    # Configure S3 for Spark
-    spark.sparkContext._jsc.hadoopConfiguration().set("fs.s3a.impl", "org.apache.hadoop.fs.s3a.S3AFileSystem")
-    spark.sparkContext._jsc.hadoopConfiguration().set("fs.s3a.aws.credentials.provider",
-        "com.amazonaws.auth.InstanceProfileCredentialsProvider")
+    # Configure S3 with optimized settings for large files (multipart, timeouts, retries)
+    configure_spark_for_s3(spark)
 
     return spark
 
@@ -338,10 +344,9 @@ def main():
     logger('Initializing Spark with S3 support...', "INFO")
     spark = create_spark_session_for_s3(
         app_name=SPARK_CONFIG["app_name"],
-        driver_memory=SPARK_CONFIG["driver_memory"],
-        jar_files_path=SPARK_CONFIG["jar_files_path"]
+        driver_memory=SPARK_CONFIG["driver_memory"]
     )
-    logger('Spark session created', "INFO")
+    logger('Spark session created with optimized S3 configuration', "INFO")
     logger('', "INFO")
 
     try:

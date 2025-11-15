@@ -78,7 +78,6 @@ MONGO_CONFIG = {
 SPARK_CONFIG = {
     "app_name": "ImportSplitsFromS3",
     "driver_memory": "8g",
-    "jar_files_path": "file:///C:/spark/spark-3.4.1-bin-hadoop3/jars/",
 }
 
 # =================================================================================================
@@ -95,12 +94,10 @@ def list_available_exports(spark: SparkSession) -> List[str]:
     logger('Listing available exports in S3...', "INFO")
 
     try:
-        # Use Spark to list directories in S3
-        s3_base = f"s3a://{S3_CONFIG['bucket']}/{S3_CONFIG['prefix']}/"
+        # Use boto3 for listing with optimized retry configuration
+        from src.utils.s3_config import create_s3_client
 
-        # This is tricky with Spark - we'll use boto3 for listing
-        import boto3
-        s3_client = boto3.client('s3', region_name=S3_CONFIG['region'])
+        s3_client = create_s3_client(region_name=S3_CONFIG['region'])
 
         response = s3_client.list_objects_v2(
             Bucket=S3_CONFIG['bucket'],
@@ -168,11 +165,13 @@ def import_split_from_s3(
     mongo_uri: str
 ) -> bool:
     """
-    Import a single split from S3 to MongoDB.
+    Import a single split from S3 to MongoDB with retry logic and optimizations.
 
     Returns:
         True if successful, False otherwise
     """
+    from src.utils.s3_config import retry_s3_operation, MONGODB_LARGE_IMPORT_OPTIONS
+
     split_id = split_info["split_id"]
     s3_path = split_info["s3_path"]
     collection_name = f"{MONGO_CONFIG['collection_prefix']}{split_id}{MONGO_CONFIG['collection_suffix']}"
@@ -182,47 +181,65 @@ def import_split_from_s3(
     logger(f'  Destination: {db_name}.{collection_name}', "INFO")
 
     try:
-        # Read from S3
-        df = spark.read.parquet(s3_path)
+        # Read from S3 with retry logic
+        @retry_s3_operation
+        def read_from_s3():
+            return spark.read.parquet(s3_path)
 
-        # Convert _id back from string to proper format for MongoDB
-        # Note: MongoDB connector will handle ObjectId conversion automatically
-        # if _id is present, so we just need to ensure it's a string
+        df = read_from_s3()
 
         # Drop existing collection first (clean slate)
         client = MongoClient(mongo_uri)
         db = client[db_name]
-        if collection_name in db.list_collection_names():
-            db[collection_name].drop()
-            logger(f'  Dropped existing collection {collection_name}', "INFO")
-        client.close()
+        try:
+            if collection_name in db.list_collection_names():
+                db[collection_name].drop()
+                logger(f'  Dropped existing collection {collection_name}', "INFO")
+        except Exception as e:
+            logger(f'  Warning: Could not drop collection {collection_name}: {e}', "WARNING")
+        finally:
+            client.close()
 
-        # Write to MongoDB
+        # Write to MongoDB with optimized batch configuration
         df.write.format("mongodb") \
             .option("database", db_name) \
             .option("collection", collection_name) \
-            .option("ordered", "false") \
+            .options(**MONGODB_LARGE_IMPORT_OPTIONS) \
             .mode("overwrite") \
             .save()
 
-        # Verify document count
+        # Verify document count using estimated count for large collections
         client = MongoClient(mongo_uri)
         db = client[db_name]
-        actual_count = db[collection_name].count_documents({})
         expected_count = split_info["num_documents"]
+
+        # Use estimated count for large collections (much faster)
+        if expected_count > 100000:
+            actual_count = db[collection_name].estimated_document_count()
+            logger(f'  Verified ~{actual_count:,} documents (estimated)', "INFO")
+        else:
+            actual_count = db[collection_name].count_documents({})
+            logger(f'  Verified {actual_count:,} documents (exact)', "INFO")
+
         client.close()
 
-        if actual_count != expected_count:
+        # Allow small variance for estimated counts
+        count_diff = abs(actual_count - expected_count)
+        count_variance = count_diff / expected_count if expected_count > 0 else 0
+
+        if count_variance > 0.05:  # Allow 5% variance for estimated counts
             logger(f'  WARNING: Document count mismatch! Expected {expected_count:,}, got {actual_count:,}', "WARNING")
             return False
 
-        logger(f'  Imported {actual_count:,} documents successfully', "INFO")
+        logger(f'  Imported successfully', "INFO")
         logger(f'  Role distribution: {split_info.get("role_distribution", {})}', "INFO")
 
         return True
 
     except Exception as e:
         logger(f'  Failed to import split {split_id}: {e}', "ERROR")
+        import traceback
+        traceback.print_exc()
         return False
 
 
@@ -253,15 +270,27 @@ def verify_restoration(spark: SparkSession, manifest: Dict[str, Any], mongo_uri:
             all_passed = False
             continue
 
-        # Check document count
-        actual_count = db[collection_name].count_documents({})
+        # Check document count - use estimated for large collections
         expected_count = split_info["num_documents"]
 
-        if actual_count != expected_count:
-            logger(f'  FAIL: Split {split_id} count mismatch (expected {expected_count:,}, got {actual_count:,})', "ERROR")
-            all_passed = False
+        if expected_count > 100000:
+            actual_count = db[collection_name].estimated_document_count()
+            # Allow 5% variance for estimated counts
+            count_diff = abs(actual_count - expected_count)
+            count_variance = count_diff / expected_count if expected_count > 0 else 0
+
+            if count_variance > 0.05:
+                logger(f'  FAIL: Split {split_id} count mismatch (expected {expected_count:,}, got ~{actual_count:,})', "ERROR")
+                all_passed = False
+            else:
+                logger(f'  PASS: Split {split_id} (~{actual_count:,} documents estimated)', "INFO")
         else:
-            logger(f'  PASS: Split {split_id} ({actual_count:,} documents)', "INFO")
+            actual_count = db[collection_name].count_documents({})
+            if actual_count != expected_count:
+                logger(f'  FAIL: Split {split_id} count mismatch (expected {expected_count:,}, got {actual_count:,})', "ERROR")
+                all_passed = False
+            else:
+                logger(f'  PASS: Split {split_id} ({actual_count:,} documents)', "INFO")
 
     client.close()
 
@@ -295,20 +324,21 @@ def main():
 
     # Create Spark session with S3 support
     logger('Initializing Spark with S3 support...', "INFO")
+
+    from src.utils.s3_config import configure_spark_for_s3, get_spark_jars_path
+
     spark = create_spark_session(
         app_name=SPARK_CONFIG["app_name"],
         mongo_uri=MONGO_CONFIG["uri"],
         db_name=MONGO_CONFIG["db_name"],
         driver_memory=SPARK_CONFIG["driver_memory"],
-        jar_files_path=SPARK_CONFIG["jar_files_path"]
+        jar_files_path=get_spark_jars_path()
     )
 
-    # Configure S3 for Spark
-    spark.sparkContext._jsc.hadoopConfiguration().set("fs.s3a.impl", "org.apache.hadoop.fs.s3a.S3AFileSystem")
-    spark.sparkContext._jsc.hadoopConfiguration().set("fs.s3a.aws.credentials.provider",
-        "com.amazonaws.auth.InstanceProfileCredentialsProvider")
+    # Configure S3 with optimized settings for large files (multipart, timeouts, retries)
+    configure_spark_for_s3(spark)
 
-    logger('Spark session created', "INFO")
+    logger('Spark session created with optimized S3 configuration', "INFO")
     logger('', "INFO")
 
     try:

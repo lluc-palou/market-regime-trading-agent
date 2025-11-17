@@ -220,7 +220,10 @@ def apply_transformations_direct(
         if '_id' in transformed_df.columns:
             transformed_df = transformed_df.drop('_id')
 
-        # Write batch to output collection
+        # Ensure temporal ordering before writing
+        transformed_df = transformed_df.orderBy("timestamp")
+
+        # Write batch to output collection with ordered writes
         mode = "overwrite" if first_batch else "append"
 
         (
@@ -229,6 +232,7 @@ def apply_transformations_direct(
             .format("mongodb")
             .option("database", db_name)
             .option("collection", output_collection)
+            .option("ordered", "true")
             .mode(mode)
             .save()
         )

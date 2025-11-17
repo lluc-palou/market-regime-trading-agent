@@ -19,7 +19,7 @@ from .data_loader import (
 )
 from .processor import FeatureTransformProcessor
 from .aggregator import aggregate_across_splits, select_final_transforms
-from .transformation_application import apply_transformations_direct, apply_single_transform
+from .transformation_application import apply_transformations_direct
 
 __all__ = [
     'fit_transform_params',
@@ -33,6 +33,5 @@ __all__ = [
     'FeatureTransformProcessor',
     'aggregate_across_splits',
     'select_final_transforms',
-    'apply_transformations_direct',
-    'apply_single_transform'
+    'apply_transformations_direct'
 ]

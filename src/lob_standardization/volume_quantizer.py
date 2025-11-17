@@ -1,19 +1,18 @@
 import numpy as np
 from pyspark.sql import DataFrame, SparkSession
-from pyspark.sql.types import ArrayType, DoubleType
-from pyspark.sql.functions import col, expr, udf
+from pyspark.sql.functions import col, expr
 from src.utils.logging import logger
 
 
 class VolumeQuantizer:
-    """Quantizes volumes into logarithmically-spaced bins."""
-    
+    """Quantizes volumes into logarithmically-spaced bins using native Spark SQL."""
+
     def __init__(self, spark: SparkSession, B: int, delta: float, epsilon: float = 0.01):
         """
-        Initialize volume quantizer.
-        
+        Initialize volume quantizer and precompute bin edges.
+
         Args:
-            spark: SparkSession instance (needed for broadcast variables)
+            spark: SparkSession instance
             B: Number of bins (output will be B+1 bins)
             delta: Price range in standard deviations
             epsilon: Minimum price spacing near zero
@@ -22,19 +21,42 @@ class VolumeQuantizer:
         self.B = B
         self.delta = delta
         self.epsilon = epsilon
+        self._compute_bin_edges()
+
+    def _compute_bin_edges(self):
+        """Precompute logarithmic bin edges (same for all snapshots)."""
+        n_half = self.B // 2
+
+        # Create logarithmic spacing from epsilon to delta
+        log_points = np.exp(np.linspace(np.log(self.epsilon), np.log(self.delta), n_half))
+
+        # Build edges in monotonically increasing order
+        negative_edges = -log_points[::-1]  # Reverse to get increasing order
+        positive_edges = log_points
+
+        edges = np.concatenate([
+            [-np.inf],
+            negative_edges,
+            [0],
+            positive_edges,
+            [np.inf]
+        ])
+
+        self.edges = edges.tolist()
+        logger(f'Precomputed {len(self.edges)} bin edges', "INFO")
     
     def quantize_and_aggregate(self, df: DataFrame) -> DataFrame:
         """
-        Perform logarithmic quantization and aggregate raw volumes into bins.
-        
+        Perform logarithmic quantization and aggregate raw volumes into bins using native Spark SQL.
+
         Creates B+1 bins ordered by price:
         - Index 0: Most negative price (-delta)
         - Index B//2: Near zero price
         - Index B: Most positive price (+delta)
-        
+
         Args:
             df: DataFrame with 'prices' and 'volumes' columns
-            
+
         Returns:
             DataFrame with 'bins_raw' column containing aggregated volumes
         """
@@ -42,74 +64,83 @@ class VolumeQuantizer:
         logger(f'Configuration: delta={self.delta}, epsilon={self.epsilon}', "INFO")
         logger(f'Bins ordered by PRICE: index 0 = -{self.delta}, index {self.B//2} approx 0, index {self.B} = +{self.delta}', "INFO")
         logger(f'Aggregating RAW volumes (normalization will come after)', "INFO")
-        
-        # Broadcast configuration to all workers
-        B_broadcast = self.spark.sparkContext.broadcast(self.B)
-        delta_broadcast = self.spark.sparkContext.broadcast(self.delta)
-        epsilon_broadcast = self.spark.sparkContext.broadcast(self.epsilon)
-        
-        @udf(ArrayType(DoubleType()))
-        def bin_raw_volumes_per_snapshot(prices_arr, volumes_arr):
-            """UDF to bin volumes for a single snapshot."""
-            B_local = B_broadcast.value
-            delta_local = delta_broadcast.value
-            epsilon_local = epsilon_broadcast.value
-            
-            B_total = B_local + 1
-            empty_result = [0.0] * B_total
-            
-            if not prices_arr or not volumes_arr:
-                return empty_result
-            
-            prices = np.array(prices_arr, dtype=np.float64)
-            volumes = np.array(volumes_arr, dtype=np.float64)
-            
-            n = min(len(prices), len(volumes))
-            if n == 0:
-                return empty_result
-            
-            prices = prices[:n]
-            volumes = volumes[:n]
-            
-            # Filter valid entries
-            valid_mask = np.isfinite(prices) & np.isfinite(volumes) & (volumes > 0)
-            prices = prices[valid_mask]
-            volumes = volumes[valid_mask]
-            
-            if len(prices) == 0:
-                return empty_result
-            
-            n_half = B_local // 2
-            
-            # Create logarithmic spacing from epsilon to delta
-            log_points = np.exp(np.linspace(np.log(epsilon_local), np.log(delta_local), n_half))
-            
-            # Build edges in monotonically increasing order
-            negative_edges = -log_points[::-1]  # Reverse to get increasing order
-            positive_edges = log_points
-            
-            edges = np.concatenate([
-                [-np.inf],
-                negative_edges,
-                [0],
-                positive_edges,
-                [np.inf]
-            ])
-            
-            # Assign prices to bins (lower price -> lower index)
-            idx = np.digitize(prices, edges, right=False) - 1
-            idx = np.clip(idx, 0, B_total - 1)
-            
-            # Aggregate raw volumes
-            bins = np.zeros(B_total, dtype=np.float64)
-            np.add.at(bins, idx, volumes)
-            
-            return bins.tolist()
-        
-        df = df.withColumn("bins_raw", bin_raw_volumes_per_snapshot(col("prices"), col("volumes")))
-        
+        logger('Using native Spark SQL (no UDFs) for better performance on large datasets', "INFO")
+
+        B_total = self.B + 1
+
+        # Create bin assignment function using CASE WHEN based on precomputed edges
+        # Each bin is defined by edges[i] <= price < edges[i+1]
+        bin_assignment_cases = []
+        for bin_idx in range(B_total):
+            lower = self.edges[bin_idx]
+            upper = self.edges[bin_idx + 1]
+
+            # Handle infinity cases
+            if np.isinf(lower) and lower < 0:
+                condition = f"price < {upper}"
+            elif np.isinf(upper):
+                condition = f"price >= {lower}"
+            else:
+                condition = f"(price >= {lower} AND price < {upper})"
+
+            bin_assignment_cases.append(f"WHEN {condition} THEN {bin_idx}")
+
+        bin_assignment_expr = "CASE " + " ".join(bin_assignment_cases) + f" ELSE {B_total - 1} END"
+
+        # Step 1: Zip prices and volumes into pairs, filter valid ones, assign bins
+        df = df.withColumn(
+            "price_volume_bin_pairs",
+            expr(f"""
+                transform(
+                    filter(
+                        arrays_zip(prices, volumes),
+                        pair -> pair.prices IS NOT NULL
+                            AND pair.volumes IS NOT NULL
+                            AND NOT isnan(pair.prices)
+                            AND NOT isnan(pair.volumes)
+                            AND pair.prices != double('inf')
+                            AND pair.prices != double('-inf')
+                            AND pair.volumes != double('inf')
+                            AND pair.volumes != double('-inf')
+                            AND pair.volumes > 0
+                    ),
+                    pair -> named_struct(
+                        'bin_idx',
+                        (
+                            {bin_assignment_expr.replace('price', 'pair.prices')}
+                        ),
+                        'volume',
+                        pair.volumes
+                    )
+                )
+            """)
+        )
+
+        # Step 2: Aggregate volumes by bin index
+        # Build array by summing volumes for each bin index
+        # This uses explicit aggregation for each bin to avoid complex nested transforms
+        bin_aggregations = []
+        for bin_idx in range(B_total):
+            # For each bin, filter pairs matching this bin_idx and sum their volumes
+            bin_expr = f"""
+                aggregate(
+                    filter(price_volume_bin_pairs, p -> p.bin_idx = {bin_idx}),
+                    0.0D,
+                    (sum, p) -> sum + p.volume
+                )
+            """
+            bin_aggregations.append(bin_expr)
+
+        # Combine all bin aggregations into a single array
+        bins_array_expr = "array(" + ", ".join(bin_aggregations) + ")"
+
+        df = df.withColumn("bins_raw", expr(bins_array_expr))
+
+        # Drop intermediate column
+        df = df.drop("price_volume_bin_pairs")
+
         logger(f'Created {self.B+1} logarithmically-spaced bins with raw aggregated volumes', "INFO")
-        
+
         return df
     
     @staticmethod

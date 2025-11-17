@@ -160,7 +160,7 @@ def main():
     
     # Split materialization configuration
     CONFIG = {
-        "max_splits": None,  # Materialize only first N splits (None for all)
+        "max_splits": 1,  # Materialize only first split
         "create_test_collection": True,  # Create separate test_data collection
     }
     
@@ -180,7 +180,7 @@ def main():
     
     logger(f'Database: {DB_NAME}', "INFO")
     logger(f'Input Collection: {INPUT_COLLECTION}', "INFO")
-    logger(f'Max Splits: {CONFIG["max_splits"]}', "INFO")
+    logger(f'Max Splits: {CONFIG["max_splits"]} (materialize first split only)', "INFO")
     logger(f'Create Test Collection: {CONFIG["create_test_collection"]}', "INFO")
     
     # Create Spark session

@@ -60,8 +60,14 @@ class SplitMaterializer:
         # Get split IDs from split_roles struct field names
         split_roles_schema = sample_df.schema["split_roles"].dataType
         split_ids = sorted([int(field.name) for field in split_roles_schema.fields])
-        
+
         logger(f'Found {len(split_ids)} splits: {split_ids}', "INFO")
+
+        # Apply max_splits limit if configured
+        max_splits = self.config.get('max_splits', None)
+        if max_splits is not None:
+            split_ids = split_ids[:max_splits]
+            logger(f'Limiting to first {max_splits} split(s): {split_ids}', "INFO")
 
         self.split_ids = split_ids
     

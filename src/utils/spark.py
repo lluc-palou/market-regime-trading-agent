@@ -1,5 +1,6 @@
 from pyspark.sql import SparkSession
 from typing import Optional, Dict, Any
+import os
 
 
 def create_spark_session(
@@ -16,6 +17,11 @@ def create_spark_session(
 
     Optimized for systems with 8GB RAM maximum.
     """
+    # Set environment variables to control Python socket timeouts
+    # These affect the Python workers that execute UDFs
+    os.environ.setdefault('PYSPARK_PYTHON_TIMEOUT', '7200')
+    os.environ.setdefault('SPARK_DAEMON_TIMEOUT', '7200')
+
     # Standard JAR files for MongoDB connector
     jar_files = [
         "mongo-spark-connector_2.12-10.1.1.jar",
@@ -53,11 +59,13 @@ def create_spark_session(
         # Timeout configurations to prevent socket timeouts (increased for large datasets)
         .config("spark.network.timeout", "7200s")  # 2 hours for network operations
         .config("spark.executor.heartbeatInterval", "60s")  # Heartbeat every 60s
-        .config("spark.python.worker.reuse", "true")  # Reuse Python workers
+        .config("spark.python.worker.reuse", "false")  # Disable worker reuse to prevent stuck workers
         .config("spark.python.worker.timeout", "7200")  # 2 hours for Python worker (in seconds)
         .config("spark.rpc.askTimeout", "7200s")  # 2 hours for RPC calls
         .config("spark.rpc.lookupTimeout", "7200s")  # 2 hours for RPC lookups
         .config("spark.core.connection.ack.wait.timeout", "7200s")  # Connection timeout
+        # Python daemon socket timeout (controls Python-side socket timeout)
+        .config("spark.executor.pyspark.memory", "1536m")  # Match executor memory
     )
     
     # Adds any additional configuration settings if provided

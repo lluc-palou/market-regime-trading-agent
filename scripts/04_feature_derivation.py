@@ -33,7 +33,7 @@ CONFIG = {
     'variance_half_life': 20,
     'depth_bands': [5, 50],  # top_5 and top_50 only
     'decision_lag': 0,
-    'required_past_hours': 3,
+    'required_past_hours': 1,
     'required_future_hours': 1,  # Only need 1 step ahead now
 }
 
@@ -74,7 +74,7 @@ def main():
         db_name=DB_NAME,
         mongo_uri=MONGO_URI,
         driver_memory="8g",
-        jar_files_path="file:///C:/Users/llucp/spark_jars/",
+        jar_files_path="file:///C:/spark/spark-3.4.1-bin-hadoop3/jars/",
         additional_configs=ADDITIONAL_SPARK_CONFIGS
     )
     

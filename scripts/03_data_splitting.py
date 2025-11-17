@@ -43,10 +43,10 @@ CONFIG = {
     
     'temporal_params': {
         'sampling_interval_seconds': 30,
-        'context_length_samples': 240,
-        'forecast_horizon_steps': 240,
-        'purge_length_samples': 240,
-        'embargo_length_samples': 240,
+        'context_length_samples': 120,
+        'forecast_horizon_steps': 120,
+        'purge_length_samples': 120,
+        'embargo_length_samples': 120,
     },
     
     'train_test_split': {
@@ -54,13 +54,13 @@ CONFIG = {
     },
     
     'cpcv': {
-        'n_folds': 10,
+        'n_folds': 8,
         'k_validation_folds': 2,
     },
     
     'stylized_facts': {
-        'window_length_samples': 60,
-        'edge_margin_samples': 25,
+        'window_length_samples': 10000,
+        'edge_margin_samples': 120,
     }
 }
 
@@ -68,8 +68,7 @@ CONFIG = {
 spark = create_spark_session(
     app_name="CPCV_Split",
     mongo_uri=MONGO_URI,
-    db_name=DB_NAME,
-    driver_memory="4g"
+    db_name=DB_NAME
 )
 
 # =================================================================================================

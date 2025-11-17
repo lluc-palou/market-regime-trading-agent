@@ -84,11 +84,10 @@ INPUT_COLLECTION_SUFFIX = "_input"  # Split collections are named split_X_input
 MLFLOW_TRACKING_URI = "http://127.0.0.1:5000"
 MLFLOW_EXPERIMENT_NAME = "Feature_Transformation"
 
-MAX_SPLITS = 1
-TRAIN_SAMPLE_RATE = 1.0
+TRAIN_SAMPLE_RATE = 0.1
 
 MONGO_URI = "mongodb://127.0.0.1:27017/"
-JAR_FILES_PATH = "file:///C:/Users/llucp/spark_jars/"
+JAR_FILES_PATH = "file:///C:/spark/spark-3.4.1-bin-hadoop3/jars/"
 DRIVER_MEMORY = "4g"
 
 # =================================================================================================
@@ -178,8 +177,30 @@ def main():
         
         # Filter to transformable features only
         feature_names = filter_transformable_features(all_feature_names)
-        logger(f'Processing {len(feature_names)} transformable features across {MAX_SPLITS} splits', "INFO")
-        
+
+        # Discover all split collections
+        from pymongo import MongoClient
+        client = MongoClient(MONGO_URI)
+        db = client[DB_NAME]
+        all_collections = db.list_collection_names()
+
+        # Extract split IDs from collection names matching pattern
+        import re
+        split_pattern = re.compile(rf'^{INPUT_COLLECTION_PREFIX}(\d+){INPUT_COLLECTION_SUFFIX}$')
+        split_ids = []
+        for coll_name in all_collections:
+            match = split_pattern.match(coll_name)
+            if match:
+                split_ids.append(int(match.group(1)))
+        split_ids = sorted(split_ids)
+        client.close()
+
+        if not split_ids:
+            raise ValueError(f'No split collections found matching pattern: {INPUT_COLLECTION_PREFIX}X{INPUT_COLLECTION_SUFFIX}')
+
+        logger(f'Found {len(split_ids)} split collections: {split_ids}', "INFO")
+        logger(f'Processing {len(feature_names)} transformable features across {len(split_ids)} splits', "INFO")
+
         # Initialize processor
         processor = FeatureTransformProcessor(
             spark=spark,
@@ -188,11 +209,11 @@ def main():
             input_collection_suffix=INPUT_COLLECTION_SUFFIX,
             train_sample_rate=TRAIN_SAMPLE_RATE
         )
-        
+
         # Process each split
         all_split_results = {}
 
-        for split_id in range(MAX_SPLITS):
+        for split_id in split_ids:
             # Process split - pass both filtered and full feature lists
             split_results = processor.process_split(
                 split_id=split_id,

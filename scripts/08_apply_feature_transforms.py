@@ -52,7 +52,7 @@ MLFLOW_EXPERIMENT_NAME = "Feature_Transformation"
 
 # Spark configuration
 MONGO_URI = "mongodb://127.0.0.1:27017/"
-JAR_FILES_PATH = "file:///C:/Users/llucp/spark_jars/"
+JAR_FILES_PATH = "file:///C:/spark/spark-3.4.1-bin-hadoop3/jars/"
 DRIVER_MEMORY = "4g"
 
 # Processing configuration

@@ -64,7 +64,7 @@ MLFLOW_TRACKING_URI = "http://127.0.0.1:5000"
 MLFLOW_EXPERIMENT_NAME = "LOB_Prior_Production_Training"
 
 MONGO_URI = "mongodb://127.0.0.1:27017/"
-JAR_FILES_PATH = "file:///C:/Users/llucp/spark_jars/"
+JAR_FILES_PATH = "file:///C:/spark/spark-3.4.1-bin-hadoop3/jars/"
 DRIVER_MEMORY = "8g"
 
 ARTIFACT_BASE_DIR = Path(REPO_ROOT) / "artifacts" / "prior_models"

@@ -168,16 +168,16 @@ class DataStamper:
         
         batch_count = 0
         total_records = 0
-        
-        # Log role statistics
-        role_stats = {
-            'train_warmup': 0,
-            'train': 0,
-            'train_test_embargo': 0,
-            'test': 0,
-            'test_horizon': 0,
-            'excluded': 0
-        }
+
+        # Role statistics collection removed for performance (expensive groupBy operation)
+        # role_stats = {
+        #     'train_warmup': 0,
+        #     'train': 0,
+        #     'train_test_embargo': 0,
+        #     'test': 0,
+        #     'test_horizon': 0,
+        #     'excluded': 0
+        # }
         
         while current_hour < end_boundary:
             next_hour = current_hour + timedelta(hours=1)
@@ -191,13 +191,14 @@ class DataStamper:
                     # Stamp batch samples with role information
                     stamped_batch = self.stamp_dataframe(batch_df)
 
-                    # Collect role statistics
-                    role_counts = stamped_batch.groupBy('fold_type').count().collect()
-                    for row in role_counts:
-                        fold_type = row['fold_type']
-                        count = row['count']
-                        if fold_type in role_stats:
-                            role_stats[fold_type] += count
+                    # Role statistics collection removed for performance
+                    # This expensive groupBy().count().collect() operation was causing timeouts
+                    # role_counts = stamped_batch.groupBy('fold_type').count().collect()
+                    # for row in role_counts:
+                    #     fold_type = row['fold_type']
+                    #     count = row['count']
+                    #     if fold_type in role_stats:
+                    #         role_stats[fold_type] += count
 
                     # Save batch with ObjectId preservation and temporal ordering
                     self._save_batch(stamped_batch, output_collection)
@@ -217,17 +218,17 @@ class DataStamper:
                 traceback.print_exc()
             
             current_hour = next_hour
-        
-        # Log final role statistics
-        logger(f'Fold-Level Role Statistics:', level="INFO")
-        logger(f'  Train warmup: {role_stats["train_warmup"]:,} samples', level="INFO")
-        logger(f'  Train: {role_stats["train"]:,} samples', level="INFO")
-        logger(f'  Train-test embargo: {role_stats["train_test_embargo"]:,} samples', level="INFO")
-        logger(f'  Test: {role_stats["test"]:,} samples', level="INFO")
-        logger(f'  Test horizon: {role_stats["test_horizon"]:,} samples', level="INFO")
-        logger(f'  Excluded: {role_stats["excluded"]:,} samples', level="INFO")
-        logger(f'  Total: {total_records:,} samples', level="INFO")
-        
+
+        # Role statistics logging removed (statistics collection was removed for performance)
+        # logger(f'Fold-Level Role Statistics:', level="INFO")
+        # logger(f'  Train warmup: {role_stats["train_warmup"]:,} samples', level="INFO")
+        # logger(f'  Train: {role_stats["train"]:,} samples', level="INFO")
+        # logger(f'  Train-test embargo: {role_stats["train_test_embargo"]:,} samples', level="INFO")
+        # logger(f'  Test: {role_stats["test"]:,} samples', level="INFO")
+        # logger(f'  Test horizon: {role_stats["test_horizon"]:,} samples', level="INFO")
+        # logger(f'  Excluded: {role_stats["excluded"]:,} samples', level="INFO")
+        # logger(f'  Total: {total_records:,} samples', level="INFO")
+
         logger(f'Processed {batch_count} batches, {total_records:,} total records', level="INFO")
         logger(f'Output collection temporal ordering: GUARANTEED', level="INFO")
     
@@ -262,28 +263,27 @@ class DataStamper:
     def _save_batch(self, batch_df: DataFrame, output_collection: str):
         """
         Saves the batch to output collection with ObjectId preservation and temporal ordering.
-        
+
         CRITICAL MODIFICATIONS:
         1. Converts _id from String back to ObjectId before writing
         2. Uses timestamp_str (UTC string) instead of Spark timestamp to avoid timezone conversion
         3. Uses ordered=True to preserve write order
-        
+        4. Uses toLocalIterator() to stream rows instead of collect() for large batches
+
         This guarantees:
         - ObjectId format is maintained in output collection
         - Timestamps remain in original UTC timezone (no +2h shift)
         - Temporal ordering is preserved across all batches
+        - Memory efficient processing for large batches
         """
-        # Convert DataFrame to list of dictionaries for manual processing
-        batch_data = batch_df.collect()
-        
-        if not batch_data:
-            return
-        
+        # Use toLocalIterator to stream rows instead of collecting all at once
+        # This avoids loading the entire batch into driver memory
+
         # Convert to list of dicts and fix ObjectId + timestamps
         documents = []
-        for row in batch_data:
+        for row in batch_df.toLocalIterator():
             doc = row.asDict()
-            
+
             # CRITICAL FIX: Use timestamp_str to reconstruct UTC naive datetime
             # This avoids Spark's timezone conversion issues
             if 'timestamp_str' in doc:
@@ -291,7 +291,7 @@ class DataStamper:
                 # Parse the UTC string (format: "2025-07-04T00:00:13.211Z")
                 ts_str_clean = ts_str.replace('Z', '').replace('+00:00', '')
                 doc['timestamp'] = datetime.fromisoformat(ts_str_clean)
-            
+
             # Remove temporary processing fields
             doc.pop('timestamp_str', None)
             doc.pop('_id_str', None)
@@ -302,22 +302,39 @@ class DataStamper:
                     doc['_id'] = ObjectId(doc['_id'])
                 except Exception as e:
                     logger(f'Warning: Could not convert _id to ObjectId: {doc["_id"]}', level="WARNING")
-            
+
             documents.append(doc)
-        
-        # Write to MongoDB with ordered inserts
+
+            # Write in chunks to avoid socket timeouts with large documents (~200KB each)
+            # Chunk size of 30 = ~6MB per write operation
+            if len(documents) >= 30:
+                self._write_documents_to_mongo(documents, output_collection)
+                documents = []
+
+        # Write any remaining documents
+        if documents:
+            self._write_documents_to_mongo(documents, output_collection)
+
+    def _write_documents_to_mongo(self, documents: list, output_collection: str):
+        """
+        Helper method to write a list of documents to MongoDB.
+        Extracted to allow chunked writing for large batches.
+
+        Uses extended socket timeout for large documents (~200KB each).
+        """
         from pymongo import MongoClient
-        
+
         # Get MongoDB URI from Spark config or use default
         mongo_uri = self.spark.sparkContext.getConf().get(
-            'spark.mongodb.read.connection.uri', 
+            'spark.mongodb.read.connection.uri',
             'mongodb://127.0.0.1:27017/'
         )
-        
-        client = MongoClient(mongo_uri)
+
+        # Use extended socket timeout for large documents (2 hours = 7200000ms)
+        client = MongoClient(mongo_uri, socketTimeoutMS=7200000)
         db = client[self.db_name]
         collection = db[output_collection]
-        
+
         # Insert with ordered=True to preserve temporal ordering
         try:
             collection.insert_many(documents, ordered=True)

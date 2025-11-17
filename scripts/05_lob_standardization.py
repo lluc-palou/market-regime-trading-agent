@@ -34,7 +34,7 @@ CONFIG = {
     'min_denom': 1e-6,             # Minimum denominator value
     
     # Batch processing
-    'required_past_hours': 2,      # Hours of past context for volatility
+    'required_past_hours': 1,      # Hours of past context for volatility
     
     # Pipeline mode
     'volume_coverage_analysis': False,  # Set to True for coverage analysis

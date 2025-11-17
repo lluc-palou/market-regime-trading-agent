@@ -41,11 +41,10 @@ OUTPUT_COLLECTION_SUFFIX = "_output"  # Write for next stage (cyclic pattern)
 # Path to half-life selection results (relative to repository root)
 HALFLIFE_RESULTS_PATH = Path(REPO_ROOT) / "artifacts" / "ewma_halflife_selection" / "aggregation" / "final_halflifes.json"
 
-MAX_SPLITS = 1
 CLIP_STD = 3.0
 
 MONGO_URI = "mongodb://127.0.0.1:27017/"
-JAR_FILES_PATH = "file:///C:/Users/llucp/spark_jars/"
+JAR_FILES_PATH = "file:///C:/spark/spark-3.4.1-bin-hadoop3/jars/"
 DRIVER_MEMORY = "4g"
 
 # =================================================================================================
@@ -108,7 +107,29 @@ def main():
         
         logger(f'Total features: {len(all_feature_names)}', "INFO")
         logger(f'Standardizing: {len(final_halflifes)} features', "INFO")
-        
+
+        # Discover all split collections
+        from pymongo import MongoClient
+        client = MongoClient(MONGO_URI)
+        db = client[DB_NAME]
+        all_collections = db.list_collection_names()
+
+        # Extract split IDs from collection names matching pattern
+        import re
+        split_pattern = re.compile(rf'^{INPUT_COLLECTION_PREFIX}(\d+){INPUT_COLLECTION_SUFFIX}$')
+        split_ids = []
+        for coll_name in all_collections:
+            match = split_pattern.match(coll_name)
+            if match:
+                split_ids.append(int(match.group(1)))
+        split_ids = sorted(split_ids)
+        client.close()
+
+        if not split_ids:
+            raise ValueError(f'No split collections found matching pattern: {INPUT_COLLECTION_PREFIX}X{INPUT_COLLECTION_SUFFIX}')
+
+        logger(f'Found {len(split_ids)} split collections: {split_ids}', "INFO")
+
         # Initialize applicator
         applicator = EWMAStandardizationApplicator(
             spark=spark,
@@ -116,9 +137,9 @@ def main():
             final_halflifes=final_halflifes,
             clip_std=CLIP_STD
         )
-        
+
         # Process each split
-        for split_id in range(MAX_SPLITS):
+        for split_id in split_ids:
             logger('', "INFO")  # Blank line
             
             # Apply standardization
@@ -142,17 +163,17 @@ def main():
         logger('=' * 80, "INFO")
         logger('EWMA STANDARDIZATION COMPLETE', "INFO")
         logger('=' * 80, "INFO")
-        logger(f'Processed {MAX_SPLITS} splits', "INFO")
-        
+        logger(f'Processed {len(split_ids)} splits', "INFO")
+
         # Rename collections: output -> input (cyclic pattern for next stage)
         logger('', "INFO")
         logger('Renaming collections for cyclic pattern...', "INFO")
-        
+
         from pymongo import MongoClient
         client = MongoClient(MONGO_URI)
         db = client[DB_NAME]
-        
-        for split_id in range(MAX_SPLITS):
+
+        for split_id in split_ids:
             output_collection = f"{OUTPUT_COLLECTION_PREFIX}{split_id}{OUTPUT_COLLECTION_SUFFIX}"
             input_collection = f"{INPUT_COLLECTION_PREFIX}{split_id}{INPUT_COLLECTION_SUFFIX}"
             
@@ -169,7 +190,8 @@ def main():
         
         logger('', "INFO")
         logger('Collection renaming complete', "INFO")
-        logger(f'Next stage will read from: {INPUT_COLLECTION_PREFIX}{{0-{MAX_SPLITS-1}}}{INPUT_COLLECTION_SUFFIX}', "INFO")
+        if split_ids:
+            logger(f'Next stage will read from: {INPUT_COLLECTION_PREFIX}{{0-{split_ids[-1]}}}{INPUT_COLLECTION_SUFFIX}', "INFO")
         
     finally:
         # Only stop Spark if not orchestrated

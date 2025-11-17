@@ -10,7 +10,7 @@ class SinglePassAccumulator:
     applying sampling rate only to training data.
     """
     
-    def __init__(self, feature_names: List[str], split_id: int, train_sample_rate: float = 1.0):
+    def __init__(self, feature_names: List[str], split_id: int, train_sample_rate: float = 0.1):
         """
         Initialize accumulator.
         

@@ -29,8 +29,7 @@ REPO_ROOT = os.path.dirname(SCRIPT_DIR)
 sys.path.insert(0, REPO_ROOT)
 
 from pyspark.sql import SparkSession, DataFrame
-from pyspark.sql.functions import col, udf
-from pyspark.sql.types import BooleanType
+from pyspark.sql.functions import col, expr
 
 from src.utils.logging import logger, log_section
 from src.utils.spark import create_spark_session
@@ -141,36 +140,8 @@ def load_hour_batch(
     return df
 
 
-def has_nulls_in_features(features):
-    """
-    Check if features array contains any null, NaN, or Inf values.
-    
-    This UDF will be applied to each document's features array to determine
-    if it should be filtered out.
-    
-    Args:
-        features: Array of feature values
-        
-    Returns:
-        True if any null/None/NaN/Inf found, False if all values are valid
-    """
-    if features is None:
-        return True
-    
-    for value in features:
-        if value is None:
-            return True
-        
-        try:
-            # Check for NaN and Inf
-            import math
-            if math.isnan(value) or math.isinf(value):
-                return True
-        except (TypeError, ValueError):
-            # If we can't check (shouldn't happen with float), assume corrupted
-            return True
-    
-    return False
+# Removed has_nulls_in_features UDF function
+# Now using native Spark SQL expressions for better performance on large datasets
 
 
 # =================================================================================================
@@ -225,10 +196,10 @@ def filter_split_nulls_hourly(
     
     logger(f'Processing {len(all_hours)} hours in chronological order', "INFO")
     logger('', "INFO")
-    
-    # Register UDF for null detection
-    has_nulls_udf = udf(has_nulls_in_features, BooleanType())
-    
+
+    # Removed UDF registration - now using native Spark SQL for null detection
+    # This provides better performance and avoids runtime errors on large datasets
+
     # Statistics tracking
     total_processed = 0
     total_filtered = 0
@@ -260,8 +231,15 @@ def filter_split_nulls_hourly(
                        f'Empty batch, skipping', "INFO")
             continue
         
-        # Filter documents without nulls
-        clean_df = hour_df.filter(~has_nulls_udf(col("features")))
+        # Filter documents without nulls using native Spark SQL
+        # Checks: features not null AND no element is null/NaN/Inf
+        # Native Spark SQL is much faster than UDFs and scales better with large datasets
+        clean_df = hour_df.filter(
+            ~expr("""
+                features IS NULL OR
+                exists(features, x -> x IS NULL OR isnan(x) OR isinf(x))
+            """)
+        )
         clean_count = clean_df.count()
         removed_in_hour = hour_count - clean_count
         

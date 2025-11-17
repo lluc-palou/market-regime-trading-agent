@@ -1,10 +1,9 @@
 from typing import List, Dict
 from pyspark.sql import DataFrame
 from datetime import datetime, timedelta
-from pyspark.sql.functions import col, udf
+from pyspark.sql.functions import col, expr, lit, create_map
 from bson import ObjectId
 from src.utils import logger, format_timestamp_for_mongodb
-from pyspark.sql.types import StructType, StructField, IntegerType, StringType, MapType
 
 class DataStamper:
     """
@@ -25,133 +24,118 @@ class DataStamper:
         self.spark = spark
         self.db_name = db_name
     
+    def _build_fold_assignment_sql(self) -> str:
+        """
+        Build SQL CASE expression to determine fold_id and fold_type from timestamp_str.
+
+        Returns:
+            SQL expression for fold assignment
+        """
+        cases = []
+        for fold in self.folds:
+            fold_dict = fold.to_dict()
+            start_str = str(fold_dict['start_ts']).replace('Z', '').replace('+00:00', '')
+            end_str = str(fold_dict['end_ts']).replace('Z', '').replace('+00:00', '')
+            fold_id = fold_dict['fold_id']
+            fold_type = fold_dict['fold_type']
+
+            cases.append(f"""
+                WHEN timestamp_str >= '{start_str}' AND timestamp_str < '{end_str}'
+                THEN named_struct('fold_id', {fold_id}, 'fold_type', '{fold_type}')
+            """)
+
+        # Default case: excluded
+        return f"""
+            CASE
+                {' '.join(cases)}
+                ELSE named_struct('fold_id', -1, 'fold_type', 'excluded')
+            END
+        """
+
+    def _build_role_assignment_sql(self, split_id: int, split: Dict) -> str:
+        """
+        Build SQL CASE expression to determine role for a specific split.
+
+        Args:
+            split_id: Split ID
+            split: Split metadata dict
+
+        Returns:
+            SQL expression for role assignment
+        """
+        purged_ranges_dict = split.get('purged_ranges', {})
+        embargoed_ranges_dict = split.get('embargoed_ranges', {})
+        validation_folds = split.get('validation_folds', [])
+        training_folds = split.get('training_folds', [])
+
+        # Build purge/embargo range checks
+        purge_conditions = []
+        embargo_conditions = []
+
+        for fold_id_key, ranges in purged_ranges_dict.items():
+            for start, end in ranges:
+                start_str = str(start).replace('Z', '').replace('+00:00', '')
+                end_str = str(end).replace('Z', '').replace('+00:00', '')
+                purge_conditions.append(f"(timestamp_str >= '{start_str}' AND timestamp_str < '{end_str}')")
+
+        for fold_id_key, ranges in embargoed_ranges_dict.items():
+            for start, end in ranges:
+                start_str = str(start).replace('Z', '').replace('+00:00', '')
+                end_str = str(end).replace('Z', '').replace('+00:00', '')
+                embargo_conditions.append(f"(timestamp_str >= '{start_str}' AND timestamp_str < '{end_str}')")
+
+        purge_check = " OR ".join(purge_conditions) if purge_conditions else "FALSE"
+        embargo_check = " OR ".join(embargo_conditions) if embargo_conditions else "FALSE"
+
+        validation_check = f"fold_info.fold_id IN ({','.join(map(str, validation_folds))})" if validation_folds else "FALSE"
+        training_check = f"fold_info.fold_id IN ({','.join(map(str, training_folds))})" if training_folds else "FALSE"
+
+        # Build role assignment logic
+        return f"""
+            CASE
+                WHEN fold_info.fold_type = 'train' THEN
+                    CASE
+                        WHEN ({purge_check}) THEN 'purged'
+                        WHEN ({embargo_check}) THEN 'embargoed'
+                        WHEN ({validation_check}) THEN 'validation'
+                        WHEN ({training_check}) THEN 'train'
+                        ELSE 'excluded'
+                    END
+                WHEN fold_info.fold_type = 'train_warmup' THEN 'train_warmup'
+                WHEN fold_info.fold_type = 'train_test_embargo' THEN 'train_test_embargo'
+                WHEN fold_info.fold_type = 'test' THEN 'test'
+                WHEN fold_info.fold_type = 'test_horizon' THEN 'test_horizon'
+                ELSE 'excluded'
+            END
+        """
+
     def stamp_dataframe(self, df: DataFrame) -> DataFrame:
         """
-        Stamps dataset samples with COMPLETE split role information using normalized timestamp strings.
+        Stamps dataset samples with COMPLETE split role information using native Spark SQL.
+        No UDFs for better performance on large datasets.
         """
-        metadata_broadcast = self.spark.sparkContext.broadcast(self.metadata)
-        folds_broadcast = self.spark.sparkContext.broadcast([f.to_dict() for f in self.folds])
-        
-        def assign_complete_roles(timestamp_str):
-            """
-            Assigns COMPLETE role information for a given timestamp string.
-            
-            NOTE: This function is self-contained (no external imports) because
-            it's serialized and sent to Spark workers.
-            """
-            # Parse timestamp string manually (no imports from src.utils)
-            def parse_ts(ts_str):
-                """Parse timestamp string to naive datetime."""
-                if isinstance(ts_str, datetime):
-                    # Already a datetime, make it naive if needed
-                    if ts_str.tzinfo is not None:
-                        return ts_str.replace(tzinfo=None)
-                    return ts_str
-                # String - remove timezone markers and parse
-                ts_clean = str(ts_str).replace('Z', '').replace('+00:00', '')
-                return datetime.fromisoformat(ts_clean)
-            
-            timestamp = parse_ts(timestamp_str)
-            
-            folds_data = folds_broadcast.value
-            fold_id = None
-            fold_type = None
-            
-            # Find which fold this timestamp belongs to
-            for fold_dict in folds_data:
-                start_ts = parse_ts(fold_dict['start_ts'])
-                end_ts = parse_ts(fold_dict['end_ts'])
-                
-                if start_ts <= timestamp < end_ts:
-                    fold_id = fold_dict['fold_id']
-                    fold_type = fold_dict['fold_type']
-                    break
-            
-            if fold_id is None:
-                return (-1, 'excluded', {})
-            
-            # Initialize roles dictionary for ALL CPCV splits
-            roles = {}
-            metadata = metadata_broadcast.value
-            
-            def in_ranges(ranges_list):
-                """Check if timestamp falls in any of the ranges."""
-                for range_pair in ranges_list:
-                    range_start = parse_ts(range_pair[0])
-                    range_end = parse_ts(range_pair[1])
-                    if range_start <= timestamp < range_end:
-                        return True
-                return False
-            
-            # Assign roles for ALL CPCV splits based on fold_type
-            for split in metadata['cpcv_splits']:
-                split_id = split['split_id']
-                
-                if fold_type == 'train':
-                    # For training folds, check purge/embargo ranges
-                    purged_ranges_dict = split.get('purged_ranges', {})
-                    embargoed_ranges_dict = split.get('embargoed_ranges', {})
-                    fold_id_str = str(fold_id)
-                    
-                    # Check if this sample falls in purged ranges
-                    is_purged = False
-                    if fold_id_str in purged_ranges_dict:
-                        is_purged = in_ranges(purged_ranges_dict[fold_id_str])
-                    elif fold_id in purged_ranges_dict:
-                        is_purged = in_ranges(purged_ranges_dict[fold_id])
-                    
-                    # Check if this sample falls in embargoed ranges
-                    is_embargoed = False
-                    if fold_id_str in embargoed_ranges_dict:
-                        is_embargoed = in_ranges(embargoed_ranges_dict[fold_id_str])
-                    elif fold_id in embargoed_ranges_dict:
-                        is_embargoed = in_ranges(embargoed_ranges_dict[fold_id])
-                    
-                    # Assign role based on priority: purged > embargoed > validation > train
-                    if is_purged:
-                        role = 'purged'
-                    elif is_embargoed:
-                        role = 'embargoed'
-                    elif fold_id in split['validation_folds']:
-                        role = 'validation'
-                    elif fold_id in split['training_folds']:
-                        role = 'train'
-                    else:
-                        role = 'excluded'
-                
-                elif fold_type == 'train_warmup':
-                    role = 'train_warmup'
-                
-                elif fold_type == 'train_test_embargo':
-                    role = 'train_test_embargo'
-                
-                elif fold_type == 'test':
-                    role = 'test'
-                
-                elif fold_type == 'test_horizon':
-                    role = 'test_horizon'
-                
-                else:
-                    role = 'excluded'
-                
-                roles[str(split_id)] = role
-            
-            return (fold_id, fold_type, roles)
-        
-        # Create UDF that accepts STRING timestamps
-        assign_roles_udf = udf(assign_complete_roles, StructType([
-            StructField('fold_id', IntegerType(), True),
-            StructField('fold_type', StringType(), True),
-            StructField('split_roles', MapType(StringType(), StringType()), True)
-        ]))
-        
-        # Use the normalized timestamp_str column
-        stamped_df = df.withColumn('role_data', assign_roles_udf(col('timestamp_str')))
-        stamped_df = stamped_df.withColumn('fold_id', col('role_data.fold_id'))
-        stamped_df = stamped_df.withColumn('fold_type', col('role_data.fold_type'))               
-        stamped_df = stamped_df.withColumn('split_roles', col('role_data.split_roles'))
-        stamped_df = stamped_df.drop('role_data')
-        
+        logger('Stamping dataframe with native Spark SQL (no UDFs)', "INFO")
+
+        # Step 1: Determine fold_id and fold_type from timestamp
+        fold_assignment_expr = self._build_fold_assignment_sql()
+        stamped_df = df.withColumn('fold_info', expr(fold_assignment_expr))
+        stamped_df = stamped_df.withColumn('fold_id', col('fold_info.fold_id'))
+        stamped_df = stamped_df.withColumn('fold_type', col('fold_info.fold_type'))
+
+        # Step 2: Build split_roles map for all splits
+        split_role_exprs = []
+        for split in self.metadata['cpcv_splits']:
+            split_id = split['split_id']
+            role_expr = self._build_role_assignment_sql(split_id, split)
+            split_role_exprs.append(f"'{split_id}', ({role_expr})")
+
+        # Create map of split_id -> role
+        split_roles_expr = f"map({', '.join(split_role_exprs)})"
+        stamped_df = stamped_df.withColumn('split_roles', expr(split_roles_expr))
+
+        # Drop intermediate column
+        stamped_df = stamped_df.drop('fold_info')
+
         return stamped_df
     
     def process_batches(self, input_collection: str, output_collection: str):

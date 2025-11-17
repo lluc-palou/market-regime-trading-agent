@@ -184,16 +184,16 @@ class DataStamper:
         
         batch_count = 0
         total_records = 0
-        
-        # Log role statistics
-        role_stats = {
-            'train_warmup': 0,
-            'train': 0,
-            'train_test_embargo': 0,
-            'test': 0,
-            'test_horizon': 0,
-            'excluded': 0
-        }
+
+        # Role statistics collection removed for performance (expensive groupBy operation)
+        # role_stats = {
+        #     'train_warmup': 0,
+        #     'train': 0,
+        #     'train_test_embargo': 0,
+        #     'test': 0,
+        #     'test_horizon': 0,
+        #     'excluded': 0
+        # }
         
         while current_hour < end_boundary:
             next_hour = current_hour + timedelta(hours=1)
@@ -207,13 +207,14 @@ class DataStamper:
                     # Stamp batch samples with role information
                     stamped_batch = self.stamp_dataframe(batch_df)
 
-                    # Collect role statistics
-                    role_counts = stamped_batch.groupBy('fold_type').count().collect()
-                    for row in role_counts:
-                        fold_type = row['fold_type']
-                        count = row['count']
-                        if fold_type in role_stats:
-                            role_stats[fold_type] += count
+                    # Role statistics collection removed for performance
+                    # This expensive groupBy().count().collect() operation was causing timeouts
+                    # role_counts = stamped_batch.groupBy('fold_type').count().collect()
+                    # for row in role_counts:
+                    #     fold_type = row['fold_type']
+                    #     count = row['count']
+                    #     if fold_type in role_stats:
+                    #         role_stats[fold_type] += count
 
                     # Save batch with ObjectId preservation and temporal ordering
                     self._save_batch(stamped_batch, output_collection)
@@ -233,17 +234,17 @@ class DataStamper:
                 traceback.print_exc()
             
             current_hour = next_hour
-        
-        # Log final role statistics
-        logger(f'Fold-Level Role Statistics:', level="INFO")
-        logger(f'  Train warmup: {role_stats["train_warmup"]:,} samples', level="INFO")
-        logger(f'  Train: {role_stats["train"]:,} samples', level="INFO")
-        logger(f'  Train-test embargo: {role_stats["train_test_embargo"]:,} samples', level="INFO")
-        logger(f'  Test: {role_stats["test"]:,} samples', level="INFO")
-        logger(f'  Test horizon: {role_stats["test_horizon"]:,} samples', level="INFO")
-        logger(f'  Excluded: {role_stats["excluded"]:,} samples', level="INFO")
-        logger(f'  Total: {total_records:,} samples', level="INFO")
-        
+
+        # Role statistics logging removed (statistics collection was removed for performance)
+        # logger(f'Fold-Level Role Statistics:', level="INFO")
+        # logger(f'  Train warmup: {role_stats["train_warmup"]:,} samples', level="INFO")
+        # logger(f'  Train: {role_stats["train"]:,} samples', level="INFO")
+        # logger(f'  Train-test embargo: {role_stats["train_test_embargo"]:,} samples', level="INFO")
+        # logger(f'  Test: {role_stats["test"]:,} samples', level="INFO")
+        # logger(f'  Test horizon: {role_stats["test_horizon"]:,} samples', level="INFO")
+        # logger(f'  Excluded: {role_stats["excluded"]:,} samples', level="INFO")
+        # logger(f'  Total: {total_records:,} samples', level="INFO")
+
         logger(f'Processed {batch_count} batches, {total_records:,} total records', level="INFO")
         logger(f'Output collection temporal ordering: GUARANTEED', level="INFO")
     

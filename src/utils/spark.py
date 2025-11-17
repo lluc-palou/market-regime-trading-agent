@@ -50,13 +50,13 @@ def create_spark_session(
         # Garbage collection tuning for better memory management
         .config("spark.executor.extraJavaOptions", "-XX:+UseG1GC -XX:InitiatingHeapOccupancyPercent=35")
         .config("spark.driver.extraJavaOptions", "-XX:+UseG1GC -XX:InitiatingHeapOccupancyPercent=35")
-        # Timeout configurations to prevent socket timeouts
-        .config("spark.network.timeout", "1800s")  # 30 minutes for network operations
+        # Timeout configurations to prevent socket timeouts (increased for large datasets)
+        .config("spark.network.timeout", "7200s")  # 2 hours for network operations
         .config("spark.executor.heartbeatInterval", "60s")  # Heartbeat every 60s
         .config("spark.python.worker.reuse", "true")  # Reuse Python workers
-        .config("spark.rpc.askTimeout", "1800s")  # 30 minutes for RPC calls
-        .config("spark.rpc.lookupTimeout", "1800s")  # 30 minutes for RPC lookups
-        .config("spark.core.connection.ack.wait.timeout", "1800s")  # Connection timeout
+        .config("spark.rpc.askTimeout", "7200s")  # 2 hours for RPC calls
+        .config("spark.rpc.lookupTimeout", "7200s")  # 2 hours for RPC lookups
+        .config("spark.core.connection.ack.wait.timeout", "7200s")  # Connection timeout
     )
     
     # Adds any additional configuration settings if provided

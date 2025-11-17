@@ -321,8 +321,9 @@ class DataStamper:
 
             documents.append(doc)
 
-            # Write in chunks to avoid memory buildup (every 10,000 documents)
-            if len(documents) >= 10000:
+            # Write in chunks to avoid socket timeouts with large documents (~200KB each)
+            # Chunk size of 30 = ~6MB per write operation
+            if len(documents) >= 30:
                 self._write_documents_to_mongo(documents, output_collection)
                 documents = []
 
@@ -334,6 +335,8 @@ class DataStamper:
         """
         Helper method to write a list of documents to MongoDB.
         Extracted to allow chunked writing for large batches.
+
+        Uses extended socket timeout for large documents (~200KB each).
         """
         from pymongo import MongoClient
 
@@ -343,7 +346,8 @@ class DataStamper:
             'mongodb://127.0.0.1:27017/'
         )
 
-        client = MongoClient(mongo_uri)
+        # Use extended socket timeout for large documents (2 hours = 7200000ms)
+        client = MongoClient(mongo_uri, socketTimeoutMS=7200000)
         db = client[self.db_name]
         collection = db[output_collection]
 

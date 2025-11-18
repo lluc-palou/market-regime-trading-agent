@@ -66,7 +66,7 @@ class DataStamper:
             SQL expression for fold assignment
         """
         cases = []
-        logger(f'Building fold assignment SQL for {len(self.folds)} folds:', level="DEBUG")
+        logger(f'Building fold assignment SQL for {len(self.folds)} folds:', level="INFO")
 
         for fold in self.folds:
             fold_dict = fold.to_dict()
@@ -76,7 +76,7 @@ class DataStamper:
             fold_id = fold_dict['fold_id']
             fold_type = fold_dict['fold_type']
 
-            logger(f'  Fold {fold_id} ({fold_type}): {start_str} <= ts < {end_str}', level="DEBUG")
+            logger(f'  Fold {fold_id} ({fold_type}): {start_str} <= ts < {end_str}', level="INFO")
 
             cases.append(f"""
                 WHEN timestamp_str >= '{start_str}' AND timestamp_str < '{end_str}'
@@ -91,7 +91,7 @@ class DataStamper:
             END
         """
 
-        logger(f'Fold assignment SQL generated ({len(cases)} WHEN clauses)', level="DEBUG")
+        logger(f'Fold assignment SQL generated ({len(cases)} WHEN clauses)', level="INFO")
         return sql_expr
 
     def _build_role_assignment_sql(self, split_id: int, split: Dict) -> str:
@@ -168,9 +168,9 @@ class DataStamper:
 
         # Debug: Show sample of timestamp matches
         sample_rows = stamped_df.select('timestamp_str', 'fold_id', 'fold_type').limit(5).collect()
-        logger('Sample fold assignments:', level="DEBUG")
+        logger('Sample fold assignments:', level="INFO")
         for row in sample_rows:
-            logger(f'  {row.timestamp_str} -> fold_id={row.fold_id}, fold_type={row.fold_type}', level="DEBUG")
+            logger(f'  {row.timestamp_str} -> fold_id={row.fold_id}, fold_type={row.fold_type}', level="INFO")
 
         # Step 2: Build split_roles map for all splits
         split_role_exprs = []

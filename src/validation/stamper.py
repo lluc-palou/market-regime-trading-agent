@@ -28,8 +28,8 @@ class DataStamper:
         """
         Normalize timestamp to match MongoDB's dateToString format precision.
 
-        MongoDB uses format "%Y-%m-%dT%H:%M:%S.%LZ" which outputs 3-digit milliseconds.
-        Python datetime may have 6-digit microseconds, causing string comparison failures.
+        MongoDB uses format "%Y-%m-%dT%H:%M:%S.%L" which outputs 3-digit milliseconds
+        with ISO format (T separator, no timezone suffix after our pipeline removes Z).
 
         Args:
             ts: Timestamp object (datetime or string)
@@ -37,8 +37,17 @@ class DataStamper:
         Returns:
             Normalized timestamp string with millisecond precision (e.g., "2025-07-04T00:00:13.211")
         """
-        # Convert to string and remove timezone markers
-        ts_str = str(ts).replace('Z', '').replace('+00:00', '')
+        # Convert datetime to ISO format string with T separator
+        if hasattr(ts, 'isoformat'):
+            ts_str = ts.isoformat()
+        else:
+            ts_str = str(ts)
+
+        # Remove timezone markers
+        ts_str = ts_str.replace('Z', '').replace('+00:00', '')
+
+        # Replace space with T if present (for str() output)
+        ts_str = ts_str.replace(' ', 'T')
 
         # Truncate to millisecond precision to match MongoDB output
         # Format: "YYYY-MM-DDTHH:MM:SS.mmm" (3 decimal places)
@@ -273,7 +282,7 @@ class DataStamper:
             }},
             {"$sort": {"timestamp": 1}},
             {"$addFields": {
-                "timestamp_str": {"$dateToString": {"format": "%Y-%m-%dT%H:%M:%S.%LZ", "date": "$timestamp"}},
+                "timestamp_str": {"$dateToString": {"format": "%Y-%m-%dT%H:%M:%S.%L", "date": "$timestamp"}},
                 "_id_str": {"$toString": "$_id"}  # Preserve _id as string for processing
             }}
         ]

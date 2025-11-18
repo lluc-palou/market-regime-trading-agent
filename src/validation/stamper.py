@@ -24,6 +24,31 @@ class DataStamper:
         self.spark = spark
         self.db_name = db_name
 
+    def _normalize_timestamp_str(self, ts) -> str:
+        """
+        Normalize timestamp to match MongoDB's dateToString format precision.
+
+        MongoDB uses format "%Y-%m-%dT%H:%M:%S.%LZ" which outputs 3-digit milliseconds.
+        Python datetime may have 6-digit microseconds, causing string comparison failures.
+
+        Args:
+            ts: Timestamp object (datetime or string)
+
+        Returns:
+            Normalized timestamp string with millisecond precision (e.g., "2025-07-04T00:00:13.211")
+        """
+        # Convert to string and remove timezone markers
+        ts_str = str(ts).replace('Z', '').replace('+00:00', '')
+
+        # Truncate to millisecond precision to match MongoDB output
+        # Format: "YYYY-MM-DDTHH:MM:SS.mmm" (3 decimal places)
+        if '.' in ts_str:
+            base, fractional = ts_str.rsplit('.', 1)
+            # Keep only first 3 digits (milliseconds)
+            ts_str = f"{base}.{fractional[:3]}"
+
+        return ts_str
+
     def _build_fold_assignment_sql(self) -> str:
         """
         Build SQL CASE expression to determine fold_id and fold_type from timestamp_str.
@@ -34,8 +59,9 @@ class DataStamper:
         cases = []
         for fold in self.folds:
             fold_dict = fold.to_dict()
-            start_str = str(fold_dict['start_ts']).replace('Z', '').replace('+00:00', '')
-            end_str = str(fold_dict['end_ts']).replace('Z', '').replace('+00:00', '')
+            # Normalize to millisecond precision to match MongoDB's timestamp_str format
+            start_str = self._normalize_timestamp_str(fold_dict['start_ts'])
+            end_str = self._normalize_timestamp_str(fold_dict['end_ts'])
             fold_id = fold_dict['fold_id']
             fold_type = fold_dict['fold_type']
 
@@ -74,14 +100,16 @@ class DataStamper:
 
         for fold_id_key, ranges in purged_ranges_dict.items():
             for start, end in ranges:
-                start_str = str(start).replace('Z', '').replace('+00:00', '')
-                end_str = str(end).replace('Z', '').replace('+00:00', '')
+                # Normalize to millisecond precision to match MongoDB's timestamp_str format
+                start_str = self._normalize_timestamp_str(start)
+                end_str = self._normalize_timestamp_str(end)
                 purge_conditions.append(f"(timestamp_str >= '{start_str}' AND timestamp_str < '{end_str}')")
 
         for fold_id_key, ranges in embargoed_ranges_dict.items():
             for start, end in ranges:
-                start_str = str(start).replace('Z', '').replace('+00:00', '')
-                end_str = str(end).replace('Z', '').replace('+00:00', '')
+                # Normalize to millisecond precision to match MongoDB's timestamp_str format
+                start_str = self._normalize_timestamp_str(start)
+                end_str = self._normalize_timestamp_str(end)
                 embargo_conditions.append(f"(timestamp_str >= '{start_str}' AND timestamp_str < '{end_str}')")
 
         purge_check = " OR ".join(purge_conditions) if purge_conditions else "FALSE"

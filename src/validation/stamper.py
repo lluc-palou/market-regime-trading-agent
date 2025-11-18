@@ -66,6 +66,8 @@ class DataStamper:
             SQL expression for fold assignment
         """
         cases = []
+        logger(f'Building fold assignment SQL for {len(self.folds)} folds:', level="DEBUG")
+
         for fold in self.folds:
             fold_dict = fold.to_dict()
             # Normalize to millisecond precision to match MongoDB's timestamp_str format
@@ -74,18 +76,23 @@ class DataStamper:
             fold_id = fold_dict['fold_id']
             fold_type = fold_dict['fold_type']
 
+            logger(f'  Fold {fold_id} ({fold_type}): {start_str} <= ts < {end_str}', level="DEBUG")
+
             cases.append(f"""
                 WHEN timestamp_str >= '{start_str}' AND timestamp_str < '{end_str}'
                 THEN named_struct('fold_id', {fold_id}, 'fold_type', '{fold_type}')
             """)
 
         # Default case: excluded
-        return f"""
+        sql_expr = f"""
             CASE
                 {' '.join(cases)}
                 ELSE named_struct('fold_id', -1, 'fold_type', 'excluded')
             END
         """
+
+        logger(f'Fold assignment SQL generated ({len(cases)} WHEN clauses)', level="DEBUG")
+        return sql_expr
 
     def _build_role_assignment_sql(self, split_id: int, split: Dict) -> str:
         """
@@ -158,6 +165,12 @@ class DataStamper:
         stamped_df = df.withColumn('fold_info', expr(fold_assignment_expr))
         stamped_df = stamped_df.withColumn('fold_id', col('fold_info.fold_id'))
         stamped_df = stamped_df.withColumn('fold_type', col('fold_info.fold_type'))
+
+        # Debug: Show sample of timestamp matches
+        sample_rows = stamped_df.select('timestamp_str', 'fold_id', 'fold_type').limit(5).collect()
+        logger('Sample fold assignments:', level="DEBUG")
+        for row in sample_rows:
+            logger(f'  {row.timestamp_str} -> fold_id={row.fold_id}, fold_type={row.fold_type}', level="DEBUG")
 
         # Step 2: Build split_roles map for all splits
         split_role_exprs = []

@@ -50,17 +50,71 @@ def read_sorted_with_timestamp_strings(
             }
         }
     }
-    
+
     # Adds additional fields to projection
     if additional_fields:
         for field in additional_fields:
             projection[field] = 1
-    
+
     pipeline = [
         {"$sort": {"timestamp": 1}},
         {"$project": projection}
     ]
-    
+
+    return read_from_mongodb(spark, database, collection, pipeline)
+
+def read_hourly_batch_from_mongodb(
+    spark: SparkSession,
+    database: str,
+    collection: str,
+    start_timestamp_str: str,
+    end_timestamp_str: str,
+    additional_fields: Optional[List[str]] = None
+) -> DataFrame:
+    """
+    Reads a specific time range from MongoDB using timestamp index for efficiency.
+
+    CRITICAL: Uses $match with timestamp range to leverage MongoDB timestamp index.
+    This enables O(log N + matches) query performance instead of O(N) full scan.
+
+    Args:
+        spark: SparkSession instance
+        database: Database name
+        collection: Collection name
+        start_timestamp_str: Start timestamp (ISO format with Z)
+        end_timestamp_str: End timestamp (ISO format with Z)
+        additional_fields: Additional fields to project
+
+    Returns:
+        DataFrame with documents in time range, sorted by timestamp
+    """
+    # Build projection
+    projection = {
+        "timestamp_str": {
+            "$dateToString": {
+                "format": "%Y-%m-%dT%H:%M:%S.%LZ",
+                "date": "$timestamp"
+            }
+        }
+    }
+
+    # Add additional fields to projection
+    if additional_fields:
+        for field in additional_fields:
+            projection[field] = 1
+
+    # Pipeline with $match BEFORE $sort to use index
+    pipeline = [
+        {"$match": {
+            "timestamp": {
+                "$gte": {"$date": start_timestamp_str},
+                "$lt": {"$date": end_timestamp_str}
+            }
+        }},
+        {"$sort": {"timestamp": 1}},
+        {"$project": projection}
+    ]
+
     return read_from_mongodb(spark, database, collection, pipeline)
 
 def read_all_with_timestamp_strings(

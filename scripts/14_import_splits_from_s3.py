@@ -442,6 +442,43 @@ def main():
         logger('', "INFO")
 
         # =====================================================================
+        # Step 5: Create Timestamp Indexes (for downstream stages 15+)
+        # =====================================================================
+
+        log_section('STEP 4: CREATE TIMESTAMP INDEXES')
+        logger('Creating timestamp indexes on imported collections for downstream stages...', "INFO")
+
+        from pymongo import ASCENDING
+
+        client = MongoClient(MONGO_CONFIG["uri"])
+        db = client[MONGO_CONFIG["db_name"]]
+
+        for split_info in manifest["splits"]:
+            if not split_info:  # Skip empty splits
+                continue
+
+            split_id = split_info["split_id"]
+            collection_name = f"{MONGO_CONFIG['collection_prefix']}{split_id}{MONGO_CONFIG['collection_suffix']}"
+
+            if collection_name in db.list_collection_names():
+                coll = db[collection_name]
+
+                # Check if timestamp index already exists
+                existing_indexes = list(coll.list_indexes())
+                has_timestamp_index = any('timestamp' in idx.get('key', {}) for idx in existing_indexes)
+
+                if not has_timestamp_index:
+                    logger(f'  Creating timestamp index on {collection_name}...', "INFO")
+                    coll.create_index([("timestamp", ASCENDING)], background=False)
+                else:
+                    logger(f'  Timestamp index already exists on {collection_name}', "INFO")
+
+        client.close()
+
+        logger('Timestamp indexes created successfully', "INFO")
+        logger('', "INFO")
+
+        # =====================================================================
         # Completion
         # =====================================================================
 

@@ -181,7 +181,37 @@ def main():
         logger('Training configuration:', "INFO")
         for key, value in TRAINING_CONFIG.items():
             logger(f'  {key}: {value}', "INFO")
-        
+
+        # CRITICAL: Create timestamp indexes on all split collections for efficient hourly queries
+        # Without these indexes, each hourly query performs a full collection scan O(N)
+        # With indexes: O(log N + matches) - reduces processing time dramatically
+        logger('', "INFO")
+        logger('Creating timestamp indexes on all split collections...', "INFO")
+        from pymongo import MongoClient, ASCENDING
+        client = MongoClient(MONGO_URI)
+        db = client[DB_NAME]
+        all_collections = db.list_collection_names()
+
+        # Find all split collections
+        split_collections = [c for c in all_collections
+                           if c.startswith(COLLECTION_PREFIX) and c.endswith(COLLECTION_SUFFIX)]
+
+        for collection_name in split_collections:
+            input_coll = db[collection_name]
+
+            # Check if index already exists
+            existing_indexes = list(input_coll.list_indexes())
+            has_timestamp_index = any('timestamp' in idx.get('key', {}) for idx in existing_indexes)
+
+            if not has_timestamp_index:
+                logger(f'  Creating index on {collection_name}...', "INFO")
+                input_coll.create_index([("timestamp", ASCENDING)], background=False)
+            else:
+                logger(f'  Index already exists on {collection_name}', "INFO")
+
+        client.close()
+        logger(f'Timestamp indexes created/verified on {len(split_collections)} collections', "INFO")
+
         # Run production training
         logger('', "INFO")
         logger('Starting production training...', "INFO")

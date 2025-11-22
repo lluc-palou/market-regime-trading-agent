@@ -100,12 +100,15 @@ def apply_feature_projection(df, projected_features):
     Apply feature projection to DataFrame by filtering feature arrays.
     Uses native PySpark array indexing (much faster than UDFs).
 
+    ENHANCED: Extracts fwd_logret_1 (forward log-return) as independent field 'target'
+    for easier access in downstream stages.
+
     Args:
         df: PySpark DataFrame with feature_names and features columns
         projected_features: List of features to keep (18 features)
 
     Returns:
-        DataFrame with filtered features
+        DataFrame with filtered features and separate 'target' field
     """
     logger('Applying feature projection to DataFrame...', "INFO")
 
@@ -113,9 +116,33 @@ def apply_feature_projection(df, projected_features):
     first_row = df.select('feature_names').first()
     all_feature_names = first_row['feature_names']
 
+    # Find index of fwd_logret_1 for extraction as independent field
+    fwd_logret_idx = None
+    for feat in ['fwd_logret_1', 'fwd_logret_01']:  # Try both naming conventions
+        try:
+            fwd_logret_idx = all_feature_names.index(feat)
+            logger(f'Found forward log-return at index {fwd_logret_idx}: {feat}', "INFO")
+            break
+        except ValueError:
+            continue
+
+    if fwd_logret_idx is None:
+        logger('WARNING: fwd_logret_1 not found in features, target field will not be created', "WARNING")
+
+    # Extract fwd_logret_1 as independent 'target' field BEFORE projection
+    if fwd_logret_idx is not None:
+        df = df.withColumn('target', col('features')[fwd_logret_idx])
+        logger('Extracted fwd_logret_1 as independent field "target"', "INFO")
+
+    # Remove fwd_logret_1 from projected_features list (will be separate field)
+    projected_features_without_target = [f for f in projected_features
+                                         if not f.startswith('fwd_logret')]
+
+    logger(f'Features after target extraction: {len(projected_features_without_target)} (removed forward returns)', "INFO")
+
     # Build index mapping: projected feature -> array index
     feature_indices = []
-    for feat in projected_features:
+    for feat in projected_features_without_target:
         try:
             idx = all_feature_names.index(feat)
             feature_indices.append(idx)
@@ -132,14 +159,16 @@ def apply_feature_projection(df, projected_features):
         else:
             projected_values.append(lit(0.0))
 
-    # Replace features column with projected array
+    # Replace features column with projected array (without forward returns)
     df = df.withColumn('features', array(*projected_values))
 
-    # Update feature_names to projected list
-    projected_array = array([lit(name) for name in projected_features])
+    # Update feature_names to projected list (without forward returns)
+    projected_array = array([lit(name) for name in projected_features_without_target])
     df = df.withColumn('feature_names', projected_array)
 
-    logger(f'Projection applied: {len(projected_features)} features in final arrays', "INFO")
+    logger(f'Projection applied: {len(projected_features_without_target)} features in array', "INFO")
+    if fwd_logret_idx is not None:
+        logger('Target field: fwd_logret_1 extracted as separate "target" column', "INFO")
 
     return df
 
@@ -224,12 +253,14 @@ def main():
         projected_features = filter_projected_features(all_feature_names)
         
         logger('', "INFO")
-        logger(f'Projected features to split collections ({len(projected_features)} total):', "INFO")
-        logger('  - microprice (1)', "INFO")
-        logger('  - volatility (1) - kept in array, excluded from transform/std', "INFO")
-        logger('  - depth features (10)', "INFO")
-        logger('  - historical returns (6)', "INFO")
-        logger('  - fwd_logret_1 (1) - kept in array, excluded from transform/std', "INFO")
+        logger(f'Projected features to split collections ({len(projected_features)} total before extraction):', "INFO")
+        logger('  Features array (17 features after fwd_logret_1 extraction):', "INFO")
+        logger('    - microprice (1)', "INFO")
+        logger('    - volatility (1) - kept in array, excluded from transform/std', "INFO")
+        logger('    - depth features (10)', "INFO")
+        logger('    - historical returns (6)', "INFO")
+        logger('  Extracted as separate "target" field:', "INFO")
+        logger('    - fwd_logret_1 (1) - independent field for easier access', "INFO")
         
         # =====================================================================
         # SPLIT MATERIALIZATION
@@ -237,7 +268,31 @@ def main():
         
         logger('', "INFO")
         log_section('MATERIALIZING SPLITS')
-        
+
+        # CRITICAL: Create timestamp index on input collection for efficient hourly queries
+        # Without this index, each hourly query performs a full collection scan O(N)
+        # With index: O(log N + matches) - reduces processing time dramatically
+        logger('Creating timestamp index on input collection...', "INFO")
+        from pymongo import MongoClient, ASCENDING
+        mongo_uri = spark.sparkContext.getConf().get('spark.mongodb.read.connection.uri', 'mongodb://127.0.0.1:27017/')
+        client = MongoClient(mongo_uri)
+        db = client[DB_NAME]
+        input_coll = db[INPUT_COLLECTION]
+
+        # Check if index already exists
+        existing_indexes = list(input_coll.list_indexes())
+        has_timestamp_index = any('timestamp' in idx.get('key', {}) for idx in existing_indexes)
+
+        if not has_timestamp_index:
+            logger('Creating index on timestamp field...', "INFO")
+            input_coll.create_index([("timestamp", ASCENDING)], background=False)
+            logger('Timestamp index created successfully', "INFO")
+        else:
+            logger('Timestamp index already exists', "INFO")
+
+        client.close()
+        logger('', "INFO")
+
         # Initialize materializer
         # NOTE: This assumes SplitMaterializer accepts these parameters
         # You may need to modify the materializer class to accept projection parameters
@@ -281,13 +336,19 @@ def main():
         logger('', "INFO")
         logger('Feature projection summary:', "INFO")
         logger(f'  Input features: {len(all_feature_names)}', "INFO")
-        logger(f'  Output features: {len(projected_features)}', "INFO")
-        logger(f'  Excluded: {", ".join(EXCLUDE_FROM_PROJECTION)}', "INFO")
+        logger(f'  Features array: {len(projected_features) - 1} features (17 total)', "INFO")
+        logger(f'  Target field: fwd_logret_1 extracted as independent "target" column', "INFO")
+        logger(f'  Excluded from features: {", ".join(EXCLUDE_FROM_PROJECTION)}', "INFO")
         logger('', "INFO")
-        logger('NOTE: Next stages (07-08, 10-11) will further exclude:', "INFO")
-        logger('  - volatility (keep original scale)', "INFO")
-        logger('  - fwd_logret_1 (target, keep original scale)', "INFO")
-        logger(f'  Resulting in 16 features transformed/standardized', "INFO")
+        logger('Document structure in split collections:', "INFO")
+        logger('  - features: [microprice, volatility, depth (10), historical (6)] = 17 features', "INFO")
+        logger('  - target: fwd_logret_1 (separate field for easier access)', "INFO")
+        logger('  - feature_names: array matching features (17 names)', "INFO")
+        logger('', "INFO")
+        logger('NOTE: Next stages (07-08, 10-11) will transform/standardize:', "INFO")
+        logger('  - microprice, depth features (10), historical returns (6) = 16 features', "INFO")
+        logger('  - volatility excluded (keep original scale)', "INFO")
+        logger('  - target field already separate (not in features array)', "INFO")
         
     except Exception as e:
         logger(f'Error during split materialization: {str(e)}', "ERROR")

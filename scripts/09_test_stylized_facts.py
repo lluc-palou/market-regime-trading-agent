@@ -262,9 +262,40 @@ def run_stylized_facts_pipeline(output_dir: Path = None):
         if not split_ids:
             logger("ERROR: No splits to test!", "ERROR")
             return
-        
+
         log_section("", char="-")
-        
+
+        # ====================================================================
+        # Step 3.5: Create Timestamp Indexes
+        # ====================================================================
+        log_section("Step 3.5: Creating Timestamp Indexes")
+
+        # CRITICAL: Create timestamp indexes on all split collections for efficient hourly queries
+        # Without these indexes, each hourly query performs a full collection scan O(N)
+        # With indexes: O(log N + matches) - reduces processing time dramatically
+        logger("Creating timestamp indexes on all split collections...", "INFO")
+        from pymongo import MongoClient, ASCENDING
+        client = MongoClient(MONGO_URI)
+        db = client[DB_NAME]
+
+        for split_id in split_ids:
+            input_collection = f"split_{split_id}_input"
+            input_coll = db[input_collection]
+
+            # Check if index already exists
+            existing_indexes = list(input_coll.list_indexes())
+            has_timestamp_index = any('timestamp' in idx.get('key', {}) for idx in existing_indexes)
+
+            if not has_timestamp_index:
+                logger(f'  Creating index on {input_collection}...', "INFO")
+                input_coll.create_index([("timestamp", ASCENDING)], background=False)
+            else:
+                logger(f'  Index already exists on {input_collection}', "INFO")
+
+        client.close()
+        logger('Timestamp indexes created/verified on all split collections', "INFO")
+        log_section("", char="-")
+
         # ====================================================================
         # Step 4: Initialize Pipeline
         # ====================================================================

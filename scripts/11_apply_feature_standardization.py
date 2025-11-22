@@ -128,6 +128,33 @@ def main():
 
         logger(f'Found {len(split_ids)} split collections: {split_ids}', "INFO")
 
+        # CRITICAL: Create timestamp indexes on all split collections for efficient hourly queries
+        # Without these indexes, each hourly query performs a full collection scan O(N)
+        # With indexes: O(log N + matches) - reduces processing time dramatically
+        logger('', "INFO")
+        logger('Creating timestamp indexes on all split collections...', "INFO")
+        from pymongo import ASCENDING
+        client = MongoClient(MONGO_URI)
+        db = client[DB_NAME]
+
+        for split_id in split_ids:
+            input_collection = f"{INPUT_COLLECTION_PREFIX}{split_id}{INPUT_COLLECTION_SUFFIX}"
+            input_coll = db[input_collection]
+
+            # Check if index already exists
+            existing_indexes = list(input_coll.list_indexes())
+            has_timestamp_index = any('timestamp' in idx.get('key', {}) for idx in existing_indexes)
+
+            if not has_timestamp_index:
+                logger(f'  Creating index on {input_collection}...', "INFO")
+                input_coll.create_index([("timestamp", ASCENDING)], background=False)
+            else:
+                logger(f'  Index already exists on {input_collection}', "INFO")
+
+        client.close()
+        logger('Timestamp indexes created/verified on all split collections', "INFO")
+        logger('', "INFO")
+
         # Initialize applicator
         applicator = EWMAStandardizationApplicator(
             spark=spark,

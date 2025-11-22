@@ -54,70 +54,100 @@ class FeatureOrchestrator:
         self.processable_hours = None
     
     def load_raw_data(self):
-        """Load raw LOB data from MongoDB."""
-        logger(f'Loading raw LOB data from {self.input_collection}', "INFO")
-        
-        additional_fields = ["bids", "asks", "fold_type", "fold_id", "split_roles"]
-        
-        self.raw_lob = read_sorted_with_timestamp_strings(
+        """Discover available hours from MongoDB (lightweight operation)."""
+        logger(f'Discovering available hours from {self.input_collection}', "INFO")
+
+        # Load ONLY timestamps to discover hours (not all data)
+        # This is a lightweight query that uses the timestamp index
+        timestamps_only = read_sorted_with_timestamp_strings(
             self.spark,
             self.db_name,
             self.input_collection,
-            additional_fields
+            additional_fields=[]  # No additional fields needed
         )
-        
-        count = self.raw_lob.count()
-        logger(f'Loaded {count} raw LOB records', "INFO")
-    
+
+        count = timestamps_only.count()
+        logger(f'Found {count} records', "INFO")
+
+        # Cache just the timestamps for hour discovery
+        self.raw_lob = timestamps_only
+
     def determine_processable_hours(self):
         """Determine which hours can be processed."""
         self.processable_hours = self.batch_loader.get_processable_hours(self.raw_lob)
-        
+
         if not self.processable_hours:
             raise ValueError('No processable hours found!')
+
+        # Can unpersist timestamps now that we have the hour list
+        self.raw_lob.unpersist()
+        self.raw_lob = None
     
     def process_all_batches(self):
         """Process all hourly batches."""
         logger(f'Processing {len(self.processable_hours)} hours', "INFO")
-        
+
+        # Import needed for MongoDB batch loading
+        from src.utils.database import read_hourly_batch_from_mongodb
+        from src.utils.timestamp import parse_hour_string, add_hours, format_timestamp_for_mongodb
+
         total_processed = 0
         total_time = 0
-        
+
         for i, target_hour_str in enumerate(self.processable_hours):
             batch_start = time.time()
             is_first = (i == 0)
-            
+
             logger(f'Processing {i+1}/{len(self.processable_hours)} - {target_hour_str}', "INFO")
-            
-            # Load batch
-            hour_batch = self.batch_loader.load_batch(self.raw_lob, target_hour_str)
+
+            # Calculate time window with context
+            target_dt = parse_hour_string(target_hour_str)
+            past_start_dt = add_hours(target_dt, -self.batch_loader.required_past_hours)
+            future_end_dt = add_hours(target_dt, self.batch_loader.required_future_hours + 1)
+
+            # Format for MongoDB query
+            past_start_str = format_timestamp_for_mongodb(past_start_dt)
+            future_end_str = format_timestamp_for_mongodb(future_end_dt)
+
+            # CRITICAL: Load batch directly from MongoDB using timestamp index
+            # This uses $match with timestamp range for O(log N + matches) performance
+            additional_fields = ["bids", "asks", "fold_type", "fold_id", "split_roles"]
+            hour_batch = read_hourly_batch_from_mongodb(
+                self.spark,
+                self.db_name,
+                self.input_collection,
+                past_start_str,
+                future_end_str,
+                additional_fields
+            )
+
             batch_count = hour_batch.count()
-            logger(f'Loaded {batch_count} rows', "INFO")
-            
+            logger(f'Loaded {batch_count} rows from MongoDB (range: {past_start_str} to {future_end_str})', "INFO")
+
             if batch_count > 0:
                 # Process batch
                 features_df = self._process_batch(hour_batch, target_hour_str, is_first)
-                
+
                 # Write to database
                 self._write_to_database(features_df)
-                
+
                 processed_count = features_df.count()
                 total_processed += processed_count
                 features_df.unpersist()
             else:
                 logger(f'Skipping empty batch', "WARNING")
-            
+
             # Statistics
             batch_duration = time.time() - batch_start
             total_time += batch_duration
             avg_time = total_time / (i + 1)
             eta = avg_time * (len(self.processable_hours) - i - 1)
-            
+
             logger(f'Batch completed in {batch_duration:.2f}s', "INFO")
             logger(f'Progress: {i+1}/{len(self.processable_hours)}, ETA: {eta:.2f}s', "INFO")
-            
+
             hour_batch.unpersist()
-        
+
         logger(f'Total processed: {total_processed} rows in {total_time:.2f}s', "INFO")
     
     def _process_batch(self, batch: DataFrame, target_hour_str: str, 

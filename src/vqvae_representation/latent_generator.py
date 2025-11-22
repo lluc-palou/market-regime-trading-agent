@@ -270,10 +270,10 @@ class LatentGenerator:
     ):
         """
         Write documents with latent codes to output collection.
-        
-        Preserves all original fields except 'bins' vector.
+
+        Preserves all original fields INCLUDING 'bins' vector.
         Adds 'codebook_index' field.
-        
+
         Args:
             original_docs: Original documents from input collection
             latent_indices: Codebook indices (numpy array)
@@ -283,25 +283,25 @@ class LatentGenerator:
             raise ValueError(
                 f"Mismatch: {len(original_docs)} documents but {len(latent_indices)} latent codes"
             )
-        
+
         # Prepare documents for insertion
         output_docs = []
-        
+
         for doc, latent_idx in zip(original_docs, latent_indices):
-            # Copy all fields except 'bins' and '_id'
+            # Copy all fields except '_id' (KEEP bins array)
             output_doc = {
                 k: v for k, v in doc.items()
-                if k not in ['bins', '_id']
+                if k != '_id'
             }
-            
+
             # Add latent code
             output_doc['codebook_index'] = int(latent_idx)
-            
+
             # Ensure split_id is consistent
             output_doc['split_id'] = split_id
-            
+
             output_docs.append(output_doc)
-        
+
         # Batch insert to MongoDB
         if output_docs:
             self.output_col.insert_many(output_docs, ordered=False)

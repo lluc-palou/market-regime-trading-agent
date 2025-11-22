@@ -63,69 +63,119 @@ class StandardizationOrchestrator:
         self.feature_order = None  # Will store feature column order
     
     def load_raw_data(self):
-        """Load features LOB data from MongoDB (output of Stage 4)."""
-        logger(f'Loading features LOB data from {self.input_collection}', "INFO")
-        
-        self.features_lob = read_all_with_timestamp_strings(
+        """Discover available hours from MongoDB (lightweight operation)."""
+        logger(f'Discovering available hours from {self.input_collection}', "INFO")
+
+        # Load ONLY timestamps to discover hours (not all data)
+        # This is a lightweight query that uses the timestamp index
+        from src.utils.database import read_sorted_with_timestamp_strings
+        timestamps_only = read_sorted_with_timestamp_strings(
             self.spark,
             self.db_name,
-            self.input_collection
+            self.input_collection,
+            additional_fields=[]  # No additional fields needed
         )
-        
-        count = self.features_lob.count()
-        num_cols = len(self.features_lob.columns)
-        logger(f'Loaded {count:,} features LOB records with {num_cols} columns', "INFO")
-    
+
+        count = timestamps_only.count()
+        num_cols = len(timestamps_only.columns)
+        logger(f'Found {count:,} records', "INFO")
+
+        # Cache just the timestamps for hour discovery
+        self.features_lob = timestamps_only
+
     def determine_processable_hours(self):
         """Determine which hours can be processed."""
         self.processable_hours = self.batch_processor.get_processable_hours(self.features_lob)
-        
+
         if not self.processable_hours:
             raise ValueError('No processable hours found!')
+
+        # Can unpersist timestamps now that we have the hour list
+        self.features_lob.unpersist()
+        self.features_lob = None
     
     def process_all_batches(self):
         """Process all hourly batches."""
         volume_coverage_analysis = self.config.get('volume_coverage_analysis', False)
-        
+
         logger(f'Processing {len(self.processable_hours)} hours', "INFO")
         logger(f'Pipeline mode: {"VOLUME COVERAGE ANALYSIS" if volume_coverage_analysis else "MODELING"}', "INFO")
-        
+
+        # Import needed for MongoDB batch loading
+        from src.utils.database import read_all_with_timestamp_strings
+        from src.utils.timestamp import parse_hour_string, add_hours, format_timestamp_for_mongodb
+
         total_processed = 0
         total_time = 0
-        
+
         for i, target_hour_str in enumerate(self.processable_hours):
             batch_start = time.time()
             is_first = (i == 0)
-            
+
             logger(f'Processing {i+1}/{len(self.processable_hours)} - {target_hour_str}', "INFO")
-            
-            # Load batch
-            hour_batch = self.batch_processor.load_batch(self.features_lob, target_hour_str)
+
+            # Calculate time window with context
+            target_dt = parse_hour_string(target_hour_str)
+            past_start_dt = add_hours(target_dt, -self.batch_processor.required_past_hours)
+            future_end_dt = add_hours(target_dt, 1)  # Just the target hour
+
+            # Format for MongoDB query
+            past_start_str = format_timestamp_for_mongodb(past_start_dt)
+            future_end_str = format_timestamp_for_mongodb(future_end_dt)
+
+            # Build MongoDB pipeline with $match for efficient timestamp filtering
+            pipeline = [
+                {"$match": {
+                    "timestamp": {
+                        "$gte": {"$date": past_start_str},
+                        "$lt": {"$date": future_end_str}
+                    }
+                }},
+                {"$sort": {"timestamp": 1}},
+                {"$addFields": {
+                    "timestamp_str": {
+                        "$dateToString": {
+                            "format": "%Y-%m-%dT%H:%M:%S.%LZ",
+                            "date": "$timestamp"
+                        }
+                    }
+                }}
+            ]
+
+            # CRITICAL: Load batch directly from MongoDB using timestamp index
+            from src.utils.database import read_from_mongodb
+            hour_batch = read_from_mongodb(
+                self.spark,
+                self.db_name,
+                self.input_collection,
+                pipeline
+            )
+
             batch_count = hour_batch.count()
-            logger(f'Loaded {batch_count:,} rows', "INFO")
-            
+            logger(f'Loaded {batch_count:,} rows from MongoDB (range: {past_start_str} to {future_end_str})', "INFO")
+
             if batch_count > 0:
                 # Process batch
                 standardized_df = self._process_batch(hour_batch, target_hour_str, is_first, volume_coverage_analysis)
-                
+
                 # Write to database
                 self._write_to_database(standardized_df)
-                
+
                 processed_count = standardized_df.count()
                 total_processed += processed_count
                 standardized_df.unpersist()
             else:
                 logger(f'Skipping empty batch', "WARNING")
-            
+
             # Statistics
             batch_duration = time.time() - batch_start
             total_time += batch_duration
             avg_time = total_time / (i + 1)
             eta = avg_time * (len(self.processable_hours) - i - 1)
-            
+
             logger(f'Batch completed in {batch_duration:.2f}s', "INFO")
             logger(f'Progress: {i+1}/{len(self.processable_hours)}, ETA: {eta:.2f}s', "INFO")
-            
+
             hour_batch.unpersist()
         
         logger(f'Total processed: {total_processed:,} rows in {total_time:.2f}s', "INFO")

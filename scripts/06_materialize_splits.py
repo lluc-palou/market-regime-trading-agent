@@ -189,7 +189,7 @@ def main():
     
     # Split materialization configuration
     CONFIG = {
-        "max_splits": 1,  # Materialize only first split
+        "max_splits": None,  # Materialize only first split
         "create_test_collection": True,  # Create separate test_data collection
     }
     

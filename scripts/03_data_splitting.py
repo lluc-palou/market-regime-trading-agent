@@ -59,7 +59,7 @@ CONFIG = {
     },
     
     'stylized_facts': {
-        'window_length_samples': 10000,
+        'window_length_samples': 2500,
         'edge_margin_samples': 120,
     }
 }

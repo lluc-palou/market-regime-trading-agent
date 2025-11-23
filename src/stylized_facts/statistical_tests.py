@@ -582,14 +582,28 @@ class StylizedFactsTests:
 
             result = acorr_ljungbox(clean_series, lags=lags, return_df=False)
 
-            # Validate result structure
-            if not isinstance(result, tuple) or len(result) < 2:
-                logger(f"  Ljung-Box test skipped for {feature_name}: unexpected result format", "DEBUG")
+            # Extract statistics and p-values from result
+            # Result format: (lb_stat, lb_pvalue) - both are arrays or scalars
+            if isinstance(result, tuple) and len(result) >= 2:
+                # Standard tuple format
+                stat_array = result[0]
+                pval_array = result[1]
+            else:
+                # Unexpected format - log and skip
+                logger(f"  Ljung-Box test skipped for {feature_name}: result type={type(result)}", "DEBUG")
                 return
 
-            # Use the test at lag 10 (or maximum available lag)
-            statistic = result[0][-1] if len(result[0]) > 0 else np.nan
-            p_value = result[1][-1] if len(result[1]) > 0 else np.nan
+            # Extract last value (or single value)
+            try:
+                if hasattr(stat_array, '__getitem__'):
+                    statistic = float(stat_array[-1])
+                    p_value = float(pval_array[-1])
+                else:
+                    statistic = float(stat_array)
+                    p_value = float(pval_array)
+            except (IndexError, TypeError, ValueError) as e:
+                logger(f"  Ljung-Box test skipped for {feature_name}: cannot extract values: {e}", "DEBUG")
+                return
 
             self.test_results.append({
                 'fold_id': fold_id,
@@ -832,14 +846,28 @@ class StylizedFactsTests:
 
             result = acorr_ljungbox(squared_series, lags=lags, return_df=False)
 
-            # Validate result structure
-            if not isinstance(result, tuple) or len(result) < 2:
-                logger(f"  McLeod-Li test skipped for {feature_name}: unexpected result format", "DEBUG")
+            # Extract statistics and p-values from result
+            # Result format: (lb_stat, lb_pvalue) - both are arrays or scalars
+            if isinstance(result, tuple) and len(result) >= 2:
+                # Standard tuple format
+                stat_array = result[0]
+                pval_array = result[1]
+            else:
+                # Unexpected format - log and skip
+                logger(f"  McLeod-Li test skipped for {feature_name}: result type={type(result)}", "DEBUG")
                 return
 
-            # Use the test at lag 10 (or maximum available lag)
-            statistic = result[0][-1] if len(result[0]) > 0 else np.nan
-            p_value = result[1][-1] if len(result[1]) > 0 else np.nan
+            # Extract last value (or single value)
+            try:
+                if hasattr(stat_array, '__getitem__'):
+                    statistic = float(stat_array[-1])
+                    p_value = float(pval_array[-1])
+                else:
+                    statistic = float(stat_array)
+                    p_value = float(pval_array)
+            except (IndexError, TypeError, ValueError) as e:
+                logger(f"  McLeod-Li test skipped for {feature_name}: cannot extract values: {e}", "DEBUG")
+                return
 
             self.test_results.append({
                 'fold_id': fold_id,

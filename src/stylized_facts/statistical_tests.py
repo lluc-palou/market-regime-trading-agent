@@ -583,25 +583,27 @@ class StylizedFactsTests:
             result = acorr_ljungbox(clean_series, lags=lags, return_df=False)
 
             # Extract statistics and p-values from result
-            # Result format: (lb_stat, lb_pvalue) - both are arrays or scalars
-            if isinstance(result, tuple) and len(result) >= 2:
-                # Standard tuple format
-                stat_array = result[0]
-                pval_array = result[1]
-            else:
-                # Unexpected format - log and skip
-                logger(f"  Ljung-Box test skipped for {feature_name}: result type={type(result)}", "DEBUG")
-                return
-
-            # Extract last value (or single value)
+            # Handle both DataFrame (newer statsmodels) and tuple (older statsmodels)
             try:
-                if hasattr(stat_array, '__getitem__'):
-                    statistic = float(stat_array[-1])
-                    p_value = float(pval_array[-1])
+                if isinstance(result, pd.DataFrame):
+                    # DataFrame format: columns are 'lb_stat' and 'lb_pvalue'
+                    statistic = float(result['lb_stat'].iloc[-1])
+                    p_value = float(result['lb_pvalue'].iloc[-1])
+                elif isinstance(result, tuple) and len(result) >= 2:
+                    # Tuple format: (lb_stat, lb_pvalue)
+                    stat_array = result[0]
+                    pval_array = result[1]
+
+                    if hasattr(stat_array, '__getitem__'):
+                        statistic = float(stat_array[-1])
+                        p_value = float(pval_array[-1])
+                    else:
+                        statistic = float(stat_array)
+                        p_value = float(pval_array)
                 else:
-                    statistic = float(stat_array)
-                    p_value = float(pval_array)
-            except (IndexError, TypeError, ValueError) as e:
+                    logger(f"  Ljung-Box test skipped for {feature_name}: unexpected result type={type(result)}", "DEBUG")
+                    return
+            except (KeyError, IndexError, TypeError, ValueError) as e:
                 logger(f"  Ljung-Box test skipped for {feature_name}: cannot extract values: {e}", "DEBUG")
                 return
 
@@ -847,25 +849,27 @@ class StylizedFactsTests:
             result = acorr_ljungbox(squared_series, lags=lags, return_df=False)
 
             # Extract statistics and p-values from result
-            # Result format: (lb_stat, lb_pvalue) - both are arrays or scalars
-            if isinstance(result, tuple) and len(result) >= 2:
-                # Standard tuple format
-                stat_array = result[0]
-                pval_array = result[1]
-            else:
-                # Unexpected format - log and skip
-                logger(f"  McLeod-Li test skipped for {feature_name}: result type={type(result)}", "DEBUG")
-                return
-
-            # Extract last value (or single value)
+            # Handle both DataFrame (newer statsmodels) and tuple (older statsmodels)
             try:
-                if hasattr(stat_array, '__getitem__'):
-                    statistic = float(stat_array[-1])
-                    p_value = float(pval_array[-1])
+                if isinstance(result, pd.DataFrame):
+                    # DataFrame format: columns are 'lb_stat' and 'lb_pvalue'
+                    statistic = float(result['lb_stat'].iloc[-1])
+                    p_value = float(result['lb_pvalue'].iloc[-1])
+                elif isinstance(result, tuple) and len(result) >= 2:
+                    # Tuple format: (lb_stat, lb_pvalue)
+                    stat_array = result[0]
+                    pval_array = result[1]
+
+                    if hasattr(stat_array, '__getitem__'):
+                        statistic = float(stat_array[-1])
+                        p_value = float(pval_array[-1])
+                    else:
+                        statistic = float(stat_array)
+                        p_value = float(pval_array)
                 else:
-                    statistic = float(stat_array)
-                    p_value = float(pval_array)
-            except (IndexError, TypeError, ValueError) as e:
+                    logger(f"  McLeod-Li test skipped for {feature_name}: unexpected result type={type(result)}", "DEBUG")
+                    return
+            except (KeyError, IndexError, TypeError, ValueError) as e:
                 logger(f"  McLeod-Li test skipped for {feature_name}: cannot extract values: {e}", "DEBUG")
                 return
 

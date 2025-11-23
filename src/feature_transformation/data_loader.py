@@ -52,24 +52,24 @@ def get_all_hours(spark: SparkSession, db_name: str, split_collection: str) -> L
     return hours_list
 
 
-def load_hour_batch(spark: SparkSession, db_name: str, split_collection: str, 
+def load_hour_batch(spark: SparkSession, db_name: str, split_collection: str,
                     start_hour: datetime, end_hour: datetime) -> DataFrame:
     """
     Load one hour batch from split collection.
-    
+
     Args:
         spark: SparkSession instance
         db_name: Database name
         split_collection: Split collection name
         start_hour: Start of hour window
         end_hour: End of hour window
-        
+
     Returns:
-        DataFrame with documents in the hour window
+        DataFrame with documents in the hour window (deduplicated by timestamp)
     """
     start_str = start_hour.isoformat() + 'Z'
     end_str = end_hour.isoformat() + 'Z'
-    
+
     pipeline = [
         {"$match": {
             "timestamp": {
@@ -79,7 +79,7 @@ def load_hour_batch(spark: SparkSession, db_name: str, split_collection: str,
         }},
         {"$sort": {"timestamp": 1}}
     ]
-    
+
     df = (
         spark.read.format("mongodb")
         .option("database", db_name)
@@ -87,7 +87,11 @@ def load_hour_batch(spark: SparkSession, db_name: str, split_collection: str,
         .option("aggregation.pipeline", str(pipeline).replace("'", '"'))
         .load()
     )
-    
+
+    # Ensure no duplicate timestamps in the batch
+    # This is a safeguard in case the input collection has duplicates
+    df = df.dropDuplicates(["timestamp"])
+
     return df
 
 

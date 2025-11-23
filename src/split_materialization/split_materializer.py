@@ -152,23 +152,27 @@ class SplitMaterializer:
         """
         Extract documents for a specific split.
         Every document is included with its role for this split.
-        
+
         Args:
             df: Input DataFrame with split_roles
             split_id: Split ID to extract
-            
+
         Returns:
             DataFrame with all documents, with role field added
         """
         # Extract role for this split from split_roles struct
         split_key = str(split_id)
-        
+
         # Add role column - every document gets its role for this split
         df_split = df.withColumn("role", col("split_roles").getField(split_key))
-        
+
         # Keep existing fold_id and fold_type from input, drop split_roles
         df_split = df_split.drop("split_roles")
-        
+
+        # Remove duplicates - same timestamp should not appear twice
+        # This ensures each split has unique timestamps only
+        df_split = df_split.dropDuplicates(["timestamp"])
+
         return df_split
     
     def _extract_test_samples(self, df: DataFrame) -> DataFrame:

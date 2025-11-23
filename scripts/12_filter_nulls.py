@@ -103,20 +103,20 @@ def load_hour_batch(
 ) -> DataFrame:
     """
     Load one hour batch from collection with temporal filtering and ordering.
-    
+
     Args:
         spark: SparkSession instance
         db_name: Database name
         collection: Collection name
         start_hour: Start of hour window (inclusive)
         end_hour: End of hour window (exclusive)
-        
+
     Returns:
-        DataFrame with documents in the hour window, sorted by timestamp
+        DataFrame with documents in the hour window, sorted by timestamp (deduplicated)
     """
     start_str = start_hour.isoformat() + 'Z'
     end_str = end_hour.isoformat() + 'Z'
-    
+
     pipeline = [
         {"$match": {
             "timestamp": {
@@ -126,7 +126,7 @@ def load_hour_batch(
         }},
         {"$sort": {"timestamp": 1}}
     ]
-    
+
     df = (
         spark.read.format("mongodb")
         .option("database", db_name)
@@ -134,7 +134,11 @@ def load_hour_batch(
         .option("aggregation.pipeline", str(pipeline).replace("'", '"'))
         .load()
     )
-    
+
+    # Ensure no duplicate timestamps in the batch
+    # This is a safeguard in case the input collection has duplicates
+    df = df.dropDuplicates(["timestamp"])
+
     return df
 
 

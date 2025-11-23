@@ -111,6 +111,10 @@ class SplitMaterializer:
                 split_df = self._extract_split(hour_batch, split_id)
                 split_count = split_df.count()
 
+                # Log split 0 count to diagnose the issue
+                if split_id == 0:
+                    logger(f'    [Split 0 diagnostic] After filter & dedup: {split_count} docs', "INFO")
+
                 if split_count > 0:
                     collection_name = f"split_{split_id}_input"
                     self._write_to_collection(split_df, collection_name)
@@ -199,9 +203,12 @@ class SplitMaterializer:
         df_split = df_split.dropDuplicates(["timestamp"])
         after_dedup = df_split.count()
 
-        # Debug: log deduplication (only for first split)
-        if split_id == 0 and before_dedup != after_dedup:
-            logger(f'    [Split 0 diagnostic] Deduplication: {before_dedup} → {after_dedup} ({before_dedup - after_dedup} duplicates removed)', "INFO")
+        # Debug: log deduplication for split 0 (always show, even if no duplicates)
+        if split_id == 0:
+            if before_dedup != after_dedup:
+                logger(f'    [Split 0 diagnostic] Deduplication: {before_dedup} → {after_dedup} ({before_dedup - after_dedup} duplicates removed)', "INFO")
+            else:
+                logger(f'    [Split 0 diagnostic] After dedup: {after_dedup} docs (no duplicates)', "INFO")
 
         return df_split
     

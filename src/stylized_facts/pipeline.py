@@ -191,18 +191,21 @@ class StreamingStylizedFactsPipeline:
                 if self.tester.test_results:
                     window_results = pd.DataFrame(self.tester.test_results)
                     window_results['split_id'] = split_id
-                    
+
                     # Append to file (or create if first window)
                     write_mode = 'w' if window_count == 0 else 'a'
                     write_header = (window_count == 0)
 
                     window_results.to_csv(
                         split_results_path,
+                        mode=write_mode,
+                        header=write_header,
                         quoting=1,
-                        escapechar='\\'
+                        escapechar='\\',
+                        index=False
                     )
-                    
-                    logger(f"  Saved {len(window_results):,} test results", "INFO")
+
+                    logger(f"  Saved {len(window_results):,} test results (mode={write_mode})", "INFO")
                     
                     # Clear test results for next window
                     self.tester.test_results = []

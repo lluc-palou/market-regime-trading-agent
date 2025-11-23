@@ -562,13 +562,51 @@ class StylizedFactsTests:
         """Ljung-Box test for autocorrelation."""
         try:
             clean_series = series.dropna()
+
+            # Need at least 20 samples for meaningful autocorrelation test
+            if len(clean_series) < 20:
+                logger(f"  Ljung-Box test skipped for {feature_name}: only {len(clean_series)} samples", "DEBUG")
+                return
+
+            # Check for zero variance (constant series)
+            if clean_series.std() == 0 or np.isnan(clean_series.std()):
+                logger(f"  Ljung-Box test skipped for {feature_name}: zero variance or all NaN", "DEBUG")
+                return
+
             lags = min(10, len(clean_series) // 5)
+
+            # Ensure lags > 0
+            if lags < 1:
+                logger(f"  Ljung-Box test skipped for {feature_name}: lags={lags} (n_samples={len(clean_series)})", "DEBUG")
+                return
+
             result = acorr_ljungbox(clean_series, lags=lags, return_df=False)
-            
-            # Use the test at lag 10 (or maximum available lag)
-            statistic = result[0][-1] if len(result[0]) > 0 else np.nan
-            p_value = result[1][-1] if len(result[1]) > 0 else np.nan
-            
+
+            # Extract statistics and p-values from result
+            # Handle both DataFrame (newer statsmodels) and tuple (older statsmodels)
+            try:
+                if isinstance(result, pd.DataFrame):
+                    # DataFrame format: columns are 'lb_stat' and 'lb_pvalue'
+                    statistic = float(result['lb_stat'].iloc[-1])
+                    p_value = float(result['lb_pvalue'].iloc[-1])
+                elif isinstance(result, tuple) and len(result) >= 2:
+                    # Tuple format: (lb_stat, lb_pvalue)
+                    stat_array = result[0]
+                    pval_array = result[1]
+
+                    if hasattr(stat_array, '__getitem__'):
+                        statistic = float(stat_array[-1])
+                        p_value = float(pval_array[-1])
+                    else:
+                        statistic = float(stat_array)
+                        p_value = float(pval_array)
+                else:
+                    logger(f"  Ljung-Box test skipped for {feature_name}: unexpected result type={type(result)}", "DEBUG")
+                    return
+            except (KeyError, IndexError, TypeError, ValueError) as e:
+                logger(f"  Ljung-Box test skipped for {feature_name}: cannot extract values: {e}", "DEBUG")
+                return
+
             self.test_results.append({
                 'fold_id': fold_id,
                 'fold_type': fold_type,
@@ -581,7 +619,7 @@ class StylizedFactsTests:
                 'n_obs': len(clean_series)
             })
         except Exception as e:
-            logger(f"  Ljung-Box test failed for fold {fold_id}, {feature_name}: {str(e)}", "WARNING")
+            logger(f"  Ljung-Box test failed for fold {fold_id}, {feature_name}: {type(e).__name__}: {str(e)}", "WARNING")
     
     def test_durbin_watson(self, series: pd.Series, fold_id: int, fold_type: str, feature_name: str):
         """Durbin-Watson test for autocorrelation."""
@@ -700,23 +738,31 @@ class StylizedFactsTests:
         try:
             from statsmodels.tsa.stattools import bds
             clean_series = series.dropna()
-            
+
             # Need at least 100 samples for BDS test
             if len(clean_series) < 100:
+                logger(f"  BDS test skipped for {feature_name}: only {len(clean_series)} samples (need 100)", "DEBUG")
                 return
-            
+
+            # Check for zero variance
+            if clean_series.std() == 0 or np.isnan(clean_series.std()):
+                logger(f"  BDS test skipped for {feature_name}: zero variance or all NaN", "DEBUG")
+                return
+
             # BDS test with embedding dimension 2 and distance epsilon=0.5*std
             result = bds(clean_series, max_dim=2, epsilon=0.5)
-            
+
             # result is a tuple: (statistic_array, pvalue_array)
-            # Extract values safely
-            if hasattr(result[0], '__len__') and len(result[0]) > 0:
-                statistic = float(result[0][0])
-                p_value = float(result[1][0])
-            else:
+            # Extract values safely - check if array-like
+            try:
+                # Try accessing as array first
+                statistic = float(result[0][0]) if hasattr(result[0], '__getitem__') else float(result[0])
+                p_value = float(result[1][0]) if hasattr(result[1], '__getitem__') else float(result[1])
+            except (IndexError, TypeError):
+                # Fallback to direct conversion
                 statistic = float(result[0])
                 p_value = float(result[1])
-            
+
             self.test_results.append({
                 'fold_id': fold_id,
                 'fold_type': fold_type,
@@ -728,7 +774,7 @@ class StylizedFactsTests:
                 'n_obs': len(clean_series)
             })
         except Exception as e:
-            logger(f"  BDS test failed for fold {fold_id}, {feature_name}: {str(e)}", "WARNING")
+            logger(f"  BDS test failed for fold {fold_id}, {feature_name}: {type(e).__name__}: {str(e)}", "WARNING")
     
     def test_runs(self, series: pd.Series, fold_id: int, fold_type: str, feature_name: str):
         """Runs test for randomness."""
@@ -780,17 +826,53 @@ class StylizedFactsTests:
         """McLeod-Li test for ARCH effects."""
         try:
             clean_series = series.dropna()
-            
+
+            # Need at least 20 samples for meaningful test
+            if len(clean_series) < 20:
+                logger(f"  McLeod-Li test skipped for {feature_name}: only {len(clean_series)} samples", "DEBUG")
+                return
+
+            # Check for zero variance (constant series)
+            if clean_series.std() == 0 or np.isnan(clean_series.std()):
+                logger(f"  McLeod-Li test skipped for {feature_name}: zero variance or all NaN", "DEBUG")
+                return
+
             # Test on squared series
             squared_series = clean_series ** 2
             lags = min(10, len(squared_series) // 5)
-            
+
+            # Ensure lags > 0
+            if lags < 1:
+                logger(f"  McLeod-Li test skipped for {feature_name}: lags={lags} (n_samples={len(clean_series)})", "DEBUG")
+                return
+
             result = acorr_ljungbox(squared_series, lags=lags, return_df=False)
-            
-            # Use the test at lag 10 (or maximum available lag)
-            statistic = result[0][-1] if len(result[0]) > 0 else np.nan
-            p_value = result[1][-1] if len(result[1]) > 0 else np.nan
-            
+
+            # Extract statistics and p-values from result
+            # Handle both DataFrame (newer statsmodels) and tuple (older statsmodels)
+            try:
+                if isinstance(result, pd.DataFrame):
+                    # DataFrame format: columns are 'lb_stat' and 'lb_pvalue'
+                    statistic = float(result['lb_stat'].iloc[-1])
+                    p_value = float(result['lb_pvalue'].iloc[-1])
+                elif isinstance(result, tuple) and len(result) >= 2:
+                    # Tuple format: (lb_stat, lb_pvalue)
+                    stat_array = result[0]
+                    pval_array = result[1]
+
+                    if hasattr(stat_array, '__getitem__'):
+                        statistic = float(stat_array[-1])
+                        p_value = float(pval_array[-1])
+                    else:
+                        statistic = float(stat_array)
+                        p_value = float(pval_array)
+                else:
+                    logger(f"  McLeod-Li test skipped for {feature_name}: unexpected result type={type(result)}", "DEBUG")
+                    return
+            except (KeyError, IndexError, TypeError, ValueError) as e:
+                logger(f"  McLeod-Li test skipped for {feature_name}: cannot extract values: {e}", "DEBUG")
+                return
+
             self.test_results.append({
                 'fold_id': fold_id,
                 'fold_type': fold_type,
@@ -803,7 +885,7 @@ class StylizedFactsTests:
                 'n_obs': len(clean_series)
             })
         except Exception as e:
-            logger(f"  McLeod-Li test failed for fold {fold_id}, {feature_name}: {str(e)}", "WARNING")
+            logger(f"  McLeod-Li test failed for fold {fold_id}, {feature_name}: {type(e).__name__}: {str(e)}", "WARNING")
     
     # =============================================================================================
     # Distributional Shape

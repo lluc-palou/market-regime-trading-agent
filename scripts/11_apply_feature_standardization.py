@@ -108,7 +108,7 @@ def main():
 
         # Discover all split collections
         from pymongo import MongoClient
-        client = MongoClient(MONGO_URI)
+        client = MongoClient(MONGO_URI, serverSelectionTimeoutMS=5000)
         db = client[DB_NAME]
         all_collections = db.list_collection_names()
 
@@ -134,7 +134,7 @@ def main():
         logger('', "INFO")
         logger('Creating timestamp indexes on all split collections...', "INFO")
         from pymongo import ASCENDING
-        client = MongoClient(MONGO_URI)
+        client = MongoClient(MONGO_URI, serverSelectionTimeoutMS=5000)
         db = client[DB_NAME]
 
         for split_id in split_ids:
@@ -195,7 +195,7 @@ def main():
         logger('Renaming collections for cyclic pattern...', "INFO")
 
         from pymongo import MongoClient
-        client = MongoClient(MONGO_URI)
+        client = MongoClient(MONGO_URI, serverSelectionTimeoutMS=5000)
         db = client[DB_NAME]
 
         for split_id in split_ids:

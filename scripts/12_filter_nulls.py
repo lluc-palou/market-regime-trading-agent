@@ -323,7 +323,7 @@ def filter_split_nulls_hourly(
         logger('Replacing original collection with filtered data...', "INFO")
         
         from pymongo import MongoClient
-        client = MongoClient(MONGO_URI)
+        client = MongoClient(MONGO_URI, serverSelectionTimeoutMS=5000)
         db = client[db_name]
         
         # Drop original collection
@@ -343,7 +343,7 @@ def filter_split_nulls_hourly(
         
         # Clean up temp collection if it exists
         from pymongo import MongoClient
-        client = MongoClient(MONGO_URI)
+        client = MongoClient(MONGO_URI, serverSelectionTimeoutMS=5000)
         db = client[db_name]
         if temp_collection in db.list_collection_names():
             db[temp_collection].drop()
@@ -375,7 +375,7 @@ def main():
 
     # Discover all split collections
     from pymongo import MongoClient
-    client = MongoClient(MONGO_URI)
+    client = MongoClient(MONGO_URI, serverSelectionTimeoutMS=5000)
     db = client[DB_NAME]
     all_collections = db.list_collection_names()
 
@@ -411,7 +411,7 @@ def main():
     # With indexes: O(log N + matches) - reduces processing time dramatically
     logger('Creating timestamp indexes on all split collections...', "INFO")
     from pymongo import ASCENDING
-    client = MongoClient(MONGO_URI)
+    client = MongoClient(MONGO_URI, serverSelectionTimeoutMS=5000)
     db = client[DB_NAME]
 
     for split_id in split_ids:

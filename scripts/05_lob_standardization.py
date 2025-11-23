@@ -80,7 +80,7 @@ def run_standardization_pipeline():
     # With index: O(log N + matches) - reduces processing time dramatically
     logger('Creating timestamp index on input collection...', "INFO")
     from pymongo import MongoClient, ASCENDING
-    client = MongoClient(MONGO_URI)
+    client = MongoClient(MONGO_URI, serverSelectionTimeoutMS=5000)
     db = client[DB_NAME]
     input_coll = db[INPUT_COLLECTION]
 

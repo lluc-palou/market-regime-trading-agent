@@ -274,26 +274,40 @@ def run_stylized_facts_pipeline(output_dir: Path = None):
         # Without these indexes, each hourly query performs a full collection scan O(N)
         # With indexes: O(log N + matches) - reduces processing time dramatically
         logger("Creating timestamp indexes on all split collections...", "INFO")
-        from pymongo import MongoClient, ASCENDING
-        client = MongoClient(MONGO_URI)
-        db = client[DB_NAME]
 
-        for split_id in split_ids:
-            input_collection = f"split_{split_id}_input"
-            input_coll = db[input_collection]
+        try:
+            from pymongo import MongoClient, ASCENDING
 
-            # Check if index already exists
-            existing_indexes = list(input_coll.list_indexes())
-            has_timestamp_index = any('timestamp' in idx.get('key', {}) for idx in existing_indexes)
+            # Use shorter timeout for index creation to fail fast if MongoDB unavailable
+            client = MongoClient(MONGO_URI, serverSelectionTimeoutMS=5000)
 
-            if not has_timestamp_index:
-                logger(f'  Creating index on {input_collection}...', "INFO")
-                input_coll.create_index([("timestamp", ASCENDING)], background=False)
-            else:
-                logger(f'  Index already exists on {input_collection}', "INFO")
+            # Test connection first
+            client.admin.command('ping')
 
-        client.close()
-        logger('Timestamp indexes created/verified on all split collections', "INFO")
+            db = client[DB_NAME]
+
+            for split_id in split_ids:
+                input_collection = f"split_{split_id}_input"
+                input_coll = db[input_collection]
+
+                # Check if index already exists
+                existing_indexes = list(input_coll.list_indexes())
+                has_timestamp_index = any('timestamp' in idx.get('key', {}) for idx in existing_indexes)
+
+                if not has_timestamp_index:
+                    logger(f'  Creating index on {input_collection}...', "INFO")
+                    input_coll.create_index([("timestamp", ASCENDING)], background=False)
+                else:
+                    logger(f'  Index already exists on {input_collection}', "INFO")
+
+            client.close()
+            logger('Timestamp indexes created/verified on all split collections', "INFO")
+
+        except Exception as e:
+            logger(f'WARNING: Could not create timestamp indexes: {type(e).__name__}: {str(e)}', "WARNING")
+            logger('Indexes will be created on-demand by Spark when connecting to MongoDB', "WARNING")
+            logger('This may result in slower query performance on first run', "WARNING")
+
         log_section("", char="-")
 
         # ====================================================================

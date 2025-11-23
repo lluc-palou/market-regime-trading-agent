@@ -133,23 +133,35 @@ def run_cpcv_pipeline():
     # Without this index, each hourly query performs a full collection scan O(N)
     # With index: O(log N + matches) - reduces 77-file case from hours to minutes
     logger('Creating timestamp index on input collection...', level="INFO")
-    from pymongo import MongoClient, ASCENDING
-    client = MongoClient(MONGO_URI)
-    db = client[DB_NAME]
-    input_coll = db[INPUT_COLLECTION]
 
-    # Check if index already exists
-    existing_indexes = list(input_coll.list_indexes())
-    has_timestamp_index = any('timestamp' in idx.get('key', {}) for idx in existing_indexes)
+    try:
+        from pymongo import MongoClient, ASCENDING
 
-    if not has_timestamp_index:
-        logger('Creating index on timestamp field...', level="INFO")
-        input_coll.create_index([("timestamp", ASCENDING)], background=False)
-        logger('Timestamp index created successfully', level="INFO")
-    else:
-        logger('Timestamp index already exists', level="INFO")
+        # Use shorter timeout to fail fast if MongoDB unavailable
+        client = MongoClient(MONGO_URI, serverSelectionTimeoutMS=5000)
 
-    client.close()
+        # Test connection first
+        client.admin.command('ping')
+
+        db = client[DB_NAME]
+        input_coll = db[INPUT_COLLECTION]
+
+        # Check if index already exists
+        existing_indexes = list(input_coll.list_indexes())
+        has_timestamp_index = any('timestamp' in idx.get('key', {}) for idx in existing_indexes)
+
+        if not has_timestamp_index:
+            logger('Creating index on timestamp field...', level="INFO")
+            input_coll.create_index([("timestamp", ASCENDING)], background=False)
+            logger('Timestamp index created successfully', level="INFO")
+        else:
+            logger('Timestamp index already exists', level="INFO")
+
+        client.close()
+
+    except Exception as e:
+        logger(f'WARNING: Could not create timestamp index: {type(e).__name__}: {str(e)}', level="WARNING")
+        logger('The DataStamper will still work but may be slower on first run', level="WARNING")
 
     data_stamper = DataStamper(metadata, folds, spark, DB_NAME)
     data_stamper.process_batches(INPUT_COLLECTION, OUTPUT_COLLECTION)

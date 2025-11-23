@@ -151,20 +151,24 @@ class SplitMaterializer:
     def _extract_split(self, df: DataFrame, split_id: int) -> DataFrame:
         """
         Extract documents for a specific split.
-        Every document is included with its role for this split.
+        Includes only train, train_warmup, and validation samples.
+        Test samples are excluded - they only go to the test_data collection.
 
         Args:
             df: Input DataFrame with split_roles
             split_id: Split ID to extract
 
         Returns:
-            DataFrame with all documents, with role field added
+            DataFrame with non-test documents, with role field added
         """
         # Extract role for this split from split_roles struct
         split_key = str(split_id)
 
         # Add role column - every document gets its role for this split
         df_split = df.withColumn("role", col("split_roles").getField(split_key))
+
+        # Filter out test samples - they should only be in test_data collection
+        df_split = df_split.filter(col("role") != "test")
 
         # Keep existing fold_id and fold_type from input, drop split_roles
         df_split = df_split.drop("split_roles")

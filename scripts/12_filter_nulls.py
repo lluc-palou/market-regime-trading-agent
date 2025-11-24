@@ -135,10 +135,6 @@ def load_hour_batch(
         .load()
     )
 
-    # Ensure no duplicate timestamps in the batch
-    # This is a safeguard in case the input collection has duplicates
-    df = df.dropDuplicates(["timestamp"])
-
     return df
 
 

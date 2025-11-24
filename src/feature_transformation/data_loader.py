@@ -88,10 +88,6 @@ def load_hour_batch(spark: SparkSession, db_name: str, split_collection: str,
         .load()
     )
 
-    # Ensure no duplicate timestamps in the batch
-    # This is a safeguard in case the input collection has duplicates
-    df = df.dropDuplicates(["timestamp"])
-
     return df
 
 

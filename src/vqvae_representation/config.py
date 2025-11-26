@@ -13,15 +13,15 @@ Defines hyperparameter grids and training configurations for LOB representation 
 
 HYPERPARAM_GRID = {
     'B': [1001],                    # Number of LOB bins (fixed)
-    'K': [32, 64, 128, 256],        # Codebook size: small to large
-    'D': [16, 24, 32],              # Embedding dimension: compact to spacious
+    'K': [128, 256, 512],           # Codebook size: medium to very large
+    'D': [40, 56, 64, 80],          # Embedding dimension: expanded range
     'n_conv_layers': [2, 3],        # Architecture depth: shallow vs deep
     'beta': [0.25, 0.5],            # Commitment loss coefficient
     'lr': [1e-3, 5e-4],             # Learning rate: fast vs careful
     'dropout': [0.2]                # Dropout rate for regularization
 }
-# Total: 4 × 3 × 2 × 2 × 2 × 1 = 96 configurations
-# Parameter range: ~180K (K=32,D=16,n=2) to ~650K (K=256,D=32,n=3)
+# Total: 3 × 4 × 2 × 2 × 2 × 1 = 96 configurations
+# Parameter range: ~500K (K=128,D=40,n=2) to ~2.5M (K=512,D=80,n=3)
 # All 45 splits tested per configuration
 
 # =================================================================================================
@@ -32,8 +32,8 @@ HYPERPARAM_GRID = {
 # =================================================================================================
 
 TRAINING_CONFIG = {
-    'max_epochs': 15,               # Reduced from 20 (early stopping handles convergence)
-    'patience': 2,                  # Early stopping patience (reduced from 3)
+    'max_epochs': 25,               # Increased for larger models with more capacity
+    'patience': 3,                  # Early stopping patience
     'hours_per_accumulation': 100,  # NEW: Accumulate 100 hours before processing
     'mini_batch_size': 2048,        # NEW: Large batches for GPU (was 32)
     'grad_clip_norm': 1.0,          # Gradient clipping

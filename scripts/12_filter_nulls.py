@@ -103,20 +103,20 @@ def load_hour_batch(
 ) -> DataFrame:
     """
     Load one hour batch from collection with temporal filtering and ordering.
-    
+
     Args:
         spark: SparkSession instance
         db_name: Database name
         collection: Collection name
         start_hour: Start of hour window (inclusive)
         end_hour: End of hour window (exclusive)
-        
+
     Returns:
-        DataFrame with documents in the hour window, sorted by timestamp
+        DataFrame with documents in the hour window, sorted by timestamp (deduplicated)
     """
     start_str = start_hour.isoformat() + 'Z'
     end_str = end_hour.isoformat() + 'Z'
-    
+
     pipeline = [
         {"$match": {
             "timestamp": {
@@ -126,7 +126,7 @@ def load_hour_batch(
         }},
         {"$sort": {"timestamp": 1}}
     ]
-    
+
     df = (
         spark.read.format("mongodb")
         .option("database", db_name)
@@ -134,7 +134,7 @@ def load_hour_batch(
         .option("aggregation.pipeline", str(pipeline).replace("'", '"'))
         .load()
     )
-    
+
     return df
 
 
@@ -198,6 +198,7 @@ def filter_split_nulls_hourly(
     total_processed = 0
     total_filtered = 0
     total_removed = 0
+    total_duplicates = 0
     role_stats = {}
     
     first_batch = True
@@ -234,12 +235,21 @@ def filter_split_nulls_hourly(
                 exists(features, x -> x IS NULL OR isnan(x) OR x = double('inf') OR x = double('-inf'))
             """)
         )
-        clean_count = clean_df.count()
+
+        # Remove duplicate timestamps (final safeguard)
+        # This ensures each timestamp appears only once in the output
+        before_dedup = clean_df.count()
+        clean_df = clean_df.dropDuplicates(["timestamp"])
+        after_dedup = clean_df.count()
+        duplicates_removed = before_dedup - after_dedup
+
+        clean_count = after_dedup
         removed_in_hour = hour_count - clean_count
-        
+
         total_processed += hour_count
         total_filtered += clean_count
         total_removed += removed_in_hour
+        total_duplicates += duplicates_removed
         
         # Track role statistics
         if removed_in_hour > 0:
@@ -290,10 +300,11 @@ def filter_split_nulls_hourly(
         
         # Log progress every 10 hours or at the end
         if (hour_idx + 1) % 10 == 0 or (hour_idx + 1) == len(all_hours):
+            duplicate_msg = f', {duplicates_removed:,} duplicates' if duplicates_removed > 0 else ''
             logger(f'  Hour {hour_idx + 1}/{len(all_hours)} '
                    f'({start_hour.strftime("%Y-%m-%d %H:%M")}): '
                    f'{hour_count:,} docs → {clean_count:,} clean '
-                   f'({removed_in_hour:,} removed) in {hour_duration:.2f}s',
+                   f'({removed_in_hour:,} removed{duplicate_msg}) in {hour_duration:.2f}s',
                    "INFO")
     
     # Calculate statistics
@@ -304,6 +315,8 @@ def filter_split_nulls_hourly(
     logger(f'  Total processed: {total_processed:,} documents', "INFO")
     logger(f'  Clean documents: {total_filtered:,}', "INFO")
     logger(f'  Removed documents: {total_removed:,} ({removal_pct:.2f}%)', "INFO")
+    if total_duplicates > 0:
+        logger(f'  Duplicate timestamps removed: {total_duplicates:,}', "INFO")
     
     # Log role-specific statistics
     if role_stats:

@@ -6,12 +6,21 @@ Applies EWMA standardization using selected half-life parameters from Stage 10.
 This is Stage 11 in the pipeline - it follows half-life selection (Stage 10).
 
 Usage:
-    python scripts/11_apply_ewma_standardization.py
+    # Process all splits sequentially
+    python scripts/11_apply_feature_standardization.py
+
+    # Process specific splits (for parallel execution)
+    python scripts/11_apply_feature_standardization.py --splits 0,1,2,3
+
+    # Process 2 splits in parallel (recommended with 35% CPU, 70% RAM)
+    python scripts/11_apply_feature_standardization.py --splits 0,2,4,6,8,10,12,14 &
+    python scripts/11_apply_feature_standardization.py --splits 1,3,5,7,9,11,13,15 &
 """
 
 import os
 import sys
 import json
+import argparse
 from pathlib import Path
 
 # Setup paths
@@ -51,11 +60,33 @@ DRIVER_MEMORY = "4g"
 # Main Execution
 # =================================================================================================
 
+def parse_args():
+    """Parse command line arguments."""
+    parser = argparse.ArgumentParser(description='Apply EWMA standardization to split collections')
+    parser.add_argument(
+        '--splits',
+        type=str,
+        default=None,
+        help='Comma-separated list of split IDs to process (e.g., "0,1,2,3"). If not specified, processes all splits.'
+    )
+    return parser.parse_args()
+
+
 def main():
     """Main execution function."""
+    # Parse command line arguments
+    args = parse_args()
+
     logger('=' * 80, "INFO")
     logger('APPLY EWMA STANDARDIZATION', "INFO")
     logger('=' * 80, "INFO")
+
+    if args.splits:
+        requested_splits = [int(s.strip()) for s in args.splits.split(',')]
+        logger(f'Processing specific splits: {requested_splits}', "INFO")
+    else:
+        requested_splits = None
+        logger('Processing all available splits', "INFO")
     
     # Load half-life results from Stage 10
     if not HALFLIFE_RESULTS_PATH.exists():
@@ -127,6 +158,15 @@ def main():
             raise ValueError(f'No split collections found matching pattern: {INPUT_COLLECTION_PREFIX}X{INPUT_COLLECTION_SUFFIX}')
 
         logger(f'Found {len(split_ids)} split collections: {split_ids}', "INFO")
+
+        # Filter to requested splits if specified
+        if requested_splits is not None:
+            split_ids = [sid for sid in split_ids if sid in requested_splits]
+            if not split_ids:
+                raise ValueError(f'None of the requested splits {requested_splits} were found in database')
+            logger(f'Filtered to requested splits: {split_ids}', "INFO")
+        else:
+            logger(f'Processing all {len(split_ids)} splits', "INFO")
 
         # CRITICAL: Create timestamp indexes on all split collections for efficient hourly queries
         # Without these indexes, each hourly query performs a full collection scan O(N)

@@ -188,7 +188,7 @@ def main():
         logger('', "INFO")
         logger('Creating timestamp indexes on all split collections...', "INFO")
         from pymongo import MongoClient, ASCENDING
-        client = MongoClient(MONGO_URI)
+        client = MongoClient(MONGO_URI, serverSelectionTimeoutMS=5000)
         db = client[DB_NAME]
         all_collections = db.list_collection_names()
 

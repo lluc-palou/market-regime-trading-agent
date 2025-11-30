@@ -105,23 +105,51 @@ class SplitMaterializer:
                 continue
             
             # Materialize each split for this hour
+            hour_writes = 0
+            splits_with_data = []
             for split_id in self.split_ids:
                 split_df = self._extract_split(hour_batch, split_id)
                 split_count = split_df.count()
-                
+
+                # Log split 0 count to diagnose the issue
+                if split_id == 0:
+                    logger(f'    [Split 0 diagnostic] After filter & dedup: {split_count} docs', "INFO")
+
                 if split_count > 0:
                     collection_name = f"split_{split_id}_input"
                     self._write_to_collection(split_df, collection_name)
                     split_stats[split_id] += split_count
-            
+                    hour_writes += split_count
+                    splits_with_data.append(f"{split_id}({split_count})")
+
+            # Log which splits received data
+            if splits_with_data:
+                logger(f'  Splits written: {", ".join(splits_with_data[:5])}{"..." if len(splits_with_data) > 5 else ""}', "INFO")
+
             # Materialize test collection if configured
             if self.config.get('create_test_collection', False):
+                # For first 3 hours, show role distribution to understand test sample presence
+                if i < 3:
+                    split_0_key = str(self.split_ids[0])
+                    role_dist = hour_batch.groupBy(col("split_roles").getField(split_0_key)).count().collect()
+                    role_info = {row[f'split_roles.{split_0_key}']: row['count'] for row in role_dist}
+                    logger(f'  [Hour {i+1}] Split 0 role distribution: {role_info}', "INFO")
+
                 test_df = self._extract_test_samples(hour_batch)
                 test_batch_count = test_df.count()
-                
+
+                # Log test sample count for first few hours or when found
+                if i < 3 or test_batch_count > 0:
+                    logger(f'  Test samples in this hour: {test_batch_count}', "INFO")
+
                 if test_batch_count > 0:
                     self._write_to_collection(test_df, "test_data")
                     test_count += test_batch_count
+                    hour_writes += test_batch_count
+
+            # Log write summary for this hour
+            if hour_writes > 0:
+                logger(f'  → Wrote {hour_writes:,} documents across all splits', "INFO")
             
             # Clean up
             hour_batch.unpersist()
@@ -151,24 +179,60 @@ class SplitMaterializer:
     def _extract_split(self, df: DataFrame, split_id: int) -> DataFrame:
         """
         Extract documents for a specific split.
-        Every document is included with its role for this split.
-        
+        Includes only train, train_warmup, and validation samples.
+        Test samples are excluded - they only go to the test_data collection.
+
         Args:
             df: Input DataFrame with split_roles
             split_id: Split ID to extract
-            
+
         Returns:
-            DataFrame with all documents, with role field added
+            DataFrame with non-test documents, with role field added
         """
         # Extract role for this split from split_roles struct
         split_key = str(split_id)
-        
+
         # Add role column - every document gets its role for this split
         df_split = df.withColumn("role", col("split_roles").getField(split_key))
-        
+
+        # Debug: count before filtering (only log for first split to avoid spam)
+        if split_id == 0:
+            before_count = df_split.count()
+            role_counts = df_split.groupBy("role").count().collect()
+            role_dist = {row['role']: row['count'] for row in role_counts}
+            logger(f'    [Split 0 diagnostic] Before filter: {before_count} docs, roles: {role_dist}', "INFO")
+
+            # Check actual role values
+            sample_roles = df_split.select("role").limit(5).collect()
+            logger(f'    [Split 0 diagnostic] Sample role values: {[row.role for row in sample_roles]}', "INFO")
+
         # Keep existing fold_id and fold_type from input, drop split_roles
+        # IMPORTANT: Do this BEFORE filtering to avoid Spark evaluation issues
         df_split = df_split.drop("split_roles")
-        
+
+        # Filter out test samples - they should only be in test_data collection
+        # Use explicit filter to avoid lazy evaluation issues
+        from pyspark.sql.functions import when
+        df_split = df_split.filter(
+            (col("role") == "train") |
+            (col("role") == "train_warmup") |
+            (col("role") == "validation")
+        )
+
+        # Debug: count after filter for split 0
+        if split_id == 0:
+            after_filter = df_split.count()
+            logger(f'    [Split 0 diagnostic] After filter: {after_filter} docs', "INFO")
+
+        # Remove duplicates - same timestamp should not appear twice
+        # This ensures each split has unique timestamps only
+        df_split = df_split.dropDuplicates(["timestamp"])
+
+        # Debug: count after deduplication for split 0
+        if split_id == 0:
+            after_dedup = df_split.count()
+            logger(f'    [Split 0 diagnostic] After dedup: {after_dedup} docs', "INFO")
+
         return df_split
     
     def _extract_test_samples(self, df: DataFrame) -> DataFrame:
@@ -211,19 +275,22 @@ class SplitMaterializer:
     def _write_to_collection(self, df: DataFrame, collection_name: str):
         """
         Write DataFrame to MongoDB collection with ObjectId and timestamp preservation.
-        
+
         Args:
             df: DataFrame to write (must have timestamp_str column)
             collection_name: Target collection name
         """
+        doc_count = df.count()
+
         # Sort by timestamp for proper ordering
         df = df.orderBy("timestamp")
-        
+
         # Apply feature projection if configured
         if hasattr(self, 'projected_features') and hasattr(self, 'apply_projection_func'):
             df = self.apply_projection_func(df, self.projected_features)
-        
+
         # Write using ObjectId-preserving function
+        logger(f'    Writing {doc_count:,} docs to {collection_name}...', "INFO")
         write_to_mongodb_preserve_objectid(
             df=df,
             database=self.db_name,
@@ -231,6 +298,7 @@ class SplitMaterializer:
             mongo_uri=self.mongo_uri,
             mode="append"
         )
+        logger(f'    ✓ Written to {collection_name}', "INFO")
     
     def get_split_collections(self) -> list:
         """

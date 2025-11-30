@@ -110,13 +110,14 @@ class EWMAStandardizationApplicator:
                 end_hour
             )
             
-            hour_count = hour_df.count()
-            
-            if hour_count == 0:
-                continue
-            
             # Collect hour data (sorted by timestamp)
+            # Skip .count() to avoid extra DataFrame scan - we'll check after collect
             rows = hour_df.collect()
+
+            if not rows:
+                continue
+
+            hour_count = len(rows)
             
             # Process rows sequentially
             transformed_rows = []
@@ -140,47 +141,38 @@ class EWMAStandardizationApplicator:
                     transformed_rows.append(row_dict)
                     continue
                 
-                # Apply EWMA standardization
-                features_list = list(features)
-                
+                # Apply EWMA standardization - vectorized approach
+                features_array = np.array(features, dtype=np.float64)
+
                 # Update EWMA and standardize each feature
                 for feat_idx, feat_name in enumerate(feature_names):
                     # Skip if not in standardization list
                     if feat_name not in self.scalers:
                         continue
-                    
-                    if feat_idx >= len(features_list):
+
+                    if feat_idx >= len(features_array):
                         continue
-                    
-                    raw_value = features_list[feat_idx]
-                    
-                    if raw_value is None:
+
+                    raw_value = features_array[feat_idx]
+
+                    if not np.isfinite(raw_value):
                         continue
-                    
-                    try:
-                        value = float(raw_value)
-                        
-                        if not np.isfinite(value):
-                            continue
-                        
-                        scaler = self.scalers[feat_name]
-                        
-                        # Update EWMA state (sequential learning)
-                        # For training data, update the scaler
-                        if role in ('train', 'train_warmup'):
-                            scaler.update(value)
-                        
-                        # Standardize using current EWMA state
-                        standardized = scaler.standardize(value, clip_std=self.clip_std)
-                        
-                        if np.isfinite(standardized):
-                            features_list[feat_idx] = standardized
-                    
-                    except (TypeError, ValueError):
-                        continue
-                
-                # Convert to native Python floats
-                row_dict['features'] = [float(v) if v is not None else None for v in features_list]
+
+                    scaler = self.scalers[feat_name]
+
+                    # Update EWMA state (sequential learning)
+                    # For training data, update the scaler
+                    if role in ('train', 'train_warmup'):
+                        scaler.update(raw_value)
+
+                    # Standardize using current EWMA state
+                    standardized = scaler.standardize(raw_value, clip_std=self.clip_std)
+
+                    if np.isfinite(standardized):
+                        features_array[feat_idx] = standardized
+
+                # Convert to Python list (NumPy arrays can't go directly to Spark)
+                row_dict['features'] = features_array.tolist()
                 transformed_rows.append(row_dict)
             
             if not transformed_rows:

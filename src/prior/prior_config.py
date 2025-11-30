@@ -12,25 +12,25 @@ Hyperparameter grids and training configurations for latent prior learning.
 
 PRIOR_HYPERPARAM_GRID = {
     # Architecture parameters
-    'embedding_dim': [128, 256],         # Code embedding size
-    'n_layers': [10, 12],                # Causal CNN depth (receptive field)
-    'n_channels': [96, 128, 160],        # Causal CNN width (capacity)
+    'embedding_dim': [128, 192],         # Code embedding size
+    'n_layers': [6, 8, 10],              # Causal CNN depth (receptive field)
+    'n_channels': [64, 80],              # Causal CNN width (capacity)
     'kernel_size': [2],                  # Standard for causal convolutions
-    
+
     # Training parameters
     'learning_rate': [1e-3],             # Adam learning rate
     'dropout': [0.15],                   # Regularization
 }
-# Total: 2 × 2 × 3 = 12 configurations
-# Parameter range: ~100K to ~270K (comparable to VQ-VAE decoder)
+# Total: 2 × 3 × 2 = 12 configurations
+# Parameter range: optimized for computational efficiency
 
 # =================================================================================================
 # Training Configuration
 # =================================================================================================
 
 PRIOR_TRAINING_CONFIG = {
-    'max_epochs': 50,
-    'patience': 3,                       # Early stopping patience (aggressive)
+    'max_epochs': 75,
+    'patience': 5,                       # Early stopping patience
     'min_delta': 0.001,                  # Minimum improvement threshold
     'hours_per_accumulation': 100,      # Match VQ-VAE for GPU efficiency
     'sequence_batch_size': 32,           # Number of sequences per GPU batch

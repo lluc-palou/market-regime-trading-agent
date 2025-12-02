@@ -208,12 +208,18 @@ class VQVAETrainer:
         for hour_idx in range(0, len(all_hours), hours_per_acc):
             # Get hour group (e.g., 100 hours at once)
             hour_group = all_hours[hour_idx:min(hour_idx + hours_per_acc, len(all_hours))]
-            
+
+            logger(f'  Loading hours {hour_idx+1}-{hour_idx+len(hour_group)} of {len(all_hours)} (role=train)...', "INFO")
+
             # Accumulate all hours in this group
             accumulated_samples = []
-            for hour in hour_group:
+            for i, hour in enumerate(hour_group):
                 hour_end = hour + timedelta(hours=1)
-                
+
+                # Log progress every 10 hours
+                if i > 0 and i % 10 == 0:
+                    logger(f'    Loaded {i}/{len(hour_group)} hours...', "INFO")
+
                 # Load training batch for this hour
                 batch = load_hourly_batch(
                     self.spark,
@@ -223,7 +229,7 @@ class VQVAETrainer:
                     hour_end,
                     role='train'
                 )
-                
+
                 if batch is not None:
                     accumulated_samples.append(batch)
             

@@ -132,30 +132,24 @@ class SyntheticLOBGenerator:
     
     def _decode_sequence(self, z_seq: torch.Tensor) -> np.ndarray:
         """
-        Decode a sequence of latent codes to LOB vectors.
-        
+        Decode a sequence of latent codes to LOB vectors using batched decoding.
+
         Args:
             z_seq: (seq_len,) tensor of discrete codes
-            
+
         Returns:
             lob_sequence: (seq_len, B) array of LOB vectors
         """
-        seq_len = z_seq.size(0)
-        lob_vectors = []
-        
         with torch.no_grad():
-            for t in range(seq_len):
-                code_idx = z_seq[t].item()
-                
-                # Get code embedding from VQ-VAE codebook
-                code_embedding = self.vqvae.vq.embedding.weight[code_idx].unsqueeze(0)
-                
-                # Decode to LOB vector
-                lob_vector = self.vqvae.decoder(code_embedding)
-                
-                lob_vectors.append(lob_vector.cpu().numpy()[0])
-        
-        return np.array(lob_vectors)
+            # Batch decoding: get all code embeddings at once (seq_len, D)
+            code_embeddings = self.vqvae.vq.embedding(z_seq)
+
+            # Decode all timesteps in single batched forward pass (seq_len, B)
+            # Instead of 120 sequential GPU calls, this is 1 batched call (120× fewer kernel launches)
+            lob_vectors = self.vqvae.decoder(code_embeddings)
+
+            # Convert to numpy
+            return lob_vectors.cpu().numpy()
     
     def _save_sequence_to_db(
         self,

@@ -19,6 +19,7 @@ from typing import Dict, List, Optional
 from src.utils.logging import logger
 from .model import VQVAEModel
 from .data_loader import get_all_hours, load_hourly_batch
+from .data_loader_pymongo import get_all_hours_pymongo, load_multiple_hours_pymongo
 from .config import TRAINING_CONFIG
 
 
@@ -37,23 +38,29 @@ class VQVAETrainer:
         db_name: str,
         split_collection: str,
         device: torch.device,
-        config: Dict
+        config: Dict,
+        mongo_uri: str = None,
+        use_pymongo: bool = True
     ):
         """
         Initialize VQ-VAE trainer.
-        
+
         Args:
             spark: SparkSession instance
             db_name: Database name
             split_collection: Split collection name (e.g., 'split_0_input')
             device: torch device (cuda or cpu)
             config: Hyperparameter configuration
+            mongo_uri: MongoDB connection URI (required if use_pymongo=True)
+            use_pymongo: Use direct PyMongo for 10-50× faster data loading (default: True)
         """
         self.spark = spark
         self.db_name = db_name
         self.split_collection = split_collection
         self.device = device
         self.config = config
+        self.mongo_uri = mongo_uri
+        self.use_pymongo = use_pymongo
         
         # Initialize model
         self.model = VQVAEModel(config).to(device)
@@ -214,38 +221,54 @@ class VQVAETrainer:
 
             logger(f'  Loading hours {hour_idx+1}-{hour_idx+len(hour_group)} of {len(all_hours)} (role=train)...', "INFO")
 
-            # Accumulate all hours in this group
+            # Load data: PyMongo (fast) or Spark (slow)
             load_start = time.time()
-            accumulated_samples = []
-            for i, hour in enumerate(hour_group):
-                hour_end = hour + timedelta(hours=1)
 
-                # Log progress every 10 hours
-                if i > 0 and i % 10 == 0:
-                    logger(f'    Loaded {i}/{len(hour_group)} hours...', "INFO")
-
-                # Load training batch for this hour
-                batch = load_hourly_batch(
-                    self.spark,
+            if self.use_pymongo and self.mongo_uri:
+                # FAST PATH: Single PyMongo query for all hours in group
+                large_batch = load_multiple_hours_pymongo(
+                    self.mongo_uri,
                     self.db_name,
                     self.split_collection,
-                    hour,
-                    hour_end,
+                    hour_group,
                     role='train'
                 )
+            else:
+                # SLOW PATH: Individual Spark queries per hour
+                accumulated_samples = []
+                for i, hour in enumerate(hour_group):
+                    hour_end = hour + timedelta(hours=1)
 
-                if batch is not None:
-                    accumulated_samples.append(batch)
+                    # Log progress every 10 hours
+                    if i > 0 and i % 10 == 0:
+                        logger(f'    Loaded {i}/{len(hour_group)} hours...', "INFO")
+
+                    # Load training batch for this hour
+                    batch = load_hourly_batch(
+                        self.spark,
+                        self.db_name,
+                        self.split_collection,
+                        hour,
+                        hour_end,
+                        role='train'
+                    )
+
+                    if batch is not None:
+                        accumulated_samples.append(batch)
+
+                # Combine all hours
+                if accumulated_samples:
+                    large_batch = torch.cat(accumulated_samples, dim=0)
+                else:
+                    large_batch = None
 
             load_time = time.time() - load_start
             total_load_time += load_time
 
-            if not accumulated_samples:
+            if large_batch is None:
                 continue
 
-            # Combine all hours: e.g., 100 hours × 120 samples = 12,000 samples
-            large_batch = torch.cat(accumulated_samples, dim=0)
-            logger(f'    Loaded {len(accumulated_samples)} hours with {large_batch.size(0):,} samples in {load_time:.1f}s', "INFO")
+            logger(f'    Loaded {len(hour_group)} hours with {large_batch.size(0):,} samples in {load_time:.1f}s', "INFO")
 
             # Process in mini-batches for GPU efficiency
             gpu_start = time.time()
@@ -300,19 +323,19 @@ class VQVAETrainer:
     def _validate_epoch(self, all_hours: List[datetime], epoch: int) -> Dict:
         """
         Validate for one epoch with hour accumulation.
-        
+
         Args:
             all_hours: List of hourly time windows
             epoch: Current epoch number
-            
+
         Returns:
             Dictionary with aggregated validation losses
         """
         self.model.eval()
-        
+
         hours_per_acc = TRAINING_CONFIG['hours_per_accumulation']
         mini_batch_size = TRAINING_CONFIG['mini_batch_size']
-        
+
         epoch_metrics = {
             'total_loss': 0.0,
             'recon_loss': 0.0,
@@ -323,35 +346,49 @@ class VQVAETrainer:
             'perplexity': 0.0,
             'num_batches': 0
         }
-        
+
         with torch.no_grad():
             # Process hours in groups
             for hour_idx in range(0, len(all_hours), hours_per_acc):
                 hour_group = all_hours[hour_idx:min(hour_idx + hours_per_acc, len(all_hours))]
-                
-                # Accumulate validation samples
-                accumulated_samples = []
-                for hour in hour_group:
-                    hour_end = hour + timedelta(hours=1)
-                    
-                    # Load validation batch
-                    batch = load_hourly_batch(
-                        self.spark,
+
+                # Load data: PyMongo (fast) or Spark (slow)
+                if self.use_pymongo and self.mongo_uri:
+                    # FAST PATH: Single PyMongo query for all hours in group
+                    large_batch = load_multiple_hours_pymongo(
+                        self.mongo_uri,
                         self.db_name,
                         self.split_collection,
-                        hour,
-                        hour_end,
+                        hour_group,
                         role='validation'
                     )
-                    
-                    if batch is not None:
-                        accumulated_samples.append(batch)
-                
-                if not accumulated_samples:
+                else:
+                    # SLOW PATH: Individual Spark queries per hour
+                    accumulated_samples = []
+                    for hour in hour_group:
+                        hour_end = hour + timedelta(hours=1)
+
+                        # Load validation batch
+                        batch = load_hourly_batch(
+                            self.spark,
+                            self.db_name,
+                            self.split_collection,
+                            hour,
+                            hour_end,
+                            role='validation'
+                        )
+
+                        if batch is not None:
+                            accumulated_samples.append(batch)
+
+                    # Combine all hours
+                    if accumulated_samples:
+                        large_batch = torch.cat(accumulated_samples, dim=0)
+                    else:
+                        large_batch = None
+
+                if large_batch is None:
                     continue
-                
-                # Combine all hours
-                large_batch = torch.cat(accumulated_samples, dim=0)
                 
                 # Process in mini-batches
                 num_samples = large_batch.size(0)
@@ -423,30 +460,45 @@ class VQVAETrainer:
             # Process hours in groups
             for hour_idx in range(0, len(all_hours), hours_per_acc):
                 hour_group = all_hours[hour_idx:min(hour_idx + hours_per_acc, len(all_hours))]
-                
-                # Accumulate validation samples
-                accumulated_samples = []
-                for hour in hour_group:
-                    hour_end = hour + timedelta(hours=1)
-                    
-                    # Load validation batch
-                    batch = load_hourly_batch(
-                        self.spark,
+
+                # Load data: PyMongo (fast) or Spark (slow)
+                if self.use_pymongo and self.mongo_uri:
+                    # FAST PATH: Single PyMongo query for all hours in group
+                    large_batch = load_multiple_hours_pymongo(
+                        self.mongo_uri,
                         self.db_name,
                         self.split_collection,
-                        hour,
-                        hour_end,
+                        hour_group,
                         role='validation'
                     )
-                    
-                    if batch is not None:
-                        accumulated_samples.append(batch)
-                
-                if not accumulated_samples:
+                else:
+                    # SLOW PATH: Individual Spark queries per hour
+                    accumulated_samples = []
+                    for hour in hour_group:
+                        hour_end = hour + timedelta(hours=1)
+
+                        # Load validation batch
+                        batch = load_hourly_batch(
+                            self.spark,
+                            self.db_name,
+                            self.split_collection,
+                            hour,
+                            hour_end,
+                            role='validation'
+                        )
+
+                        if batch is not None:
+                            accumulated_samples.append(batch)
+
+                    # Combine all hours
+                    if accumulated_samples:
+                        large_batch = torch.cat(accumulated_samples, dim=0)
+                    else:
+                        large_batch = None
+
+                if large_batch is None:
                     continue
-                
-                # Combine all hours
-                large_batch = torch.cat(accumulated_samples, dim=0)
+
                 final_metrics['num_samples'] += large_batch.size(0)
                 
                 # Process in mini-batches

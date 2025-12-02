@@ -53,7 +53,9 @@ def run_hyperparameter_search(
     collection_suffix: str,
     device,
     mlflow_experiment_name: str,
-    artifact_base_dir: Path
+    artifact_base_dir: Path,
+    mongo_uri: str = "mongodb://127.0.0.1:27017/",
+    use_pymongo: bool = True
 ) -> Dict:
     """
     Run complete hyperparameter search.
@@ -170,7 +172,9 @@ def run_hyperparameter_search(
                         db_name=db_name,
                         split_collection=split_collection,
                         device=device,
-                        config=config
+                        config=config,
+                        mongo_uri=mongo_uri,
+                        use_pymongo=use_pymongo
                     )
                     
                     result = trainer.train_split(all_hours)

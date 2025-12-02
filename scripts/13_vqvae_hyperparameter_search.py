@@ -184,7 +184,9 @@ def main():
             collection_suffix=COLLECTION_SUFFIX,
             device=device,
             mlflow_experiment_name=MLFLOW_EXPERIMENT_NAME,
-            artifact_base_dir=ARTIFACT_BASE_DIR
+            artifact_base_dir=ARTIFACT_BASE_DIR,
+            mongo_uri=MONGO_URI,
+            use_pymongo=True  # Use fast PyMongo loader (10-50× speedup)
         )
         
         # Summary

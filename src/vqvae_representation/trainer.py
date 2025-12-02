@@ -274,8 +274,6 @@ class VQVAETrainer:
                 if large_batch is None:
                     continue
 
-                logger(f'  Processing hours {hour_idx+1}-{hour_idx+len(hour_group)} ({large_batch.size(0):,} samples, {load_time:.1f}s wait)', "INFO")
-
                 # Process on GPU while next batch loads in background
                 gpu_start = time.time()
                 num_samples = large_batch.size(0)
@@ -313,16 +311,12 @@ class VQVAETrainer:
 
                 gpu_time = time.time() - gpu_start
                 total_gpu_time += gpu_time
-                logger(f'    GPU: {gpu_time:.1f}s ({large_batch.size(0) / gpu_time:.0f} samples/sec)', "INFO")
 
         # Average metrics
         if epoch_metrics['num_batches'] > 0:
             for key in epoch_metrics:
                 if key != 'num_batches':
                     epoch_metrics[key] /= epoch_metrics['num_batches']
-
-        # Log timing breakdown
-        logger(f'  Epoch timing: {total_load_time:.1f}s loading + {total_gpu_time:.1f}s GPU = {total_load_time + total_gpu_time:.1f}s total', "INFO")
 
         return epoch_metrics
     
@@ -410,28 +404,28 @@ class VQVAETrainer:
 
                     # Process in mini-batches
                     num_samples = large_batch.size(0)
-                
-                for i in range(0, num_samples, mini_batch_size):
-                    mini_batch = large_batch[i:i+mini_batch_size].to(self.device)
-                    
-                    # Forward pass
-                    x_recon, loss_dict = self.model(mini_batch)
-                    
-                    # Compute total loss
-                    total_loss, loss_components = self._compute_total_loss(
-                        loss_dict,
-                        self.config['beta']
-                    )
-                    
-                    # Accumulate metrics
-                    epoch_metrics['total_loss'] += total_loss.item()
-                    epoch_metrics['recon_loss'] += loss_components['recon_loss']
-                    epoch_metrics['commitment_loss'] += loss_components['commitment_loss']
-                    epoch_metrics['codebook_loss'] += loss_components['codebook_loss']
-                    epoch_metrics['usage_penalty'] += loss_components['usage_penalty']
-                    epoch_metrics['codebook_usage'] += loss_dict['codebook_usage']
-                    epoch_metrics['perplexity'] += loss_dict['perplexity']
-                    epoch_metrics['num_batches'] += 1
+
+                    for j in range(0, num_samples, mini_batch_size):
+                        mini_batch = large_batch[j:j+mini_batch_size].to(self.device)
+
+                        # Forward pass
+                        x_recon, loss_dict = self.model(mini_batch)
+
+                        # Compute total loss
+                        total_loss, loss_components = self._compute_total_loss(
+                            loss_dict,
+                            self.config['beta']
+                        )
+
+                        # Accumulate metrics
+                        epoch_metrics['total_loss'] += total_loss.item()
+                        epoch_metrics['recon_loss'] += loss_components['recon_loss']
+                        epoch_metrics['commitment_loss'] += loss_components['commitment_loss']
+                        epoch_metrics['codebook_loss'] += loss_components['codebook_loss']
+                        epoch_metrics['usage_penalty'] += loss_components['usage_penalty']
+                        epoch_metrics['codebook_usage'] += loss_dict['codebook_usage']
+                        epoch_metrics['perplexity'] += loss_dict['perplexity']
+                        epoch_metrics['num_batches'] += 1
         
         # Average metrics
         if epoch_metrics['num_batches'] > 0:
@@ -530,29 +524,29 @@ class VQVAETrainer:
                         continue
 
                     final_metrics['num_samples'] += large_batch.size(0)
-                
-                # Process in mini-batches
-                for i in range(0, large_batch.size(0), mini_batch_size):
-                    mini_batch = large_batch[i:i+mini_batch_size].to(self.device)
-                    
-                    # Forward pass
-                    x_recon, loss_dict = self.model(mini_batch)
-                    
-                    # Compute total loss
-                    total_loss, loss_components = self._compute_total_loss(
-                        loss_dict,
-                        self.config['beta']
-                    )
-                    
-                    # Accumulate metrics
-                    final_metrics['total_loss'] += total_loss.item()
-                    final_metrics['recon_loss'] += loss_components['recon_loss']
-                    final_metrics['commitment_loss'] += loss_components['commitment_loss']
-                    final_metrics['codebook_loss'] += loss_components['codebook_loss']
-                    final_metrics['usage_penalty'] += loss_components['usage_penalty']
-                    final_metrics['codebook_usage'] += loss_dict['codebook_usage']
-                    final_metrics['perplexity'] += loss_dict['perplexity']
-                    final_metrics['num_batches'] += 1
+
+                    # Process in mini-batches
+                    for j in range(0, large_batch.size(0), mini_batch_size):
+                        mini_batch = large_batch[j:j+mini_batch_size].to(self.device)
+
+                        # Forward pass
+                        x_recon, loss_dict = self.model(mini_batch)
+
+                        # Compute total loss
+                        total_loss, loss_components = self._compute_total_loss(
+                            loss_dict,
+                            self.config['beta']
+                        )
+
+                        # Accumulate metrics
+                        final_metrics['total_loss'] += total_loss.item()
+                        final_metrics['recon_loss'] += loss_components['recon_loss']
+                        final_metrics['commitment_loss'] += loss_components['commitment_loss']
+                        final_metrics['codebook_loss'] += loss_components['codebook_loss']
+                        final_metrics['usage_penalty'] += loss_components['usage_penalty']
+                        final_metrics['codebook_usage'] += loss_dict['codebook_usage']
+                        final_metrics['perplexity'] += loss_dict['perplexity']
+                        final_metrics['num_batches'] += 1
         
         # Average metrics
         if final_metrics['num_batches'] > 0:

@@ -171,7 +171,8 @@ class VQVAETrainer:
             if val_losses['total_loss'] < self.best_val_loss:
                 self.best_val_loss = val_losses['total_loss']
                 self.best_epoch = epoch
-                self.best_model_state = self.model.state_dict().copy()
+                # Deep copy model state (clone tensors, not just dict structure)
+                self.best_model_state = {k: v.clone() for k, v in self.model.state_dict().items()}
                 logger(f'  → New best validation loss: {self.best_val_loss:.4f}', "INFO")
             
             # Early stopping check

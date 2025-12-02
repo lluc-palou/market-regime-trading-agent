@@ -187,6 +187,7 @@ def main():
             artifact_base_dir=ARTIFACT_BASE_DIR,
             mongo_uri=MONGO_URI,
             use_pymongo=True  # Use fast PyMongo loader (10-50× speedup)
+            # All 28 splits used - grid reduced to 32 configs for $50 budget
         )
         
         # Summary

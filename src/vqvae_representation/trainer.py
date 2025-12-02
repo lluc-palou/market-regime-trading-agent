@@ -15,6 +15,8 @@ import torch.nn as nn
 import torch.optim as optim
 from datetime import datetime, timedelta
 from typing import Dict, List, Optional
+from concurrent.futures import ThreadPoolExecutor
+import queue
 
 from src.utils.logging import logger
 from .model import VQVAEModel
@@ -211,22 +213,14 @@ class VQVAETrainer:
             'num_batches': 0
         }
         
-        # Process hours in groups for better GPU utilization
+        # Process hours in groups with prefetching for GPU efficiency
         total_load_time = 0.0
         total_gpu_time = 0.0
 
-        for hour_idx in range(0, len(all_hours), hours_per_acc):
-            # Get hour group (e.g., 100 hours at once)
-            hour_group = all_hours[hour_idx:min(hour_idx + hours_per_acc, len(all_hours))]
-
-            logger(f'  Loading hours {hour_idx+1}-{hour_idx+len(hour_group)} of {len(all_hours)} (role=train)...', "INFO")
-
-            # Load data: PyMongo (fast) or Spark (slow)
-            load_start = time.time()
-
+        # Helper function to load a batch (for background thread)
+        def load_batch_func(hour_group):
             if self.use_pymongo and self.mongo_uri:
-                # FAST PATH: Single PyMongo query for all hours in group
-                large_batch = load_multiple_hours_pymongo(
+                return load_multiple_hours_pymongo(
                     self.mongo_uri,
                     self.db_name,
                     self.split_collection,
@@ -234,16 +228,9 @@ class VQVAETrainer:
                     role='train'
                 )
             else:
-                # SLOW PATH: Individual Spark queries per hour
                 accumulated_samples = []
-                for i, hour in enumerate(hour_group):
+                for hour in hour_group:
                     hour_end = hour + timedelta(hours=1)
-
-                    # Log progress every 10 hours
-                    if i > 0 and i % 10 == 0:
-                        logger(f'    Loaded {i}/{len(hour_group)} hours...', "INFO")
-
-                    # Load training batch for this hour
                     batch = load_hourly_batch(
                         self.spark,
                         self.db_name,
@@ -252,62 +239,81 @@ class VQVAETrainer:
                         hour_end,
                         role='train'
                     )
-
                     if batch is not None:
                         accumulated_samples.append(batch)
 
-                # Combine all hours
                 if accumulated_samples:
-                    large_batch = torch.cat(accumulated_samples, dim=0)
+                    return torch.cat(accumulated_samples, dim=0)
+                return None
+
+        # Create hour groups
+        hour_groups = []
+        for hour_idx in range(0, len(all_hours), hours_per_acc):
+            hour_group = all_hours[hour_idx:min(hour_idx + hours_per_acc, len(all_hours))]
+            hour_groups.append((hour_idx, hour_group))
+
+        # Process with prefetching: load batch N+1 while processing batch N on GPU
+        with ThreadPoolExecutor(max_workers=1) as executor:
+            # Start loading first batch
+            if hour_groups:
+                future = executor.submit(load_batch_func, hour_groups[0][1])
+
+            for i, (hour_idx, hour_group) in enumerate(hour_groups):
+                # Wait for current batch to finish loading
+                load_start = time.time()
+                large_batch = future.result() if future else None
+                load_time = time.time() - load_start
+                total_load_time += load_time
+
+                # Start loading NEXT batch in background (while GPU processes current)
+                if i + 1 < len(hour_groups):
+                    future = executor.submit(load_batch_func, hour_groups[i + 1][1])
                 else:
-                    large_batch = None
+                    future = None
 
-            load_time = time.time() - load_start
-            total_load_time += load_time
+                if large_batch is None:
+                    continue
 
-            if large_batch is None:
-                continue
+                logger(f'  Processing hours {hour_idx+1}-{hour_idx+len(hour_group)} ({large_batch.size(0):,} samples, {load_time:.1f}s wait)', "INFO")
 
-            logger(f'    Loaded {len(hour_group)} hours with {large_batch.size(0):,} samples in {load_time:.1f}s', "INFO")
+                # Process on GPU while next batch loads in background
+                gpu_start = time.time()
+                num_samples = large_batch.size(0)
 
-            # Process in mini-batches for GPU efficiency
-            gpu_start = time.time()
-            num_samples = large_batch.size(0)
+                for j in range(0, num_samples, mini_batch_size):
+                    mini_batch = large_batch[j:j+mini_batch_size].to(self.device)
 
-            for i in range(0, num_samples, mini_batch_size):
-                mini_batch = large_batch[i:i+mini_batch_size].to(self.device)
+                    # Forward pass
+                    self.optimizer.zero_grad()
+                    x_recon, loss_dict = self.model(mini_batch)
 
-                # Forward pass
-                self.optimizer.zero_grad()
-                x_recon, loss_dict = self.model(mini_batch)
+                    # Compute total loss with regularization
+                    total_loss, loss_components = self._compute_total_loss(
+                        loss_dict,
+                        self.config['beta']
+                    )
 
-                # Compute total loss with regularization
-                total_loss, loss_components = self._compute_total_loss(
-                    loss_dict,
-                    self.config['beta']
-                )
+                    # Backward pass with gradient clipping
+                    total_loss.backward()
+                    torch.nn.utils.clip_grad_norm_(
+                        self.model.parameters(),
+                        TRAINING_CONFIG['grad_clip_norm']
+                    )
+                    self.optimizer.step()
 
-                # Backward pass with gradient clipping
-                total_loss.backward()
-                torch.nn.utils.clip_grad_norm_(
-                    self.model.parameters(),
-                    TRAINING_CONFIG['grad_clip_norm']
-                )
-                self.optimizer.step()
+                    # Accumulate metrics
+                    epoch_metrics['total_loss'] += total_loss.item()
+                    epoch_metrics['recon_loss'] += loss_components['recon_loss']
+                    epoch_metrics['commitment_loss'] += loss_components['commitment_loss']
+                    epoch_metrics['codebook_loss'] += loss_components['codebook_loss']
+                    epoch_metrics['usage_penalty'] += loss_components['usage_penalty']
+                    epoch_metrics['codebook_usage'] += loss_dict['codebook_usage']
+                    epoch_metrics['perplexity'] += loss_dict['perplexity']
+                    epoch_metrics['num_batches'] += 1
 
-                # Accumulate metrics
-                epoch_metrics['total_loss'] += total_loss.item()
-                epoch_metrics['recon_loss'] += loss_components['recon_loss']
-                epoch_metrics['commitment_loss'] += loss_components['commitment_loss']
-                epoch_metrics['codebook_loss'] += loss_components['codebook_loss']
-                epoch_metrics['usage_penalty'] += loss_components['usage_penalty']
-                epoch_metrics['codebook_usage'] += loss_dict['codebook_usage']
-                epoch_metrics['perplexity'] += loss_dict['perplexity']
-                epoch_metrics['num_batches'] += 1
-
-            gpu_time = time.time() - gpu_start
-            total_gpu_time += gpu_time
-            logger(f'    GPU processing: {gpu_time:.1f}s ({large_batch.size(0) / gpu_time:.0f} samples/sec)', "INFO")
+                gpu_time = time.time() - gpu_start
+                total_gpu_time += gpu_time
+                logger(f'    GPU: {gpu_time:.1f}s ({large_batch.size(0) / gpu_time:.0f} samples/sec)', "INFO")
 
         # Average metrics
         if epoch_metrics['num_batches'] > 0:
@@ -347,51 +353,63 @@ class VQVAETrainer:
             'num_batches': 0
         }
 
-        with torch.no_grad():
-            # Process hours in groups
-            for hour_idx in range(0, len(all_hours), hours_per_acc):
-                hour_group = all_hours[hour_idx:min(hour_idx + hours_per_acc, len(all_hours))]
-
-                # Load data: PyMongo (fast) or Spark (slow)
-                if self.use_pymongo and self.mongo_uri:
-                    # FAST PATH: Single PyMongo query for all hours in group
-                    large_batch = load_multiple_hours_pymongo(
-                        self.mongo_uri,
+        # Helper function for loading validation batches
+        def load_val_batch_func(hour_group):
+            if self.use_pymongo and self.mongo_uri:
+                return load_multiple_hours_pymongo(
+                    self.mongo_uri,
+                    self.db_name,
+                    self.split_collection,
+                    hour_group,
+                    role='validation'
+                )
+            else:
+                accumulated_samples = []
+                for hour in hour_group:
+                    hour_end = hour + timedelta(hours=1)
+                    batch = load_hourly_batch(
+                        self.spark,
                         self.db_name,
                         self.split_collection,
-                        hour_group,
+                        hour,
+                        hour_end,
                         role='validation'
                     )
-                else:
-                    # SLOW PATH: Individual Spark queries per hour
-                    accumulated_samples = []
-                    for hour in hour_group:
-                        hour_end = hour + timedelta(hours=1)
+                    if batch is not None:
+                        accumulated_samples.append(batch)
 
-                        # Load validation batch
-                        batch = load_hourly_batch(
-                            self.spark,
-                            self.db_name,
-                            self.split_collection,
-                            hour,
-                            hour_end,
-                            role='validation'
-                        )
+                if accumulated_samples:
+                    return torch.cat(accumulated_samples, dim=0)
+                return None
 
-                        if batch is not None:
-                            accumulated_samples.append(batch)
+        # Create hour groups
+        hour_groups = []
+        for hour_idx in range(0, len(all_hours), hours_per_acc):
+            hour_group = all_hours[hour_idx:min(hour_idx + hours_per_acc, len(all_hours))]
+            hour_groups.append(hour_group)
 
-                    # Combine all hours
-                    if accumulated_samples:
-                        large_batch = torch.cat(accumulated_samples, dim=0)
+        with torch.no_grad():
+            # Process with prefetching
+            with ThreadPoolExecutor(max_workers=1) as executor:
+                # Start loading first batch
+                if hour_groups:
+                    future = executor.submit(load_val_batch_func, hour_groups[0])
+
+                for i, hour_group in enumerate(hour_groups):
+                    # Wait for current batch
+                    large_batch = future.result() if future else None
+
+                    # Start loading next batch
+                    if i + 1 < len(hour_groups):
+                        future = executor.submit(load_val_batch_func, hour_groups[i + 1])
                     else:
-                        large_batch = None
+                        future = None
 
-                if large_batch is None:
-                    continue
-                
-                # Process in mini-batches
-                num_samples = large_batch.size(0)
+                    if large_batch is None:
+                        continue
+
+                    # Process in mini-batches
+                    num_samples = large_batch.size(0)
                 
                 for i in range(0, num_samples, mini_batch_size):
                     mini_batch = large_batch[i:i+mini_batch_size].to(self.device)
@@ -456,50 +474,62 @@ class VQVAETrainer:
             'num_samples': 0
         }
         
-        with torch.no_grad():
-            # Process hours in groups
-            for hour_idx in range(0, len(all_hours), hours_per_acc):
-                hour_group = all_hours[hour_idx:min(hour_idx + hours_per_acc, len(all_hours))]
-
-                # Load data: PyMongo (fast) or Spark (slow)
-                if self.use_pymongo and self.mongo_uri:
-                    # FAST PATH: Single PyMongo query for all hours in group
-                    large_batch = load_multiple_hours_pymongo(
-                        self.mongo_uri,
+        # Helper function for loading validation batches
+        def load_val_batch_func(hour_group):
+            if self.use_pymongo and self.mongo_uri:
+                return load_multiple_hours_pymongo(
+                    self.mongo_uri,
+                    self.db_name,
+                    self.split_collection,
+                    hour_group,
+                    role='validation'
+                )
+            else:
+                accumulated_samples = []
+                for hour in hour_group:
+                    hour_end = hour + timedelta(hours=1)
+                    batch = load_hourly_batch(
+                        self.spark,
                         self.db_name,
                         self.split_collection,
-                        hour_group,
+                        hour,
+                        hour_end,
                         role='validation'
                     )
-                else:
-                    # SLOW PATH: Individual Spark queries per hour
-                    accumulated_samples = []
-                    for hour in hour_group:
-                        hour_end = hour + timedelta(hours=1)
+                    if batch is not None:
+                        accumulated_samples.append(batch)
 
-                        # Load validation batch
-                        batch = load_hourly_batch(
-                            self.spark,
-                            self.db_name,
-                            self.split_collection,
-                            hour,
-                            hour_end,
-                            role='validation'
-                        )
+                if accumulated_samples:
+                    return torch.cat(accumulated_samples, dim=0)
+                return None
 
-                        if batch is not None:
-                            accumulated_samples.append(batch)
+        # Create hour groups
+        hour_groups = []
+        for hour_idx in range(0, len(all_hours), hours_per_acc):
+            hour_group = all_hours[hour_idx:min(hour_idx + hours_per_acc, len(all_hours))]
+            hour_groups.append(hour_group)
 
-                    # Combine all hours
-                    if accumulated_samples:
-                        large_batch = torch.cat(accumulated_samples, dim=0)
+        with torch.no_grad():
+            # Process with prefetching
+            with ThreadPoolExecutor(max_workers=1) as executor:
+                # Start loading first batch
+                if hour_groups:
+                    future = executor.submit(load_val_batch_func, hour_groups[0])
+
+                for i, hour_group in enumerate(hour_groups):
+                    # Wait for current batch
+                    large_batch = future.result() if future else None
+
+                    # Start loading next batch
+                    if i + 1 < len(hour_groups):
+                        future = executor.submit(load_val_batch_func, hour_groups[i + 1])
                     else:
-                        large_batch = None
+                        future = None
 
-                if large_batch is None:
-                    continue
+                    if large_batch is None:
+                        continue
 
-                final_metrics['num_samples'] += large_batch.size(0)
+                    final_metrics['num_samples'] += large_batch.size(0)
                 
                 # Process in mini-batches
                 for i in range(0, large_batch.size(0), mini_batch_size):

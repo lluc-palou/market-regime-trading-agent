@@ -15,10 +15,13 @@ import torch.nn as nn
 import torch.optim as optim
 from datetime import datetime, timedelta
 from typing import Dict, List, Optional
+from concurrent.futures import ThreadPoolExecutor
+import queue
 
 from src.utils.logging import logger
 from .model import VQVAEModel
 from .data_loader import get_all_hours, load_hourly_batch
+from .data_loader_pymongo import get_all_hours_pymongo, load_multiple_hours_pymongo
 from .config import TRAINING_CONFIG
 
 
@@ -37,23 +40,29 @@ class VQVAETrainer:
         db_name: str,
         split_collection: str,
         device: torch.device,
-        config: Dict
+        config: Dict,
+        mongo_uri: str = None,
+        use_pymongo: bool = True
     ):
         """
         Initialize VQ-VAE trainer.
-        
+
         Args:
             spark: SparkSession instance
             db_name: Database name
             split_collection: Split collection name (e.g., 'split_0_input')
             device: torch device (cuda or cpu)
             config: Hyperparameter configuration
+            mongo_uri: MongoDB connection URI (required if use_pymongo=True)
+            use_pymongo: Use direct PyMongo for 10-50× faster data loading (default: True)
         """
         self.spark = spark
         self.db_name = db_name
         self.split_collection = split_collection
         self.device = device
         self.config = config
+        self.mongo_uri = mongo_uri
+        self.use_pymongo = use_pymongo
         
         # Initialize model
         self.model = VQVAEModel(config).to(device)
@@ -162,7 +171,8 @@ class VQVAETrainer:
             if val_losses['total_loss'] < self.best_val_loss:
                 self.best_val_loss = val_losses['total_loss']
                 self.best_epoch = epoch
-                self.best_model_state = self.model.state_dict().copy()
+                # Deep copy model state (clone tensors, not just dict structure)
+                self.best_model_state = {k: v.clone() for k, v in self.model.state_dict().items()}
                 logger(f'  → New best validation loss: {self.best_val_loss:.4f}', "INFO")
             
             # Early stopping check
@@ -204,93 +214,129 @@ class VQVAETrainer:
             'num_batches': 0
         }
         
-        # Process hours in groups for better GPU utilization
-        for hour_idx in range(0, len(all_hours), hours_per_acc):
-            # Get hour group (e.g., 100 hours at once)
-            hour_group = all_hours[hour_idx:min(hour_idx + hours_per_acc, len(all_hours))]
-            
-            # Accumulate all hours in this group
-            accumulated_samples = []
-            for hour in hour_group:
-                hour_end = hour + timedelta(hours=1)
-                
-                # Load training batch for this hour
-                batch = load_hourly_batch(
-                    self.spark,
+        # Process hours in groups with prefetching for GPU efficiency
+        total_load_time = 0.0
+        total_gpu_time = 0.0
+
+        # Helper function to load a batch (for background thread)
+        def load_batch_func(hour_group):
+            if self.use_pymongo and self.mongo_uri:
+                return load_multiple_hours_pymongo(
+                    self.mongo_uri,
                     self.db_name,
                     self.split_collection,
-                    hour,
-                    hour_end,
+                    hour_group,
                     role='train'
                 )
-                
-                if batch is not None:
-                    accumulated_samples.append(batch)
-            
-            if not accumulated_samples:
-                continue
-            
-            # Combine all hours: e.g., 100 hours × 120 samples = 12,000 samples
-            large_batch = torch.cat(accumulated_samples, dim=0)
-            
-            # Process in mini-batches for GPU efficiency
-            num_samples = large_batch.size(0)
-            
-            for i in range(0, num_samples, mini_batch_size):
-                mini_batch = large_batch[i:i+mini_batch_size].to(self.device)
-                
-                # Forward pass
-                self.optimizer.zero_grad()
-                x_recon, loss_dict = self.model(mini_batch)
-                
-                # Compute total loss with regularization
-                total_loss, loss_components = self._compute_total_loss(
-                    loss_dict,
-                    self.config['beta']
-                )
-                
-                # Backward pass with gradient clipping
-                total_loss.backward()
-                torch.nn.utils.clip_grad_norm_(
-                    self.model.parameters(),
-                    TRAINING_CONFIG['grad_clip_norm']
-                )
-                self.optimizer.step()
-                
-                # Accumulate metrics
-                epoch_metrics['total_loss'] += total_loss.item()
-                epoch_metrics['recon_loss'] += loss_components['recon_loss']
-                epoch_metrics['commitment_loss'] += loss_components['commitment_loss']
-                epoch_metrics['codebook_loss'] += loss_components['codebook_loss']
-                epoch_metrics['usage_penalty'] += loss_components['usage_penalty']
-                epoch_metrics['codebook_usage'] += loss_dict['codebook_usage']
-                epoch_metrics['perplexity'] += loss_dict['perplexity']
-                epoch_metrics['num_batches'] += 1
-        
+            else:
+                accumulated_samples = []
+                for hour in hour_group:
+                    hour_end = hour + timedelta(hours=1)
+                    batch = load_hourly_batch(
+                        self.spark,
+                        self.db_name,
+                        self.split_collection,
+                        hour,
+                        hour_end,
+                        role='train'
+                    )
+                    if batch is not None:
+                        accumulated_samples.append(batch)
+
+                if accumulated_samples:
+                    return torch.cat(accumulated_samples, dim=0)
+                return None
+
+        # Create hour groups
+        hour_groups = []
+        for hour_idx in range(0, len(all_hours), hours_per_acc):
+            hour_group = all_hours[hour_idx:min(hour_idx + hours_per_acc, len(all_hours))]
+            hour_groups.append((hour_idx, hour_group))
+
+        # Process with prefetching: load batch N+1 while processing batch N on GPU
+        with ThreadPoolExecutor(max_workers=1) as executor:
+            # Start loading first batch
+            if hour_groups:
+                future = executor.submit(load_batch_func, hour_groups[0][1])
+
+            for i, (hour_idx, hour_group) in enumerate(hour_groups):
+                # Wait for current batch to finish loading
+                load_start = time.time()
+                large_batch = future.result() if future else None
+                load_time = time.time() - load_start
+                total_load_time += load_time
+
+                # Start loading NEXT batch in background (while GPU processes current)
+                if i + 1 < len(hour_groups):
+                    future = executor.submit(load_batch_func, hour_groups[i + 1][1])
+                else:
+                    future = None
+
+                if large_batch is None:
+                    continue
+
+                # Process on GPU while next batch loads in background
+                gpu_start = time.time()
+                num_samples = large_batch.size(0)
+
+                for j in range(0, num_samples, mini_batch_size):
+                    mini_batch = large_batch[j:j+mini_batch_size].to(self.device)
+
+                    # Forward pass
+                    self.optimizer.zero_grad()
+                    x_recon, loss_dict = self.model(mini_batch)
+
+                    # Compute total loss with regularization
+                    total_loss, loss_components = self._compute_total_loss(
+                        loss_dict,
+                        self.config['beta']
+                    )
+
+                    # Backward pass with gradient clipping
+                    total_loss.backward()
+                    torch.nn.utils.clip_grad_norm_(
+                        self.model.parameters(),
+                        TRAINING_CONFIG['grad_clip_norm']
+                    )
+                    self.optimizer.step()
+
+                    # Accumulate metrics
+                    epoch_metrics['total_loss'] += total_loss.item()
+                    epoch_metrics['recon_loss'] += loss_components['recon_loss']
+                    epoch_metrics['commitment_loss'] += loss_components['commitment_loss']
+                    epoch_metrics['codebook_loss'] += loss_components['codebook_loss']
+                    epoch_metrics['usage_penalty'] += loss_components['usage_penalty']
+                    epoch_metrics['codebook_usage'] += loss_dict['codebook_usage']
+                    epoch_metrics['perplexity'] += loss_dict['perplexity']
+                    epoch_metrics['num_batches'] += 1
+
+                gpu_time = time.time() - gpu_start
+                total_gpu_time += gpu_time
+
         # Average metrics
         if epoch_metrics['num_batches'] > 0:
             for key in epoch_metrics:
                 if key != 'num_batches':
                     epoch_metrics[key] /= epoch_metrics['num_batches']
-        
+
         return epoch_metrics
     
     def _validate_epoch(self, all_hours: List[datetime], epoch: int) -> Dict:
         """
         Validate for one epoch with hour accumulation.
-        
+
         Args:
             all_hours: List of hourly time windows
             epoch: Current epoch number
-            
+
         Returns:
             Dictionary with aggregated validation losses
         """
         self.model.eval()
-        
+
         hours_per_acc = TRAINING_CONFIG['hours_per_accumulation']
         mini_batch_size = TRAINING_CONFIG['mini_batch_size']
-        
+
         epoch_metrics = {
             'total_loss': 0.0,
             'recon_loss': 0.0,
@@ -301,18 +347,21 @@ class VQVAETrainer:
             'perplexity': 0.0,
             'num_batches': 0
         }
-        
-        with torch.no_grad():
-            # Process hours in groups
-            for hour_idx in range(0, len(all_hours), hours_per_acc):
-                hour_group = all_hours[hour_idx:min(hour_idx + hours_per_acc, len(all_hours))]
-                
-                # Accumulate validation samples
+
+        # Helper function for loading validation batches
+        def load_val_batch_func(hour_group):
+            if self.use_pymongo and self.mongo_uri:
+                return load_multiple_hours_pymongo(
+                    self.mongo_uri,
+                    self.db_name,
+                    self.split_collection,
+                    hour_group,
+                    role='validation'
+                )
+            else:
                 accumulated_samples = []
                 for hour in hour_group:
                     hour_end = hour + timedelta(hours=1)
-                    
-                    # Load validation batch
                     batch = load_hourly_batch(
                         self.spark,
                         self.db_name,
@@ -321,40 +370,63 @@ class VQVAETrainer:
                         hour_end,
                         role='validation'
                     )
-                    
                     if batch is not None:
                         accumulated_samples.append(batch)
-                
-                if not accumulated_samples:
-                    continue
-                
-                # Combine all hours
-                large_batch = torch.cat(accumulated_samples, dim=0)
-                
-                # Process in mini-batches
-                num_samples = large_batch.size(0)
-                
-                for i in range(0, num_samples, mini_batch_size):
-                    mini_batch = large_batch[i:i+mini_batch_size].to(self.device)
-                    
-                    # Forward pass
-                    x_recon, loss_dict = self.model(mini_batch)
-                    
-                    # Compute total loss
-                    total_loss, loss_components = self._compute_total_loss(
-                        loss_dict,
-                        self.config['beta']
-                    )
-                    
-                    # Accumulate metrics
-                    epoch_metrics['total_loss'] += total_loss.item()
-                    epoch_metrics['recon_loss'] += loss_components['recon_loss']
-                    epoch_metrics['commitment_loss'] += loss_components['commitment_loss']
-                    epoch_metrics['codebook_loss'] += loss_components['codebook_loss']
-                    epoch_metrics['usage_penalty'] += loss_components['usage_penalty']
-                    epoch_metrics['codebook_usage'] += loss_dict['codebook_usage']
-                    epoch_metrics['perplexity'] += loss_dict['perplexity']
-                    epoch_metrics['num_batches'] += 1
+
+                if accumulated_samples:
+                    return torch.cat(accumulated_samples, dim=0)
+                return None
+
+        # Create hour groups
+        hour_groups = []
+        for hour_idx in range(0, len(all_hours), hours_per_acc):
+            hour_group = all_hours[hour_idx:min(hour_idx + hours_per_acc, len(all_hours))]
+            hour_groups.append(hour_group)
+
+        with torch.no_grad():
+            # Process with prefetching
+            with ThreadPoolExecutor(max_workers=1) as executor:
+                # Start loading first batch
+                if hour_groups:
+                    future = executor.submit(load_val_batch_func, hour_groups[0])
+
+                for i, hour_group in enumerate(hour_groups):
+                    # Wait for current batch
+                    large_batch = future.result() if future else None
+
+                    # Start loading next batch
+                    if i + 1 < len(hour_groups):
+                        future = executor.submit(load_val_batch_func, hour_groups[i + 1])
+                    else:
+                        future = None
+
+                    if large_batch is None:
+                        continue
+
+                    # Process in mini-batches
+                    num_samples = large_batch.size(0)
+
+                    for j in range(0, num_samples, mini_batch_size):
+                        mini_batch = large_batch[j:j+mini_batch_size].to(self.device)
+
+                        # Forward pass
+                        x_recon, loss_dict = self.model(mini_batch)
+
+                        # Compute total loss
+                        total_loss, loss_components = self._compute_total_loss(
+                            loss_dict,
+                            self.config['beta']
+                        )
+
+                        # Accumulate metrics
+                        epoch_metrics['total_loss'] += total_loss.item()
+                        epoch_metrics['recon_loss'] += loss_components['recon_loss']
+                        epoch_metrics['commitment_loss'] += loss_components['commitment_loss']
+                        epoch_metrics['codebook_loss'] += loss_components['codebook_loss']
+                        epoch_metrics['usage_penalty'] += loss_components['usage_penalty']
+                        epoch_metrics['codebook_usage'] += loss_dict['codebook_usage']
+                        epoch_metrics['perplexity'] += loss_dict['perplexity']
+                        epoch_metrics['num_batches'] += 1
         
         # Average metrics
         if epoch_metrics['num_batches'] > 0:
@@ -397,17 +469,20 @@ class VQVAETrainer:
             'num_samples': 0
         }
         
-        with torch.no_grad():
-            # Process hours in groups
-            for hour_idx in range(0, len(all_hours), hours_per_acc):
-                hour_group = all_hours[hour_idx:min(hour_idx + hours_per_acc, len(all_hours))]
-                
-                # Accumulate validation samples
+        # Helper function for loading validation batches
+        def load_val_batch_func(hour_group):
+            if self.use_pymongo and self.mongo_uri:
+                return load_multiple_hours_pymongo(
+                    self.mongo_uri,
+                    self.db_name,
+                    self.split_collection,
+                    hour_group,
+                    role='validation'
+                )
+            else:
                 accumulated_samples = []
                 for hour in hour_group:
                     hour_end = hour + timedelta(hours=1)
-                    
-                    # Load validation batch
                     batch = load_hourly_batch(
                         self.spark,
                         self.db_name,
@@ -416,39 +491,63 @@ class VQVAETrainer:
                         hour_end,
                         role='validation'
                     )
-                    
                     if batch is not None:
                         accumulated_samples.append(batch)
-                
-                if not accumulated_samples:
-                    continue
-                
-                # Combine all hours
-                large_batch = torch.cat(accumulated_samples, dim=0)
-                final_metrics['num_samples'] += large_batch.size(0)
-                
-                # Process in mini-batches
-                for i in range(0, large_batch.size(0), mini_batch_size):
-                    mini_batch = large_batch[i:i+mini_batch_size].to(self.device)
-                    
-                    # Forward pass
-                    x_recon, loss_dict = self.model(mini_batch)
-                    
-                    # Compute total loss
-                    total_loss, loss_components = self._compute_total_loss(
-                        loss_dict,
-                        self.config['beta']
-                    )
-                    
-                    # Accumulate metrics
-                    final_metrics['total_loss'] += total_loss.item()
-                    final_metrics['recon_loss'] += loss_components['recon_loss']
-                    final_metrics['commitment_loss'] += loss_components['commitment_loss']
-                    final_metrics['codebook_loss'] += loss_components['codebook_loss']
-                    final_metrics['usage_penalty'] += loss_components['usage_penalty']
-                    final_metrics['codebook_usage'] += loss_dict['codebook_usage']
-                    final_metrics['perplexity'] += loss_dict['perplexity']
-                    final_metrics['num_batches'] += 1
+
+                if accumulated_samples:
+                    return torch.cat(accumulated_samples, dim=0)
+                return None
+
+        # Create hour groups
+        hour_groups = []
+        for hour_idx in range(0, len(all_hours), hours_per_acc):
+            hour_group = all_hours[hour_idx:min(hour_idx + hours_per_acc, len(all_hours))]
+            hour_groups.append(hour_group)
+
+        with torch.no_grad():
+            # Process with prefetching
+            with ThreadPoolExecutor(max_workers=1) as executor:
+                # Start loading first batch
+                if hour_groups:
+                    future = executor.submit(load_val_batch_func, hour_groups[0])
+
+                for i, hour_group in enumerate(hour_groups):
+                    # Wait for current batch
+                    large_batch = future.result() if future else None
+
+                    # Start loading next batch
+                    if i + 1 < len(hour_groups):
+                        future = executor.submit(load_val_batch_func, hour_groups[i + 1])
+                    else:
+                        future = None
+
+                    if large_batch is None:
+                        continue
+
+                    final_metrics['num_samples'] += large_batch.size(0)
+
+                    # Process in mini-batches
+                    for j in range(0, large_batch.size(0), mini_batch_size):
+                        mini_batch = large_batch[j:j+mini_batch_size].to(self.device)
+
+                        # Forward pass
+                        x_recon, loss_dict = self.model(mini_batch)
+
+                        # Compute total loss
+                        total_loss, loss_components = self._compute_total_loss(
+                            loss_dict,
+                            self.config['beta']
+                        )
+
+                        # Accumulate metrics
+                        final_metrics['total_loss'] += total_loss.item()
+                        final_metrics['recon_loss'] += loss_components['recon_loss']
+                        final_metrics['commitment_loss'] += loss_components['commitment_loss']
+                        final_metrics['codebook_loss'] += loss_components['codebook_loss']
+                        final_metrics['usage_penalty'] += loss_components['usage_penalty']
+                        final_metrics['codebook_usage'] += loss_dict['codebook_usage']
+                        final_metrics['perplexity'] += loss_dict['perplexity']
+                        final_metrics['num_batches'] += 1
         
         # Average metrics
         if final_metrics['num_batches'] > 0:

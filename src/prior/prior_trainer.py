@@ -8,12 +8,13 @@ import time
 import torch
 import torch.nn as nn
 import torch.optim as optim
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Dict, List
+from concurrent.futures import ThreadPoolExecutor
 
 from src.utils.logging import logger
 from .prior_model import LatentPriorCNN
-from .prior_data_loader import load_sequences_for_split, get_sequence_dataset_size
+from .prior_data_loader import load_latent_codes_for_hours, create_sequences_from_codes, get_sequence_dataset_size
 from .prior_config import PRIOR_TRAINING_CONFIG
 
 
@@ -136,7 +137,8 @@ class PriorTrainer:
             if val_loss < self.best_val_loss - PRIOR_TRAINING_CONFIG['min_delta']:
                 self.best_val_loss = val_loss
                 self.best_epoch = epoch
-                self.best_model_state = self.model.state_dict().copy()
+                # Deep copy model state (clone tensors, not just dict structure)
+                self.best_model_state = {k: v.clone() for k, v in self.model.state_dict().items()}
                 logger(f'  → New best validation loss: {self.best_val_loss:.4f}', "INFO")
             
             # Early stopping
@@ -158,101 +160,170 @@ class PriorTrainer:
         }
     
     def _train_epoch(self, all_hours: List[datetime], epoch: int) -> float:
-        """Train for one epoch with hour accumulation."""
+        """Train for one epoch with hour accumulation and prefetching."""
         self.model.train()
-        
+
         epoch_loss = 0.0
         num_batches = 0
-        
-        # Load sequences with hour accumulation
-        sequence_batches = load_sequences_for_split(
-            self.spark,
-            self.db_name,
-            self.split_collection,
-            all_hours,
-            role='train',
-            seq_len=PRIOR_TRAINING_CONFIG['seq_len'],
-            hours_per_accumulation=PRIOR_TRAINING_CONFIG['hours_per_accumulation']
-        )
-        
-        for sequences in sequence_batches:
-            # sequences: (num_sequences, seq_len)
-            num_sequences = sequences.size(0)
-            
-            # Process in mini-batches
-            batch_size = PRIOR_TRAINING_CONFIG['sequence_batch_size']
-            
-            for i in range(0, num_sequences, batch_size):
-                batch = sequences[i:i+batch_size].to(self.device)
-                
-                # Input: all codes except last
-                input_seq = batch[:, :-1]
-                # Target: all codes except first
-                target_seq = batch[:, 1:]
-                
-                # Forward
-                self.optimizer.zero_grad()
-                logits = self.model(input_seq)  # (batch, seq_len-1, codebook_size)
-                
-                # Compute loss
-                loss = self.criterion(
-                    logits.reshape(-1, logits.size(-1)),  # (batch*(seq_len-1), codebook_size)
-                    target_seq.reshape(-1)                 # (batch*(seq_len-1),)
-                )
-                
-                # Backward
-                loss.backward()
-                
-                # Gradient clipping
-                torch.nn.utils.clip_grad_norm_(
-                    self.model.parameters(),
-                    PRIOR_TRAINING_CONFIG['grad_clip_norm']
-                )
-                
-                self.optimizer.step()
-                
-                epoch_loss += loss.item()
-                num_batches += 1
-        
+
+        hours_per_acc = PRIOR_TRAINING_CONFIG['hours_per_accumulation']
+
+        # Helper function to load sequences for a hour group (for background thread)
+        def load_batch_func(hour_group):
+            hour_start = hour_group[0]
+            hour_end = hour_group[-1] + timedelta(hours=1)
+
+            latent_codes = load_latent_codes_for_hours(
+                self.spark, self.db_name, self.split_collection,
+                hour_start, hour_end, 'train'
+            )
+
+            if not latent_codes:
+                return None
+
+            sequences, _ = create_sequences_from_codes(
+                latent_codes,
+                PRIOR_TRAINING_CONFIG['seq_len']
+            )
+
+            return sequences
+
+        # Create hour groups
+        hour_groups = []
+        for hour_idx in range(0, len(all_hours), hours_per_acc):
+            hour_group = all_hours[hour_idx:min(hour_idx + hours_per_acc, len(all_hours))]
+            hour_groups.append(hour_group)
+
+        # Process with prefetching: load batch N+1 while processing batch N on GPU
+        with ThreadPoolExecutor(max_workers=1) as executor:
+            # Start loading first batch
+            if hour_groups:
+                future = executor.submit(load_batch_func, hour_groups[0])
+
+            for i, hour_group in enumerate(hour_groups):
+                # Wait for current batch to finish loading
+                sequences = future.result() if future else None
+
+                # Start loading NEXT batch in background (while GPU processes current)
+                if i + 1 < len(hour_groups):
+                    future = executor.submit(load_batch_func, hour_groups[i + 1])
+                else:
+                    future = None
+
+                if sequences is None:
+                    continue
+
+                # Process on GPU while next batch loads in background
+                num_sequences = sequences.size(0)
+                batch_size = PRIOR_TRAINING_CONFIG['sequence_batch_size']
+
+                for j in range(0, num_sequences, batch_size):
+                    batch = sequences[j:j+batch_size].to(self.device)
+
+                    # Input: all codes except last
+                    input_seq = batch[:, :-1]
+                    # Target: all codes except first
+                    target_seq = batch[:, 1:]
+
+                    # Forward
+                    self.optimizer.zero_grad()
+                    logits = self.model(input_seq)  # (batch, seq_len-1, codebook_size)
+
+                    # Compute loss
+                    loss = self.criterion(
+                        logits.reshape(-1, logits.size(-1)),  # (batch*(seq_len-1), codebook_size)
+                        target_seq.reshape(-1)                 # (batch*(seq_len-1),)
+                    )
+
+                    # Backward
+                    loss.backward()
+
+                    # Gradient clipping
+                    torch.nn.utils.clip_grad_norm_(
+                        self.model.parameters(),
+                        PRIOR_TRAINING_CONFIG['grad_clip_norm']
+                    )
+
+                    self.optimizer.step()
+
+                    epoch_loss += loss.item()
+                    num_batches += 1
+
         return epoch_loss / max(num_batches, 1)
     
     def _validate_epoch(self, all_hours: List[datetime], epoch: int) -> float:
-        """Validate for one epoch."""
+        """Validate for one epoch with prefetching."""
         self.model.eval()
-        
+
         epoch_loss = 0.0
         num_batches = 0
-        
-        with torch.no_grad():
-            # Load validation sequences
-            sequence_batches = load_sequences_for_split(
-                self.spark,
-                self.db_name,
-                self.split_collection,
-                all_hours,
-                role='validation',
-                seq_len=PRIOR_TRAINING_CONFIG['seq_len'],
-                hours_per_accumulation=PRIOR_TRAINING_CONFIG['hours_per_accumulation']
+
+        hours_per_acc = PRIOR_TRAINING_CONFIG['hours_per_accumulation']
+
+        # Helper function for loading validation sequences
+        def load_val_batch_func(hour_group):
+            hour_start = hour_group[0]
+            hour_end = hour_group[-1] + timedelta(hours=1)
+
+            latent_codes = load_latent_codes_for_hours(
+                self.spark, self.db_name, self.split_collection,
+                hour_start, hour_end, 'validation'
             )
-            
-            for sequences in sequence_batches:
-                num_sequences = sequences.size(0)
-                batch_size = PRIOR_TRAINING_CONFIG['sequence_batch_size']
-                
-                for i in range(0, num_sequences, batch_size):
-                    batch = sequences[i:i+batch_size].to(self.device)
-                    
-                    input_seq = batch[:, :-1]
-                    target_seq = batch[:, 1:]
-                    
-                    logits = self.model(input_seq)
-                    
-                    loss = self.criterion(
-                        logits.reshape(-1, logits.size(-1)),
-                        target_seq.reshape(-1)
-                    )
-                    
-                    epoch_loss += loss.item()
-                    num_batches += 1
-        
+
+            if not latent_codes:
+                return None
+
+            sequences, _ = create_sequences_from_codes(
+                latent_codes,
+                PRIOR_TRAINING_CONFIG['seq_len']
+            )
+
+            return sequences
+
+        # Create hour groups
+        hour_groups = []
+        for hour_idx in range(0, len(all_hours), hours_per_acc):
+            hour_group = all_hours[hour_idx:min(hour_idx + hours_per_acc, len(all_hours))]
+            hour_groups.append(hour_group)
+
+        with torch.no_grad():
+            # Process with prefetching
+            with ThreadPoolExecutor(max_workers=1) as executor:
+                # Start loading first batch
+                if hour_groups:
+                    future = executor.submit(load_val_batch_func, hour_groups[0])
+
+                for i, hour_group in enumerate(hour_groups):
+                    # Wait for current batch
+                    sequences = future.result() if future else None
+
+                    # Start loading next batch
+                    if i + 1 < len(hour_groups):
+                        future = executor.submit(load_val_batch_func, hour_groups[i + 1])
+                    else:
+                        future = None
+
+                    if sequences is None:
+                        continue
+
+                    # Process on GPU while next batch loads
+                    num_sequences = sequences.size(0)
+                    batch_size = PRIOR_TRAINING_CONFIG['sequence_batch_size']
+
+                    for j in range(0, num_sequences, batch_size):
+                        batch = sequences[j:j+batch_size].to(self.device)
+
+                        input_seq = batch[:, :-1]
+                        target_seq = batch[:, 1:]
+
+                        logits = self.model(input_seq)
+
+                        loss = self.criterion(
+                            logits.reshape(-1, logits.size(-1)),
+                            target_seq.reshape(-1)
+                        )
+
+                        epoch_loss += loss.item()
+                        num_batches += 1
+
         return epoch_loss / max(num_batches, 1)

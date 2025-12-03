@@ -53,7 +53,10 @@ def run_hyperparameter_search(
     collection_suffix: str,
     device,
     mlflow_experiment_name: str,
-    artifact_base_dir: Path
+    artifact_base_dir: Path,
+    mongo_uri: str = "mongodb://127.0.0.1:27017/",
+    use_pymongo: bool = True,
+    max_splits: int = None
 ) -> Dict:
     """
     Run complete hyperparameter search.
@@ -94,8 +97,13 @@ def run_hyperparameter_search(
     
     if not split_ids:
         raise ValueError(f"No splits found in database '{db_name}' with pattern '{collection_prefix}*{collection_suffix}'")
-    
-    logger(f'Found {len(split_ids)} splits: {split_ids}', "INFO")
+
+    logger(f'Found {len(split_ids)} splits in database: {split_ids}', "INFO")
+
+    # Limit to max_splits if specified (for budget control)
+    if max_splits is not None and len(split_ids) > max_splits:
+        split_ids = split_ids[:max_splits]
+        logger(f'Limited to first {max_splits} splits for budget: {split_ids}', "INFO")
     
     # Log info about each split
     for split_id in split_ids:
@@ -170,7 +178,9 @@ def run_hyperparameter_search(
                         db_name=db_name,
                         split_collection=split_collection,
                         device=device,
-                        config=config
+                        config=config,
+                        mongo_uri=mongo_uri,
+                        use_pymongo=use_pymongo
                     )
                     
                     result = trainer.train_split(all_hours)

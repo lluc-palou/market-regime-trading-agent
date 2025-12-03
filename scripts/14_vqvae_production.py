@@ -225,7 +225,9 @@ def main():
             device=device,
             best_config=best_config,
             mlflow_experiment_name=MLFLOW_EXPERIMENT_NAME,
-            production_dir=PRODUCTION_DIR
+            production_dir=PRODUCTION_DIR,
+            mongo_uri=MONGO_URI,
+            use_pymongo=True  # Use fast PyMongo loader (10-50× speedup)
         )
         
         # Summary

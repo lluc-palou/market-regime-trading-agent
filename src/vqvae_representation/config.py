@@ -5,24 +5,37 @@ Defines hyperparameter grids and training configurations for LOB representation 
 """
 
 # =================================================================================================
-# Hyperparameter Grid for Search - Extended Configuration
+# Hyperparameter Grid for Search - Budget-Optimized Configuration (WORST CASE)
 # =================================================================================================
-# Optimized for AWS g4dn.xlarge with $50 budget
-# Expected runtime: 36 hours, Cost: ~$19 (38% of budget)
+# Optimized for $50 budget with $0.71/hour GPU (70 hours available)
+# Configuration: 8 configs × 28 splits (all splits for statistical validity)
+# Budget based on WORST CASE: all 25 epochs, no early stopping
 # =================================================================================================
 
 HYPERPARAM_GRID = {
     'B': [1001],                    # Number of LOB bins (fixed)
-    'K': [128, 256, 512],           # Codebook size: medium to very large
-    'D': [40, 56, 64, 80],          # Embedding dimension: expanded range
+    'K': [128, 512],                # Codebook size: small vs large extremes
+    'D': [64],                      # Embedding dimension: single best estimate
     'n_conv_layers': [2, 3],        # Architecture depth: shallow vs deep
-    'beta': [0.25, 0.5],            # Commitment loss coefficient
-    'lr': [1e-3, 5e-4],             # Learning rate: fast vs careful
+    'beta': [0.25, 0.5],            # Commitment loss coefficient: low vs high
+    'lr': [1e-3],                   # Learning rate: single best estimate (fast)
     'dropout': [0.2]                # Dropout rate for regularization
 }
-# Total: 3 × 4 × 2 × 2 × 2 × 1 = 96 configurations
-# Parameter range: ~500K (K=128,D=40,n=2) to ~2.5M (K=512,D=80,n=3)
-# All 45 splits tested per configuration
+# Total: 2 × 1 × 2 × 2 × 1 × 1 = 8 configurations (worst-case budget)
+# Parameter range: ~800K (K=128,D=64,n=2) to ~2.1M (K=512,D=64,n=3)
+# ALL 28 splits tested per configuration (full statistical validity)
+#
+# Budget calculation (WORST CASE - all 25 epochs, no early stopping):
+# - 25 epochs × 40s = 1000s per split = 16.7 min
+# - 28 splits × 16.7 min = 467 min per config = 7.8 hours
+# - 8 configs × 7.8 hours = 62.4 hours
+# - Cost: 62.4 × $0.71 = $44.30 (12% under budget for safety)
+#
+# Expected case (with early stopping ~7 epochs):
+# - 7 epochs × 40s = 280s per split = 4.7 min
+# - 28 splits × 4.7 min = 132 min per config = 2.2 hours
+# - 8 configs × 2.2 hours = 17.6 hours
+# - Cost: 17.6 × $0.71 = $12.50 (much cheaper if early stopping works!)
 
 # =================================================================================================
 # Training Configuration (shared across all configs)

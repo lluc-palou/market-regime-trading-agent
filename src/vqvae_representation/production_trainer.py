@@ -34,7 +34,9 @@ def run_production_training(
     device,
     best_config: Dict,
     mlflow_experiment_name: str,
-    production_dir: Path
+    production_dir: Path,
+    mongo_uri: str = "mongodb://127.0.0.1:27017/",
+    use_pymongo: bool = True
 ) -> Dict:
     """
     Run complete production training pipeline.
@@ -58,7 +60,9 @@ def run_production_training(
         best_config: Best hyperparameter configuration from Stage 12
         mlflow_experiment_name: MLflow experiment name
         production_dir: Directory for production model artifacts
-        
+        mongo_uri: MongoDB connection URI (default: "mongodb://127.0.0.1:27017/")
+        use_pymongo: Use PyMongo for 10-50× faster data loading (default: True)
+
     Returns:
         Dictionary with production training results
     """
@@ -144,7 +148,9 @@ def run_production_training(
                     split_collection=split_collection,
                     device=device,
                     config=best_config,
-                    all_hours=all_hours
+                    all_hours=all_hours,
+                    mongo_uri=mongo_uri,
+                    use_pymongo=use_pymongo
                 )
                 
                 # Log training results to MLflow
@@ -290,7 +296,9 @@ def train_production_model(
     split_collection: str,
     device: torch.device,
     config: Dict,
-    all_hours: List[datetime]
+    all_hours: List[datetime],
+    mongo_uri: str = "mongodb://127.0.0.1:27017/",
+    use_pymongo: bool = True
 ) -> tuple:
     """
     Train a single production model for one split.
@@ -304,18 +312,22 @@ def train_production_model(
         device: torch device
         config: Hyperparameter configuration
         all_hours: List of hourly time windows
-        
+        mongo_uri: MongoDB connection URI
+        use_pymongo: Use PyMongo for fast data loading
+
     Returns:
         model: Trained VQVAEModel
         results: Training results dictionary
     """
-    # Initialize trainer (same as Phase 1)
+    # Initialize trainer with PyMongo support for 10-50× faster loading
     trainer = VQVAETrainer(
         spark=spark,
         db_name=db_name,
         split_collection=split_collection,
         device=device,
-        config=config
+        config=config,
+        mongo_uri=mongo_uri,
+        use_pymongo=use_pymongo
     )
     
     # Train with early stopping

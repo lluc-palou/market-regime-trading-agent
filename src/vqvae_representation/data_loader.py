@@ -167,9 +167,9 @@ def load_hourly_batch(
 ) -> Optional[torch.Tensor]:
     """
     Load one hour batch from split collection with TEMPORAL ORDERING.
-    
+
     Critical: Uses MongoDB aggregation with $sort to ensure temporal sequence.
-    
+
     Args:
         spark: SparkSession instance
         db_name: Database name
@@ -177,13 +177,16 @@ def load_hourly_batch(
         hour_start: Start of hour window
         hour_end: End of hour window
         role: Filter by role ('train', 'train_warmup', or 'validation')
-        
+
     Returns:
         torch.Tensor of LOB vectors (batch_size, B) or None if empty
     """
+    import time
+    load_start = time.time()
+
     start_str = hour_start.isoformat() + 'Z'
     end_str = hour_end.isoformat() + 'Z'
-    
+
     # MongoDB aggregation pipeline with temporal ordering
     pipeline = [
         {"$match": {
@@ -196,7 +199,8 @@ def load_hourly_batch(
         {"$sort": {"timestamp": 1}},  # CRITICAL: Temporal ordering
         {"$project": {"bins": 1}}
     ]
-    
+
+    query_start = time.time()
     df = (
         spark.read.format("mongodb")
         .option("database", db_name)
@@ -204,19 +208,30 @@ def load_hourly_batch(
         .option("aggregation.pipeline", str(pipeline).replace("'", '"'))
         .load()
     )
-    
+
+    count_start = time.time()
     count = df.count()
-    
+    count_time = time.time() - count_start
+
     if count == 0:
         return None
-    
+
     # Collect LOB vectors
+    collect_start = time.time()
     rows = df.collect()
+    collect_time = time.time() - collect_start
+
     bins = [row['bins'] for row in rows]
-    
+
     # Convert to tensor
     tensor = torch.tensor(bins, dtype=torch.float32)
-    
+
+    total_time = time.time() - load_start
+
+    # Log timing for first few batches to diagnose bottleneck
+    if total_time > 2.0:  # Only log slow queries
+        logger(f'  [SLOW] Loaded {count} samples in {total_time:.2f}s (count={count_time:.2f}s, collect={collect_time:.2f}s)', "WARNING")
+
     return tensor
 
 

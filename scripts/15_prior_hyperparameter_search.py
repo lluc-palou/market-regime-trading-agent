@@ -1,13 +1,14 @@
 """
-Prior Production Training Script (Stage 14b)
+Prior Hyperparameter Search Script
 
-Trains final prior models for each split using best configuration.
+Searches for best prior model hyperparameters across all splits.
 
-Input: best_prior_config.json + split_X_input collections
-Output: split_X_prior.pth models
+Input: split_X_input collections (with latent codes from VQ-VAE)
+       VQ-VAE codebook size from best_config.json
+Output: best_prior_config.json with optimal hyperparameters
 
 Usage:
-    python scripts/14b_prior_production_training.py
+    python scripts/15_prior_hyperparameter_search.py
 """
 
 import os
@@ -53,7 +54,7 @@ import mlflow
 
 from src.utils.logging import logger
 from src.utils.spark import create_spark_session
-from src.prior.prior_production_training import run_prior_production_training
+from src.prior.prior_hyperparameter_search import run_prior_hyperparameter_search
 
 # Configuration
 DB_NAME = "raw"
@@ -61,47 +62,22 @@ COLLECTION_PREFIX = "split_"
 COLLECTION_SUFFIX = "_input"
 
 MLFLOW_TRACKING_URI = "http://127.0.0.1:5000"
-MLFLOW_EXPERIMENT_NAME = "LOB_Prior_Production_Training"
+MLFLOW_EXPERIMENT_NAME = "LOB_Prior_Hyperparameter_Search"
 
 MONGO_URI = "mongodb://127.0.0.1:27017/"
 JAR_FILES_PATH = "file:///C:/spark/spark-3.4.1-bin-hadoop3/jars/"
 DRIVER_MEMORY = "8g"
 
 ARTIFACT_BASE_DIR = Path(REPO_ROOT) / "artifacts" / "prior_models"
-PRIOR_SEARCH_DIR = ARTIFACT_BASE_DIR / "hyperparameter_search"
-PRODUCTION_DIR = ARTIFACT_BASE_DIR / "production"
 
 VQVAE_CONFIG_PATH = Path(REPO_ROOT) / "artifacts" / "vqvae_models" / "hyperparameter_search" / "best_config.json"
 
 
-def load_best_prior_config():
-    """Load best prior configuration from Stage 14a."""
-    config_path = PRIOR_SEARCH_DIR / "best_prior_config.json"
-    
-    if not config_path.exists():
-        raise FileNotFoundError(
-            f"Best prior config not found at {config_path}. "
-            f"Please run Stage 14a first."
-        )
-    
-    with open(config_path, 'r') as f:
-        config_data = json.load(f)
-    
-    logger(f'Loaded best prior config from: {config_path}', "INFO")
-    logger(f'  Avg validation loss: {config_data["avg_val_loss"]:.4f}', "INFO")
-    logger(f'  Configuration: {config_data["config"]}', "INFO")
-    
-    return config_data["config"]
-
-
 def main():
     logger('=' * 100, "INFO")
-    logger('PRIOR PRODUCTION TRAINING (STAGE 14b)', "INFO")
+    logger('PRIOR HYPERPARAMETER SEARCH', "INFO")
     logger('=' * 100, "INFO")
-    
-    # Load best prior config
-    best_config = load_best_prior_config()
-    
+
     # Load VQ-VAE config for codebook size
     if not VQVAE_CONFIG_PATH.exists():
         raise FileNotFoundError(f"VQ-VAE config not found: {VQVAE_CONFIG_PATH}")
@@ -135,27 +111,26 @@ def main():
     )
     
     try:
-        logger('Starting production training...', "INFO")
-        
-        results = run_prior_production_training(
+        logger('Starting hyperparameter search...', "INFO")
+
+        results = run_prior_hyperparameter_search(
             spark=spark,
             db_name=DB_NAME,
             collection_prefix=COLLECTION_PREFIX,
             collection_suffix=COLLECTION_SUFFIX,
             device=device,
             codebook_size=codebook_size,
-            best_config=best_config,
             mlflow_experiment_name=MLFLOW_EXPERIMENT_NAME,
-            production_dir=PRODUCTION_DIR
+            artifact_base_dir=ARTIFACT_BASE_DIR
         )
-        
+
         logger('', "INFO")
         logger('=' * 100, "INFO")
-        logger('PRODUCTION TRAINING COMPLETE', "INFO")
+        logger('HYPERPARAMETER SEARCH COMPLETE', "INFO")
         logger('=' * 100, "INFO")
-        logger(f'Models trained: {results["num_splits"]}', "INFO")
-        logger(f'Avg validation loss: {results["avg_val_loss"]:.4f}', "INFO")
-        logger(f'Models saved to: {PRODUCTION_DIR}', "INFO")
+        logger(f'Best configuration: {results["best_config"]}', "INFO")
+        logger(f'Best average validation loss: {results["best_avg_val_loss"]:.4f}', "INFO")
+        logger(f'Total configurations tested: {len(results["all_results"])}', "INFO")
         
     except Exception as e:
         logger(f'ERROR: {str(e)}', "ERROR")
@@ -183,7 +158,7 @@ if __name__ == "__main__":
         
         logger('', "INFO")
         logger(f'Total time: {hours}h {minutes}m', "INFO")
-        logger('Stage 14b completed successfully', "INFO")
+        logger('Stage 15 (Prior Hyperparameter Search) completed successfully', "INFO")
         
     except Exception:
         sys.exit(1)

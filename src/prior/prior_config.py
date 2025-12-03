@@ -7,7 +7,14 @@ Hyperparameter grids and training configurations for latent prior learning.
 # =================================================================================================
 # Hyperparameter Grid for Search
 # =================================================================================================
-# Budget-optimized: 12 configurations, ~$43 total cost
+# Budget-optimized: 12 configurations
+#
+# Expected runtime (assuming ~5s per epoch with prefetching):
+# - Worst case (75 epochs per split): 12 configs × 28 splits × 75 epochs × 5s = 126,000s = 35 hours = $24.85
+# - Expected case (early stopping ~15 epochs): 12 configs × 28 splits × 15 epochs × 5s = 25,200s = 7 hours = $4.97
+# - Per-split estimate: 12 configs × 15 epochs × 5s = 900s = 15 minutes
+#
+# Note: Prior model is much faster than VQVAE (smaller model, integer sequences vs LOB bins)
 # =================================================================================================
 
 PRIOR_HYPERPARAM_GRID = {

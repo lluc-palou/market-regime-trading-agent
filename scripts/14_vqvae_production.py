@@ -63,6 +63,7 @@ except:
 # =================================================================================================
 
 import json
+import yaml
 import torch
 import mlflow
 from datetime import datetime
@@ -101,26 +102,26 @@ PRODUCTION_DIR = ARTIFACT_BASE_DIR / "production"
 def load_best_config() -> dict:
     """
     Load best hyperparameter configuration from Stage 12.
-    
+
     Returns:
         Best configuration dictionary
     """
-    config_path = HYPERPARAMETER_SEARCH_DIR / "best_config.json"
-    
+    config_path = HYPERPARAMETER_SEARCH_DIR / "best_config.yaml"
+
     if not config_path.exists():
         raise FileNotFoundError(
             f"Best config not found at {config_path}. "
             f"Please run Stage 12 (hyperparameter search) first."
         )
-    
+
     with open(config_path, 'r') as f:
-        config_data = json.load(f)
-    
+        config_data = yaml.safe_load(f)
+
     logger(f'Loaded best config from: {config_path}', "INFO")
-    logger(f'  Average validation loss: {config_data["avg_val_loss"]:.4f}', "INFO")
-    logger(f'  Configuration: {config_data["config"]}', "INFO")
-    
-    return config_data["config"]
+    logger(f'  Average validation loss: {config_data["metrics"]["avg_val_loss"]:.4f}', "INFO")
+    logger(f'  Configuration: {config_data["best_config"]}', "INFO")
+
+    return config_data["best_config"]
 
 # =================================================================================================
 # Main Execution

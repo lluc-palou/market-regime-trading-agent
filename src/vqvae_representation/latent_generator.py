@@ -233,33 +233,28 @@ class LatentGenerator:
         role: str
     ) -> List[Dict]:
         """
-        Fetch original documents from MongoDB.
-        
+        Fetch original documents from MongoDB using PyMongo (faster than Spark).
+
         Args:
             hour_start: Start of hour window
             hour_end: End of hour window
             role: 'train' or 'validation'
-            
+
         Returns:
             List of original documents
         """
-        # Read from Spark for consistency with data loading
-        df = self.spark.read \
-            .format("mongodb") \
-            .option("database", self.db_name) \
-            .option("collection", self.split_collection) \
-            .load()
-        
-        # Filter by hour and role
-        df = df.filter(
-            (df.timestamp >= hour_start) &
-            (df.timestamp < hour_end) &
-            (df.role == role)
-        )
-        
-        # Convert to list of dicts
-        docs = df.toPandas().to_dict('records')
-        
+        # Use PyMongo directly (faster and avoids Spark/pandas conversion issues)
+        input_col = self.db[self.split_collection]
+
+        # Query MongoDB
+        query = {
+            'timestamp': {'$gte': hour_start, '$lt': hour_end},
+            'role': role
+        }
+
+        # Fetch documents (sorted by timestamp for consistency)
+        docs = list(input_col.find(query).sort('timestamp', 1))
+
         return docs
     
     def _write_documents_with_latents(

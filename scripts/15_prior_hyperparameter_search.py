@@ -4,7 +4,7 @@ Prior Hyperparameter Search Script
 Searches for best prior model hyperparameters across all splits.
 
 Input: split_X_input collections (with latent codes from VQ-VAE)
-       VQ-VAE codebook size from best_config.json
+       VQ-VAE codebook size from best_config.yaml
 Output: best_prior_config.json with optimal hyperparameters
 
 Usage:
@@ -14,6 +14,7 @@ Usage:
 import os
 import sys
 import json
+import yaml
 from pathlib import Path
 
 # Setup paths
@@ -70,7 +71,7 @@ DRIVER_MEMORY = "8g"
 
 ARTIFACT_BASE_DIR = Path(REPO_ROOT) / "artifacts" / "prior_models"
 
-VQVAE_CONFIG_PATH = Path(REPO_ROOT) / "artifacts" / "vqvae_models" / "hyperparameter_search" / "best_config.json"
+VQVAE_CONFIG_PATH = Path(REPO_ROOT) / "artifacts" / "vqvae_models" / "hyperparameter_search" / "best_config.yaml"
 
 
 def main():
@@ -81,11 +82,11 @@ def main():
     # Load VQ-VAE config for codebook size
     if not VQVAE_CONFIG_PATH.exists():
         raise FileNotFoundError(f"VQ-VAE config not found: {VQVAE_CONFIG_PATH}")
-    
+
     with open(VQVAE_CONFIG_PATH, 'r') as f:
-        vqvae_config = json.load(f)
-        codebook_size = vqvae_config['config']['K']
-    
+        vqvae_config = yaml.safe_load(f)
+        codebook_size = vqvae_config['best_config']['K']
+
     logger(f'VQ-VAE codebook size: {codebook_size}', "INFO")
     
     # Setup device

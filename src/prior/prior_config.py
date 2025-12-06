@@ -40,11 +40,11 @@ PRIOR_HYPERPARAM_GRID = {
 # =================================================================================================
 
 PRIOR_TRAINING_CONFIG = {
-    'max_epochs': 75,
-    'patience': 5,                       # Early stopping patience
+    'max_epochs': 25,                    # Match VQ-VAE (was 75)
+    'patience': 3,                       # Match VQ-VAE (was 5)
     'min_delta': 0.001,                  # Minimum improvement threshold
-    'hours_per_accumulation': 100,      # Match VQ-VAE for GPU efficiency
-    'sequence_batch_size': 32,           # Number of sequences per GPU batch
+    'hours_per_accumulation': 100,      # Data loading chunk size
+    'sequence_batch_size': 256,          # GPU batch size (was 32) - 8× increase for better GPU utilization
     'seq_len': 120,                      # 1 hour = ~120 LOB snapshots
     'grad_clip_norm': 1.0,
     'weight_decay': 1e-5,

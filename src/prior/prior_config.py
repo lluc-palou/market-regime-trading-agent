@@ -7,7 +7,7 @@ Hyperparameter grids and training configurations for latent prior learning.
 # =================================================================================================
 # Hyperparameter Grid for Search
 # =================================================================================================
-# Budget-optimized: 18 configurations (aligned with VQ-VAE architecture K=128, D=64)
+# Budget-optimized: 18 configurations (embedding_dim FIXED to VQ-VAE's D=64)
 #
 # Expected runtime (assuming ~5s per epoch with prefetching):
 # - Worst case (75 epochs per split): 18 configs × 28 splits × 75 epochs × 5s = 189,000s = 52.5 hours = $37.28
@@ -15,24 +15,25 @@ Hyperparameter grids and training configurations for latent prior learning.
 # - Per-split estimate: 18 configs × 15 epochs × 5s = 1,350s = 22.5 minutes
 #
 # Note: Prior model is much faster than VQVAE (smaller model, integer sequences vs LOB bins)
-# Embedding dimensions [64, 96, 128] align with VQ-VAE's D=64 (match, 1.5×, 2×)
+# VQ-VAE best config: K=128, D=64 → Prior uses embedding_dim=64 (fixed)
+# Search space: n_layers (depth), n_channels (width), dropout (regularization)
 # =================================================================================================
 
 PRIOR_HYPERPARAM_GRID = {
     # Architecture parameters
-    # Note: VQ-VAE uses K=128 (codebook size) and D=64 (embedding dimension)
-    # Prior embedding_dim should align with or relate to VQ-VAE's D=64
-    'embedding_dim': [64, 96, 128],      # Code embedding size: match D, 1.5×D, 2×D
+    # Note: VQ-VAE best config selected K=128 (codebook size) and D=64 (embedding dimension)
+    # Prior must use same embedding dimension to match VQ-VAE output
+    'embedding_dim': [64],               # Code embedding size: FIXED to match VQ-VAE D=64
     'n_layers': [6, 8, 10],              # Causal CNN depth (receptive field)
-    'n_channels': [64, 80],              # Causal CNN width (capacity)
+    'n_channels': [64, 80, 96],          # Causal CNN width (capacity) - expanded range
     'kernel_size': [2],                  # Standard for causal convolutions
 
     # Training parameters
     'learning_rate': [1e-3],             # Adam learning rate
-    'dropout': [0.15],                   # Regularization
+    'dropout': [0.1, 0.15],              # Regularization - expanded range
 }
-# Total: 3 × 3 × 2 = 18 configurations
-# Parameter range: aligned with VQ-VAE architecture (K=128, D=64)
+# Total: 1 × 3 × 3 × 1 × 1 × 2 = 18 configurations
+# Parameter range: embedding_dim fixed to VQ-VAE D=64, expanded n_channels and dropout
 
 # =================================================================================================
 # Training Configuration

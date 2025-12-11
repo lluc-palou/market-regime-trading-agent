@@ -117,13 +117,21 @@ def compute_correlation_distance(X: np.ndarray, Y: np.ndarray) -> Dict[str, floa
     Returns:
         Dictionary with correlation distances
     """
-    # Compute correlation matrices
-    corr_X = np.corrcoef(X, rowvar=False)
-    corr_Y = np.corrcoef(Y, rowvar=False)
+    import warnings
 
-    # Replace NaNs with 0 (can happen if feature is constant)
-    corr_X = np.nan_to_num(corr_X, 0)
-    corr_Y = np.nan_to_num(corr_Y, 0)
+    # Suppress numpy warning about division by zero in corrcoef when features have zero variance
+    # This is expected for constant features (e.g., LOB bins with no variation)
+    # We handle NaNs properly by replacing them with 0 after computation
+    with warnings.catch_warnings():
+        warnings.filterwarnings('ignore', message='invalid value encountered in divide')
+
+        # Compute correlation matrices
+        corr_X = np.corrcoef(X, rowvar=False)
+        corr_Y = np.corrcoef(Y, rowvar=False)
+
+    # Replace NaNs with 0 (happens when feature is constant/zero variance)
+    corr_X = np.nan_to_num(corr_X, nan=0.0)
+    corr_Y = np.nan_to_num(corr_Y, nan=0.0)
 
     # Frobenius norm
     frobenius = np.linalg.norm(corr_X - corr_Y, ord='fro')

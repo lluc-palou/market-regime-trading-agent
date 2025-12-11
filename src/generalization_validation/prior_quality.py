@@ -105,8 +105,12 @@ class PriorQualityValidator:
         js_div = jensen_shannon_divergence(freq_val, freq_syn)
         logger(f'  JS Divergence (frequencies): {js_div:.6f}', "INFO")
 
-        # Frequency correlation
-        freq_corr = np.corrcoef(freq_val, freq_syn)[0, 1]
+        # Frequency correlation (suppress warning for zero-variance features)
+        import warnings
+        with warnings.catch_warnings():
+            warnings.filterwarnings('ignore', message='invalid value encountered in divide')
+            freq_corr = np.corrcoef(freq_val, freq_syn)[0, 1]
+        freq_corr = 0.0 if np.isnan(freq_corr) else freq_corr
         logger(f'  Frequency correlation: {freq_corr:.6f}', "INFO")
 
         # 2. Transition probabilities

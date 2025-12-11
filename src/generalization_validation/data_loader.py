@@ -28,11 +28,22 @@ def load_validation_samples(
         codebook_indices: (N,) array of VQ-VAE codes
         timestamps: (N,) array of timestamps
     """
+    from pymongo import ASCENDING
+
     client = MongoClient(mongo_uri, serverSelectionTimeoutMS=5000)
     db = client[db_name]
     collection_name = f"split_{split_id}{collection_suffix}"
 
     collection = db[collection_name]
+
+    # Ensure timestamp index exists for efficient sorted queries (O(log N) instead of O(N))
+    # This should already exist from Stage 14/16, but verify to be safe
+    existing_indexes = list(collection.list_indexes())
+    has_timestamp_index = any('timestamp' in idx.get('key', {}) for idx in existing_indexes)
+
+    if not has_timestamp_index:
+        collection.create_index([('timestamp', ASCENDING)], background=False)
+        logger(f'Created timestamp index on {collection_name}', "INFO")
 
     # Query validation samples (both validation folds)
     cursor = collection.find(
@@ -109,6 +120,8 @@ def load_synthetic_samples(
         codebook_indices: (N,) array of VQ-VAE codes
         sequence_ids: (N,) array of sequence identifiers
     """
+    from pymongo import ASCENDING
+
     client = MongoClient(mongo_uri, serverSelectionTimeoutMS=5000)
     db = client[db_name]
     collection_name = f"split_{split_id}_synthetic"
@@ -117,6 +130,18 @@ def load_synthetic_samples(
         raise ValueError(f"Synthetic collection not found: {collection_name}")
 
     collection = db[collection_name]
+
+    # Ensure indexes exist for efficient sorted queries
+    existing_indexes = list(collection.list_indexes())
+    index_names = [idx.get('name', '') for idx in existing_indexes]
+
+    # Create compound index on (sequence_id, position_in_sequence) if not exists
+    if 'sequence_id_1_position_in_sequence_1' not in index_names:
+        collection.create_index(
+            [('sequence_id', ASCENDING), ('position_in_sequence', ASCENDING)],
+            background=False
+        )
+        logger(f'Created index on (sequence_id, position_in_sequence) for {collection_name}', "INFO")
 
     # Query all synthetic samples sorted by sequence_id and position
     cursor = collection.find(

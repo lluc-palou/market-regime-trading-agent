@@ -101,7 +101,10 @@ class VectorQuantizer(nn.Module):
 
         # Learnable codebook
         self.embedding = nn.Embedding(num_embeddings, embedding_dim)
-        self.embedding.weight.data.uniform_(-1/num_embeddings, 1/num_embeddings)
+        # Xavier initialization for better initial diversity and prevents early collapse
+        # Old: uniform(-1/K, 1/K) gave tiny range (e.g., -0.008 to 0.008 for K=128)
+        # Xavier: scales based on both K and D for optimal variance
+        nn.init.xavier_uniform_(self.embedding.weight)
 
         if use_ema:
             # EMA cluster size (N_i): running count of samples assigned to each code

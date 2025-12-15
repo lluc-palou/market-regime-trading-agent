@@ -36,11 +36,12 @@ def run_production_training(
     mlflow_experiment_name: str,
     production_dir: Path,
     mongo_uri: str = "mongodb://127.0.0.1:27017/",
-    use_pymongo: bool = True
+    use_pymongo: bool = True,
+    split_ids_filter: List[int] = None
 ) -> Dict:
     """
     Run complete production training pipeline.
-    
+
     Process:
     1. Discover available splits
     2. For each split:
@@ -50,7 +51,7 @@ def run_production_training(
         - Write to split_X_output collection
     3. Rename collections: split_X_output -> split_X_input
     4. Log summary to MLflow
-    
+
     Args:
         spark: SparkSession instance
         db_name: Database name
@@ -62,6 +63,7 @@ def run_production_training(
         production_dir: Directory for production model artifacts
         mongo_uri: MongoDB connection URI (default: "mongodb://127.0.0.1:27017/")
         use_pymongo: Use PyMongo for 10-50× faster data loading (default: True)
+        split_ids_filter: Optional list of specific split IDs to process (default: None = all splits)
 
     Returns:
         Dictionary with production training results
@@ -72,14 +74,23 @@ def run_production_training(
     
     # Discover available splits
     split_ids = discover_splits(spark, db_name, collection_prefix, collection_suffix)
-    
+
     if not split_ids:
         raise ValueError(
             f"No splits found in database '{db_name}' with pattern "
             f"'{collection_prefix}*{collection_suffix}'"
         )
-    
+
     logger(f'Found {len(split_ids)} splits: {split_ids}', "INFO")
+
+    # Apply split filter if provided
+    if split_ids_filter is not None:
+        original_count = len(split_ids)
+        split_ids = [s for s in split_ids if s in split_ids_filter]
+        logger(f'Filtered to {len(split_ids)} splits (from {original_count}): {split_ids}', "INFO")
+
+        if not split_ids:
+            raise ValueError(f"No splits remaining after applying filter: {split_ids_filter}")
     
     # Log info about each split
     for split_id in split_ids:

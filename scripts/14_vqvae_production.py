@@ -16,10 +16,14 @@ Output: K trained models saved to artifacts/vqvae_models/production/
 
 Usage:
     python scripts/13_vqvae_production_training.py
+    python scripts/13_vqvae_production_training.py --splits even  # Even splits only
+    python scripts/13_vqvae_production_training.py --splits odd   # Odd splits only
+    python scripts/13_vqvae_production_training.py --splits 0,1,2 # Specific splits
 """
 
 import os
 import sys
+import argparse
 from pathlib import Path
 
 # Setup paths
@@ -127,11 +131,53 @@ def load_best_config() -> dict:
 # Main Execution
 # =================================================================================================
 
-def main():
-    """Main execution function."""
+def filter_splits(all_splits: list, split_filter: str = None) -> list:
+    """
+    Filter splits based on filter specification.
+
+    Args:
+        all_splits: List of all available split IDs
+        split_filter: Filter specification ('even', 'odd', or comma-separated list)
+
+    Returns:
+        Filtered list of split IDs
+    """
+    if not split_filter:
+        return all_splits
+
+    split_filter = split_filter.lower().strip()
+
+    if split_filter == 'even':
+        filtered = [s for s in all_splits if s % 2 == 0]
+        logger(f'Filtering even splits: {filtered}', "INFO")
+        return filtered
+    elif split_filter == 'odd':
+        filtered = [s for s in all_splits if s % 2 == 1]
+        logger(f'Filtering odd splits: {filtered}', "INFO")
+        return filtered
+    else:
+        # Comma-separated list of specific splits
+        try:
+            specific_splits = [int(s.strip()) for s in split_filter.split(',')]
+            filtered = [s for s in all_splits if s in specific_splits]
+            logger(f'Filtering specific splits: {filtered}', "INFO")
+            return filtered
+        except ValueError:
+            raise ValueError(f"Invalid split filter: {split_filter}. Use 'even', 'odd', or comma-separated numbers")
+
+def main(split_filter: str = None):
+    """Main execution function.
+
+    Args:
+        split_filter: Optional filter for splits ('even', 'odd', or comma-separated list)
+    """
     logger('=' * 100, "INFO")
     logger('VQ-VAE PRODUCTION TRAINING (STAGE 13)', "INFO")
     logger('=' * 100, "INFO")
+
+    if split_filter:
+        logger(f'Split filter: {split_filter}', "INFO")
+        logger('', "INFO")
     
     # Load best configuration
     logger('', "INFO")
@@ -213,11 +259,16 @@ def main():
         client.close()
         logger(f'Timestamp indexes created/verified on {len(split_collections)} collections', "INFO")
 
+        # Discover and filter splits if needed
+        from src.vqvae_representation.data_loader import discover_splits
+        all_split_ids = discover_splits(spark, DB_NAME, COLLECTION_PREFIX, COLLECTION_SUFFIX)
+        filtered_split_ids = filter_splits(all_split_ids, split_filter) if split_filter else None
+
         # Run production training
         logger('', "INFO")
         logger('Starting production training...', "INFO")
         logger('', "INFO")
-        
+
         results = run_production_training(
             spark=spark,
             db_name=DB_NAME,
@@ -228,7 +279,8 @@ def main():
             mlflow_experiment_name=MLFLOW_EXPERIMENT_NAME,
             production_dir=PRODUCTION_DIR,
             mongo_uri=MONGO_URI,
-            use_pymongo=True  # Use fast PyMongo loader (10-50× speedup)
+            use_pymongo=True,  # Use fast PyMongo loader (10-50× speedup)
+            split_ids_filter=filtered_split_ids
         )
         
         # Summary
@@ -269,23 +321,50 @@ def main():
 
 
 if __name__ == "__main__":
+    # Parse command-line arguments
+    parser = argparse.ArgumentParser(
+        description='VQ-VAE Production Training (Stage 14)',
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+Examples:
+  # Train all splits:
+  python scripts/14_vqvae_production.py
+
+  # Train even splits only (0, 2, 4, ...):
+  python scripts/14_vqvae_production.py --splits even
+
+  # Train odd splits only (1, 3, 5, ...):
+  python scripts/14_vqvae_production.py --splits odd
+
+  # Train specific splits:
+  python scripts/14_vqvae_production.py --splits 0,1,5,10
+        """
+    )
+    parser.add_argument(
+        '--splits',
+        type=str,
+        default=None,
+        help='Filter splits: "even", "odd", or comma-separated list (e.g., "0,1,2")'
+    )
+    args = parser.parse_args()
+
     # Check if running from orchestrator
     is_orchestrated = os.environ.get('PIPELINE_ORCHESTRATED', 'false') == 'true'
-    
+
     import time
     start_time = time.time()
-    
+
     try:
-        main()
-        
+        main(split_filter=args.splits)
+
         total_time = time.time() - start_time
         hours = int(total_time // 3600)
         minutes = int((total_time % 3600) // 60)
         seconds = int(total_time % 60)
-        
+
         logger('', "INFO")
         logger(f'Total execution time: {hours}h {minutes}m {seconds}s', "INFO")
         logger('Stage 13 completed successfully', "INFO")
-        
+
     except Exception:
         sys.exit(1)

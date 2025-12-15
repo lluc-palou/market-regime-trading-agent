@@ -19,7 +19,7 @@ from .config import MODEL_CONFIG
 
 def wasserstein_1d_loss(pred: torch.Tensor, target: torch.Tensor, reduction: str = 'mean') -> torch.Tensor:
     """
-    Compute 1-Wasserstein distance (Earth Mover's Distance) for 1D distributions.
+    Compute normalized 1-Wasserstein distance (Earth Mover's Distance) for 1D distributions.
 
     For discrete distributions over ordered bins, the 1-Wasserstein distance is:
     W1(p, q) = sum_i |CDF_p(i) - CDF_q(i)|
@@ -28,13 +28,16 @@ def wasserstein_1d_loss(pred: torch.Tensor, target: torch.Tensor, reduction: str
     the geometry of the space - moving mass between nearby bins costs less than
     moving it between distant bins.
 
+    The result is normalized by the number of bins to be comparable to MSE loss
+    (both in 0-1 range), ensuring hyperparameters (beta, usage_penalty) remain balanced.
+
     Args:
         pred: Predicted distribution (batch_size, num_bins)
         target: Target distribution (batch_size, num_bins)
         reduction: 'mean', 'sum', or 'none'
 
     Returns:
-        Wasserstein distance loss
+        Wasserstein distance loss (normalized to 0-1 range like MSE)
     """
     # Ensure non-negative values (distributions should be non-negative)
     pred = torch.clamp(pred, min=0.0)
@@ -52,7 +55,10 @@ def wasserstein_1d_loss(pred: torch.Tensor, target: torch.Tensor, reduction: str
     target_cdf = torch.cumsum(target_normalized, dim=1)
 
     # 1-Wasserstein distance = L1 distance between CDFs
-    wasserstein_dist = torch.abs(pred_cdf - target_cdf).sum(dim=1)
+    # CRITICAL: Normalize by number of bins to make comparable to MSE (both in 0-1 range)
+    # Without normalization, loss scales with num_bins (1001), making it ~100-1000x larger than MSE
+    num_bins = pred.shape[1]
+    wasserstein_dist = torch.abs(pred_cdf - target_cdf).sum(dim=1) / num_bins
 
     if reduction == 'mean':
         return wasserstein_dist.mean()

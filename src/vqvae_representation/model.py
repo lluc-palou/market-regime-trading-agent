@@ -6,6 +6,7 @@ Components:
 - Encoder: Convolutional encoder with dropout regularization
 - Decoder: Transposed convolutional decoder with dropout regularization
 - VQVAEModel: Complete model wrapper
+- Loss functions: MSE and Wasserstein distance for distributions
 """
 
 import torch
@@ -14,6 +15,53 @@ import torch.nn.functional as F
 from typing import Tuple, Dict
 
 from .config import MODEL_CONFIG
+
+
+def wasserstein_1d_loss(pred: torch.Tensor, target: torch.Tensor, reduction: str = 'mean') -> torch.Tensor:
+    """
+    Compute 1-Wasserstein distance (Earth Mover's Distance) for 1D distributions.
+
+    For discrete distributions over ordered bins, the 1-Wasserstein distance is:
+    W1(p, q) = sum_i |CDF_p(i) - CDF_q(i)|
+
+    This is superior to MSE for probability distributions because it considers
+    the geometry of the space - moving mass between nearby bins costs less than
+    moving it between distant bins.
+
+    Args:
+        pred: Predicted distribution (batch_size, num_bins)
+        target: Target distribution (batch_size, num_bins)
+        reduction: 'mean', 'sum', or 'none'
+
+    Returns:
+        Wasserstein distance loss
+    """
+    # Ensure non-negative values (distributions should be non-negative)
+    pred = torch.clamp(pred, min=0.0)
+    target = torch.clamp(target, min=0.0)
+
+    # Normalize to ensure they sum to the same value (distribution constraint)
+    # This handles cases where reconstruction doesn't perfectly preserve mass
+    pred_sum = pred.sum(dim=1, keepdim=True).clamp(min=1e-8)
+    target_sum = target.sum(dim=1, keepdim=True).clamp(min=1e-8)
+    pred_normalized = pred / pred_sum
+    target_normalized = target / target_sum
+
+    # Compute CDFs (cumulative distribution functions)
+    pred_cdf = torch.cumsum(pred_normalized, dim=1)
+    target_cdf = torch.cumsum(target_normalized, dim=1)
+
+    # 1-Wasserstein distance = L1 distance between CDFs
+    wasserstein_dist = torch.abs(pred_cdf - target_cdf).sum(dim=1)
+
+    if reduction == 'mean':
+        return wasserstein_dist.mean()
+    elif reduction == 'sum':
+        return wasserstein_dist.sum()
+    elif reduction == 'none':
+        return wasserstein_dist
+    else:
+        raise ValueError(f"Invalid reduction mode: {reduction}. Use 'mean', 'sum', or 'none'.")
 
 
 class VectorQuantizer(nn.Module):
@@ -399,6 +447,7 @@ class VQVAEModel(nn.Module):
                 - dropout: Dropout probability
                 - use_ema: Use EMA updates for codebook (optional, default: False)
                 - ema_decay: EMA decay rate (optional, default: 0.99)
+                - recon_loss_type: Reconstruction loss type ('mse' or 'wasserstein', default: 'wasserstein')
         """
         super().__init__()
 
@@ -411,6 +460,11 @@ class VQVAEModel(nn.Module):
         dropout = config['dropout']
         use_ema = config.get('use_ema', False)
         ema_decay = config.get('ema_decay', 0.99)
+        self.recon_loss_type = config.get('recon_loss_type', 'wasserstein')
+
+        # Validate loss type
+        if self.recon_loss_type not in ['mse', 'wasserstein']:
+            raise ValueError(f"Invalid recon_loss_type: {self.recon_loss_type}. Use 'mse' or 'wasserstein'.")
 
         # Initialize components
         self.encoder = Encoder(B, D, n_conv_layers, dropout)
@@ -430,15 +484,18 @@ class VQVAEModel(nn.Module):
         """
         # Encode
         z_e = self.encoder(x)
-        
+
         # Quantize
         z_q, commitment_loss, codebook_loss, encoding_indices = self.vq(z_e)
-        
+
         # Decode
         x_recon = self.decoder(z_q)
-        
-        # Compute reconstruction loss
-        recon_loss = F.mse_loss(x_recon, x)
+
+        # Compute reconstruction loss based on loss type
+        if self.recon_loss_type == 'wasserstein':
+            recon_loss = wasserstein_1d_loss(x_recon, x)
+        else:  # mse
+            recon_loss = F.mse_loss(x_recon, x)
         
         # Compute codebook usage
         codebook_usage = self.vq.get_codebook_usage(encoding_indices)

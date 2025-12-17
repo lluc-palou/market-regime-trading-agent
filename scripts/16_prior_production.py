@@ -1,29 +1,24 @@
 """
-VQ-VAE Production Training Script (Stage 13)
+Prior Production Training Script (Stage 16)
 
-Trains final VQ-VAE models using the best hyperparameter configuration from Stage 12.
-Generates latent representations for all samples in each split.
+Trains final Prior models using the best hyperparameter configuration from Stage 15.
+Saves production-ready Prior models for all splits.
 
-This is Stage 13 in the pipeline - follows hyperparameter search (Stage 12).
+This is Stage 16 in the pipeline - follows Prior hyperparameter search (Stage 15).
 
-Input: Materialized split collections (split_0_input, split_1_input, ...)
-       in database 'tfg' with standardized LOB vectors
-       Best configuration from Stage 12 artifacts
+Input: split_X_input collections with VQ-VAE latent codes (from Stage 14)
+       Best Prior configuration from Stage 15 artifacts
+       VQ-VAE codebook size from VQ-VAE best_config.yaml
 
-Output: K trained models saved to artifacts/vqvae_models/production/
-        K output collections (split_0_output, split_1_output, ...) with latent codes
-        Collections renamed to split_X_input for next stage
+Output: Trained Prior models saved to artifacts/prior_models/production/split_X/
+        Ready for synthetic generation (Stage 17)
 
 Usage:
-    python scripts/13_vqvae_production_training.py
-    python scripts/13_vqvae_production_training.py --splits even  # Even splits only
-    python scripts/13_vqvae_production_training.py --splits odd   # Odd splits only
-    python scripts/13_vqvae_production_training.py --splits 0,1,2 # Specific splits
+    python scripts/16_prior_production.py
 """
 
 import os
 import sys
-import argparse
 from pathlib import Path
 
 # Setup paths
@@ -37,7 +32,7 @@ sys.path.insert(0, REPO_ROOT)
 if sys.platform == 'win32':
     os.environ['PYTHONIOENCODING'] = 'utf-8:replace'
     os.environ['PYTHONUTF8'] = '1'
-    
+
     if hasattr(sys.stdout, 'reconfigure'):
         try:
             sys.stdout.reconfigure(encoding='utf-8', errors='replace')
@@ -48,9 +43,9 @@ if sys.platform == 'win32':
 # Patch MLflow emoji issue
 try:
     from mlflow.tracking._tracking_service import client as mlflow_client
-    
+
     _original_log_url = mlflow_client.TrackingServiceClient._log_url
-    
+
     def _patched_log_url(self, run_id):
         try:
             run = self.get_run(run_id)
@@ -60,7 +55,7 @@ try:
             sys.stdout.flush()
         except:
             pass
-    
+
     mlflow_client.TrackingServiceClient._log_url = _patched_log_url
 except:
     pass
@@ -74,10 +69,8 @@ from datetime import datetime
 
 from src.utils.logging import logger
 from src.utils.spark import create_spark_session
-from src.vqvae_representation import (
-    run_production_training,
-    TRAINING_CONFIG
-)
+from src.prior import run_production_training
+from src.prior.prior_config import PRIOR_TRAINING_CONFIG
 
 # =================================================================================================
 # Configuration
@@ -85,132 +78,122 @@ from src.vqvae_representation import (
 
 DB_NAME = "raw"
 COLLECTION_PREFIX = "split_"
-COLLECTION_SUFFIX = "_input"  # Read from feature standardization output (Stage 11)
+COLLECTION_SUFFIX = "_input"  # Read from VQ-VAE production output (Stage 14)
 
 MLFLOW_TRACKING_URI = "http://127.0.0.1:5000"
-MLFLOW_EXPERIMENT_NAME = "VQ-VAE_Production_Training"
+MLFLOW_EXPERIMENT_NAME = "Prior_Production_Training"
 
 MONGO_URI = "mongodb://127.0.0.1:27017/"
 JAR_FILES_PATH = "file:///C:/spark/spark-3.4.1-bin-hadoop3/jars/"
 DRIVER_MEMORY = "8g"
 
 # Artifact directories
-ARTIFACT_BASE_DIR = Path(REPO_ROOT) / "artifacts" / "vqvae_models"
-HYPERPARAMETER_SEARCH_DIR = ARTIFACT_BASE_DIR / "hyperparameter_search"
-PRODUCTION_DIR = ARTIFACT_BASE_DIR / "production"
+ARTIFACT_BASE_DIR = Path(REPO_ROOT) / "artifacts"
+PRIOR_ARTIFACT_DIR = ARTIFACT_BASE_DIR / "prior_models"
+VQVAE_ARTIFACT_DIR = ARTIFACT_BASE_DIR / "vqvae_models"
+
+HYPERPARAMETER_SEARCH_DIR = PRIOR_ARTIFACT_DIR / "hyperparameter_search"
+PRODUCTION_DIR = PRIOR_ARTIFACT_DIR / "production"
+
+VQVAE_CONFIG_PATH = VQVAE_ARTIFACT_DIR / "hyperparameter_search" / "best_config.yaml"
 
 # =================================================================================================
 # Helper Functions
 # =================================================================================================
 
-def load_best_config() -> dict:
+def load_best_prior_config() -> dict:
     """
-    Load best hyperparameter configuration from Stage 12.
+    Load best Prior hyperparameter configuration from Stage 15.
 
     Returns:
         Best configuration dictionary
     """
-    config_path = HYPERPARAMETER_SEARCH_DIR / "best_config.yaml"
+    config_path = HYPERPARAMETER_SEARCH_DIR / "best_prior_config.json"
 
     if not config_path.exists():
         raise FileNotFoundError(
-            f"Best config not found at {config_path}. "
-            f"Please run Stage 12 (hyperparameter search) first."
+            f"Best Prior config not found at {config_path}. "
+            f"Please run Stage 15 (Prior hyperparameter search) first."
         )
 
     with open(config_path, 'r') as f:
-        config_data = yaml.safe_load(f)
+        config_data = json.load(f)
 
-    logger(f'Loaded best config from: {config_path}', "INFO")
-    logger(f'  Average validation loss: {config_data["metrics"]["avg_val_loss"]:.4f}', "INFO")
-    logger(f'  Configuration: {config_data["best_config"]}', "INFO")
+    logger(f'Loaded best Prior config from: {config_path}', "INFO")
+    logger(f'  Average validation loss: {config_data["avg_val_loss"]:.4f}', "INFO")
+    logger(f'  Configuration: {config_data["config"]}', "INFO")
 
-    return config_data["best_config"]
+    return config_data["config"]
+
+
+def load_vqvae_codebook_size() -> int:
+    """
+    Load VQ-VAE codebook size from Stage 13 artifacts.
+
+    Returns:
+        Codebook size (K)
+    """
+    if not VQVAE_CONFIG_PATH.exists():
+        raise FileNotFoundError(
+            f"VQ-VAE config not found at {VQVAE_CONFIG_PATH}. "
+            f"Please run Stages 13-14 (VQ-VAE training) first."
+        )
+
+    with open(VQVAE_CONFIG_PATH, 'r') as f:
+        vqvae_config = yaml.safe_load(f)
+
+    codebook_size = vqvae_config['best_config']['K']
+    logger(f'VQ-VAE codebook size (K): {codebook_size}', "INFO")
+
+    return codebook_size
 
 # =================================================================================================
 # Main Execution
 # =================================================================================================
 
-def filter_splits(all_splits: list, split_filter: str = None) -> list:
-    """
-    Filter splits based on filter specification.
-
-    Args:
-        all_splits: List of all available split IDs
-        split_filter: Filter specification ('even', 'odd', or comma-separated list)
-
-    Returns:
-        Filtered list of split IDs
-    """
-    if not split_filter:
-        return all_splits
-
-    split_filter = split_filter.lower().strip()
-
-    if split_filter == 'even':
-        filtered = [s for s in all_splits if s % 2 == 0]
-        logger(f'Filtering even splits: {filtered}', "INFO")
-        return filtered
-    elif split_filter == 'odd':
-        filtered = [s for s in all_splits if s % 2 == 1]
-        logger(f'Filtering odd splits: {filtered}', "INFO")
-        return filtered
-    else:
-        # Comma-separated list of specific splits
-        try:
-            specific_splits = [int(s.strip()) for s in split_filter.split(',')]
-            filtered = [s for s in all_splits if s in specific_splits]
-            logger(f'Filtering specific splits: {filtered}', "INFO")
-            return filtered
-        except ValueError:
-            raise ValueError(f"Invalid split filter: {split_filter}. Use 'even', 'odd', or comma-separated numbers")
-
-def main(split_filter: str = None):
-    """Main execution function.
-
-    Args:
-        split_filter: Optional filter for splits ('even', 'odd', or comma-separated list)
-    """
+def main():
+    """Main execution function."""
     logger('=' * 100, "INFO")
-    logger('VQ-VAE PRODUCTION TRAINING (STAGE 13)', "INFO")
+    logger('PRIOR PRODUCTION TRAINING (STAGE 16)', "INFO")
     logger('=' * 100, "INFO")
 
-    if split_filter:
-        logger(f'Split filter: {split_filter}', "INFO")
-        logger('', "INFO")
-    
-    # Load best configuration
+    # Load best Prior configuration
     logger('', "INFO")
-    logger('Loading best hyperparameter configuration from Stage 12...', "INFO")
-    best_config = load_best_config()
-    
+    logger('Loading best Prior hyperparameter configuration from Stage 15...', "INFO")
+    best_config = load_best_prior_config()
+
+    # Load VQ-VAE codebook size
+    logger('', "INFO")
+    logger('Loading VQ-VAE configuration...', "INFO")
+    codebook_size = load_vqvae_codebook_size()
+
     # Setup device
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     logger('', "INFO")
     logger(f'Device: {device}', "INFO")
-    
+
     if device.type == 'cuda':
         logger(f'CUDA Device: {torch.cuda.get_device_name(0)}', "INFO")
         logger(f'CUDA Memory: {torch.cuda.get_device_properties(0).total_memory / 1e9:.2f} GB', "INFO")
-    
+
     # Setup MLflow
     logger('', "INFO")
     mlflow.set_tracking_uri(MLFLOW_TRACKING_URI)
     mlflow.set_experiment(MLFLOW_EXPERIMENT_NAME)
     logger(f'MLflow tracking URI: {MLFLOW_TRACKING_URI}', "INFO")
     logger(f'MLflow experiment: {MLFLOW_EXPERIMENT_NAME}', "INFO")
-    
+
     # Create Spark session
     logger('', "INFO")
     logger('Initializing Spark...', "INFO")
     spark = create_spark_session(
-        app_name="VQVAEProductionTraining",
+        app_name="PriorProductionTraining",
         db_name=DB_NAME,
         mongo_uri=MONGO_URI,
         driver_memory=DRIVER_MEMORY,
         jar_files_path=JAR_FILES_PATH
     )
-    
+
     try:
         # Display configuration
         logger('', "INFO")
@@ -218,15 +201,16 @@ def main(split_filter: str = None):
         logger(f'  Database: {DB_NAME}', "INFO")
         logger(f'  Collection pattern: {COLLECTION_PREFIX}*{COLLECTION_SUFFIX}', "INFO")
         logger(f'  Production model directory: {PRODUCTION_DIR}', "INFO")
-        
+        logger(f'  VQ-VAE codebook size: {codebook_size}', "INFO")
+
         logger('', "INFO")
-        logger('Best hyperparameter configuration:', "INFO")
+        logger('Best Prior hyperparameter configuration:', "INFO")
         for key, value in best_config.items():
             logger(f'  {key}: {value}', "INFO")
-        
+
         logger('', "INFO")
         logger('Training configuration:', "INFO")
-        for key, value in TRAINING_CONFIG.items():
+        for key, value in PRIOR_TRAINING_CONFIG.items():
             logger(f'  {key}: {value}', "INFO")
 
         # CRITICAL: Create timestamp indexes on all split collections for efficient hourly queries
@@ -259,11 +243,6 @@ def main(split_filter: str = None):
         client.close()
         logger(f'Timestamp indexes created/verified on {len(split_collections)} collections', "INFO")
 
-        # Discover and filter splits if needed
-        from src.vqvae_representation.data_loader import discover_splits
-        all_split_ids = discover_splits(spark, DB_NAME, COLLECTION_PREFIX, COLLECTION_SUFFIX)
-        filtered_split_ids = filter_splits(all_split_ids, split_filter) if split_filter else None
-
         # Run production training
         logger('', "INFO")
         logger('Starting production training...', "INFO")
@@ -276,43 +255,40 @@ def main(split_filter: str = None):
             collection_suffix=COLLECTION_SUFFIX,
             device=device,
             best_config=best_config,
+            codebook_size=codebook_size,
             mlflow_experiment_name=MLFLOW_EXPERIMENT_NAME,
-            production_dir=PRODUCTION_DIR,
-            mongo_uri=MONGO_URI,
-            use_pymongo=True,  # Use fast PyMongo loader (10-50× speedup)
-            split_ids_filter=filtered_split_ids
+            production_dir=PRODUCTION_DIR
         )
-        
+
         # Summary
         logger('', "INFO")
         logger('=' * 100, "INFO")
         logger('PRODUCTION TRAINING COMPLETE', "INFO")
         logger('=' * 100, "INFO")
         logger(f'Models trained: {results["num_splits"]}', "INFO")
-        logger(f'Total samples processed: {results["total_samples"]:,}', "INFO")
         logger(f'Average validation loss: {results["avg_val_loss"]:.4f}', "INFO")
+        logger(f'Average epochs trained: {results["avg_epochs_trained"]:.1f}', "INFO")
         logger(f'Models saved to: {PRODUCTION_DIR}', "INFO")
-        logger(f'Latent collections: {COLLECTION_PREFIX}*_input (renamed)', "INFO")
         logger(f'MLflow tracking: {MLFLOW_TRACKING_URI}', "INFO")
-        
+
         logger('', "INFO")
         logger('Next steps:', "INFO")
         logger('  1. Review production models in MLflow UI', "INFO")
-        logger('  2. Use latent representations in downstream models (Stage 14+)', "INFO")
-        logger('  3. Each split has its own trained model and latent codes', "INFO")
-        
+        logger('  2. Run Stage 17 (Synthetic LOB generation) using these models', "INFO")
+        logger('  3. Each split has its own trained Prior model ready for generation', "INFO")
+
     except Exception as e:
         logger(f'ERROR: {str(e)}', "ERROR")
         import traceback
         traceback.print_exc()
-        
+
         if mlflow.active_run():
             mlflow.log_param("status", "failed")
             mlflow.log_param("error_message", str(e))
             mlflow.end_run(status="FAILED")
-        
+
         raise
-    
+
     finally:
         # Only stop Spark if not orchestrated
         if not is_orchestrated:
@@ -321,33 +297,6 @@ def main(split_filter: str = None):
 
 
 if __name__ == "__main__":
-    # Parse command-line arguments
-    parser = argparse.ArgumentParser(
-        description='VQ-VAE Production Training (Stage 14)',
-        formatter_class=argparse.RawDescriptionHelpFormatter,
-        epilog="""
-Examples:
-  # Train all splits:
-  python scripts/14_vqvae_production.py
-
-  # Train even splits only (0, 2, 4, ...):
-  python scripts/14_vqvae_production.py --splits even
-
-  # Train odd splits only (1, 3, 5, ...):
-  python scripts/14_vqvae_production.py --splits odd
-
-  # Train specific splits:
-  python scripts/14_vqvae_production.py --splits 0,1,5,10
-        """
-    )
-    parser.add_argument(
-        '--splits',
-        type=str,
-        default=None,
-        help='Filter splits: "even", "odd", or comma-separated list (e.g., "0,1,2")'
-    )
-    args = parser.parse_args()
-
     # Check if running from orchestrator
     is_orchestrated = os.environ.get('PIPELINE_ORCHESTRATED', 'false') == 'true'
 
@@ -355,7 +304,7 @@ Examples:
     start_time = time.time()
 
     try:
-        main(split_filter=args.splits)
+        main()
 
         total_time = time.time() - start_time
         hours = int(total_time // 3600)
@@ -364,7 +313,7 @@ Examples:
 
         logger('', "INFO")
         logger(f'Total execution time: {hours}h {minutes}m {seconds}s', "INFO")
-        logger('Stage 13 completed successfully', "INFO")
+        logger('Stage 16 completed successfully', "INFO")
 
     except Exception:
         sys.exit(1)

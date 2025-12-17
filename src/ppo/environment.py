@@ -1,7 +1,7 @@
 """Episode management and data loading."""
 
 import torch
-from pymongo import MongoClient
+from pymongo import MongoClient, ASCENDING
 from datetime import datetime, timedelta
 from typing import List, Dict, Optional, Iterator
 from collections import defaultdict
@@ -28,8 +28,9 @@ class EpisodeLoader:
     
     def __init__(self, config):
         self.config = config
-        self.client = MongoClient(config.mongodb_uri)
+        self.client = MongoClient(config.mongodb_uri, serverSelectionTimeoutMS=5000)
         self.db = self.client[config.database_name]
+        self._ensure_indexes()
     
     def load_episodes(
         self,
@@ -46,7 +47,7 @@ class EpisodeLoader:
         Returns:
             List of Episode objects
         """
-        collection = self.db[f'split_{split_id}']
+        collection = self.db[f'split_{split_id}_input']  # Match VQVAE output naming convention
         
         # Query samples with role filter, sorted by timestamp
         cursor = collection.find(
@@ -75,7 +76,7 @@ class EpisodeLoader:
             
             # Prepare sample
             sample = {
-                'codebook': doc['codebook'],
+                'codebook': doc['codebook'],  # VQVAE writes 'codebook' field
                 'features': torch.tensor(doc['features'], dtype=torch.float32),
                 'timestamp': timestamp.timestamp() if isinstance(timestamp, datetime) else timestamp,
                 'target': doc['target'],
@@ -115,6 +116,26 @@ class EpisodeLoader:
         
         return episodes
     
+    def _ensure_indexes(self):
+        """
+        Ensure timestamp indexes exist on all split collections.
+
+        Follows the pattern from other pipeline stages (03-14) for efficient
+        timestamp-based queries.
+        """
+        for split_id in self.config.split_ids:
+            collection_name = f'split_{split_id}_input'
+            if collection_name in self.db.list_collection_names():
+                collection = self.db[collection_name]
+
+                # Check if timestamp index exists
+                existing_indexes = list(collection.list_indexes())
+                has_timestamp_index = any('timestamp' in idx.get('key', {}) for idx in existing_indexes)
+
+                if not has_timestamp_index:
+                    # Create index for efficient timestamp-based queries
+                    collection.create_index([("timestamp", ASCENDING)], background=False)
+
     def close(self):
         """Close MongoDB connection."""
         self.client.close()

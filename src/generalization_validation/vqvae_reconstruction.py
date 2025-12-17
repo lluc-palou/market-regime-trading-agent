@@ -1,0 +1,138 @@
+"""Experiment 1: VQ-VAE Reconstruction Generalization."""
+
+import torch
+import numpy as np
+from pathlib import Path
+from typing import Dict
+from src.utils.logging import logger
+from .data_loader import load_validation_samples, load_vqvae_model, decode_codes_batch
+from .metrics import compute_ks_tests, compute_correlation_distance
+from .visualization import plot_umap_comparison, plot_reconstruction_error
+
+
+class VQVAEReconstructionValidator:
+    """Validates VQ-VAE reconstruction quality on unseen validation data."""
+
+    def __init__(
+        self,
+        mongo_uri: str,
+        db_name: str,
+        vqvae_model_dir: Path,
+        output_dir: Path,
+        device: torch.device
+    ):
+        self.mongo_uri = mongo_uri
+        self.db_name = db_name
+        self.vqvae_model_dir = vqvae_model_dir
+        self.output_dir = output_dir
+        self.device = device
+
+        # Create output directory
+        (self.output_dir / "experiment1_vqvae_reconstruction").mkdir(parents=True, exist_ok=True)
+
+    def validate_split(self, split_id: int) -> Dict:
+        """
+        Run VQ-VAE reconstruction validation for one split.
+
+        Args:
+            split_id: Split identifier
+
+        Returns:
+            Dictionary with validation metrics
+        """
+        logger('', "INFO")
+        logger(f'Validating VQ-VAE reconstruction for split {split_id}...', "INFO")
+
+        # Load validation data
+        original_vectors, codebook_indices, _ = load_validation_samples(
+            self.mongo_uri, self.db_name, split_id
+        )
+
+        n_samples = len(original_vectors)
+        logger(f'  Validation samples: {n_samples:,}', "INFO")
+
+        # Load VQ-VAE model
+        model_path = self.vqvae_model_dir / f"split_{split_id}_model.pth"
+        if not model_path.exists():
+            raise FileNotFoundError(f"VQ-VAE model not found: {model_path}")
+
+        vqvae_model = load_vqvae_model(model_path, self.device)
+
+        # Decode validation codes to get reconstructions
+        logger('  Decoding validation codes...', "INFO")
+        reconstructed_vectors = decode_codes_batch(
+            vqvae_model, codebook_indices, self.device, batch_size=512
+        )
+
+        # Compute reconstruction metrics
+        logger('  Computing reconstruction metrics...', "INFO")
+
+        # Overall MSE
+        mse_overall = np.mean((original_vectors - reconstructed_vectors) ** 2)
+
+        # Per-feature MSE
+        mse_per_feature = np.mean((original_vectors - reconstructed_vectors) ** 2, axis=0)
+
+        # MAE
+        mae_overall = np.mean(np.abs(original_vectors - reconstructed_vectors))
+
+        # Find worst features
+        worst_features = np.argsort(mse_per_feature)[-10:][::-1]
+
+        logger(f'  Overall MSE: {mse_overall:.6f}', "INFO")
+        logger(f'  Overall MAE: {mae_overall:.6f}', "INFO")
+        logger(f'  Worst feature MSE: {mse_per_feature[worst_features[0]]:.6f} (feature {worst_features[0]})', "INFO")
+
+        # KS tests
+        logger('  Running KS tests...', "INFO")
+        ks_results = compute_ks_tests(original_vectors, reconstructed_vectors)
+        logger(f'  Mean KS statistic: {ks_results["mean_ks_statistic"]:.6f}', "INFO")
+        logger(f'  Rejection rate: {ks_results["rejection_rate"]:.4f}', "INFO")
+
+        # Correlation distance
+        logger('  Computing correlation distance...', "INFO")
+        corr_results = compute_correlation_distance(original_vectors, reconstructed_vectors)
+        logger(f'  Correlation Frobenius norm: {corr_results["frobenius_norm"]:.6f}', "INFO")
+
+        # Visualizations
+        split_output_dir = self.output_dir / "experiment1_vqvae_reconstruction" / f"split_{split_id}"
+        split_output_dir.mkdir(parents=True, exist_ok=True)
+
+        # UMAP visualization
+        logger('  Generating UMAP visualization...', "INFO")
+        plot_umap_comparison(
+            original_vectors, reconstructed_vectors,
+            title=f'VQ-VAE Reconstruction - Split {split_id}',
+            save_path=split_output_dir / f"umap_reconstruction_split_{split_id}.png",
+            method='umap'
+        )
+
+        # Per-feature reconstruction error plot
+        logger('  Plotting reconstruction errors...', "INFO")
+        plot_reconstruction_error(
+            mse_per_feature,
+            save_path=split_output_dir / f"reconstruction_error_split_{split_id}.png"
+        )
+
+        # Compile results
+        results = {
+            'split_id': split_id,
+            'n_samples': n_samples,
+            'mse_overall': float(mse_overall),
+            'mae_overall': float(mae_overall),
+            'mse_per_feature_mean': float(np.mean(mse_per_feature)),
+            'mse_per_feature_std': float(np.std(mse_per_feature)),
+            'mse_per_feature_max': float(np.max(mse_per_feature)),
+            'worst_features': worst_features.tolist(),
+            'worst_feature_mses': mse_per_feature[worst_features].tolist(),
+            'ks_mean_statistic': float(ks_results['mean_ks_statistic']),
+            'ks_max_statistic': float(ks_results['max_ks_statistic']),
+            'ks_rejection_rate': float(ks_results['rejection_rate']),
+            'corr_frobenius': float(corr_results['frobenius_norm']),
+            'corr_mean_abs_diff': float(corr_results['mean_absolute_diff']),
+            'corr_max_abs_diff': float(corr_results['max_absolute_diff'])
+        }
+
+        logger(f'  ✓ Split {split_id} validation complete', "INFO")
+
+        return results

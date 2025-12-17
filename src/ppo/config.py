@@ -21,7 +21,7 @@ class VQVAEConfig:
 class ModelConfig:
     """Transformer architecture configuration."""
     vocab_size: int = 128                # VQ-VAE codebook size (K)
-    n_features: int = 50                 # Number of hand-crafted features
+    n_features: int = 18                 # Number of hand-crafted features
     d_codebook: int = 64                 # Codebook embedding dimension
     d_features: int = 64                 # Feature projection dimension
     d_model: int = 128                   # Transformer model dimension
@@ -112,7 +112,7 @@ class TrainingConfig:
 class DataConfig:
     """Data loading configuration."""
     mongodb_uri: str = "mongodb://localhost:27017/"
-    database_name: str = "lob_database"
+    database_name: str = "raw"  # Match pipeline convention
     split_ids: List[int] = field(default_factory=lambda: list(range(4)))  # Splits to train
     role_train: str = "train"            # Training role filter
     role_val: str = "val"                # Validation role filter
@@ -179,7 +179,7 @@ def get_hyperparameter_grid() -> List[ModelConfig]:
     
     # Config 1: Smallest (0.51x baseline) - 91k params
     configs.append(ModelConfig(
-        vocab_size=128, n_features=50,
+        vocab_size=128, n_features=18,
         d_codebook=32, d_features=32,
         d_model=64, n_heads=2, n_layers=1,
         dropout=0.1, ffn_expansion=4, window_size=50, horizon=10
@@ -187,87 +187,87 @@ def get_hyperparameter_grid() -> List[ModelConfig]:
     
     # Config 2: Very small (0.61x baseline) - 109k params
     configs.append(ModelConfig(
-        vocab_size=128, n_features=50,
+        vocab_size=128, n_features=18,
         d_codebook=40, d_features=40,
         d_model=80, n_heads=2, n_layers=1,
         dropout=0.1, ffn_expansion=4, window_size=50, horizon=10
     ))
-    
+
     # Config 3: Small (0.81x baseline) - 144k params
     configs.append(ModelConfig(
-        vocab_size=128, n_features=50,
+        vocab_size=128, n_features=18,
         d_codebook=48, d_features=48,
         d_model=96, n_heads=4, n_layers=1,
         dropout=0.15, ffn_expansion=4, window_size=50, horizon=10
     ))
-    
+
     # Config 4: Small-medium (0.95x baseline) - 169k params
     configs.append(ModelConfig(
-        vocab_size=128, n_features=50,
+        vocab_size=128, n_features=18,
         d_codebook=56, d_features=56,
         d_model=112, n_heads=4, n_layers=1,
         dropout=0.15, ffn_expansion=4, window_size=50, horizon=10
     ))
-    
+
     # Config 5: Medium (1.11x baseline) - 196k params
     configs.append(ModelConfig(
-        vocab_size=128, n_features=50,
+        vocab_size=128, n_features=18,
         d_codebook=48, d_features=48,
         d_model=96, n_heads=4, n_layers=2,
         dropout=0.15, ffn_expansion=4, window_size=50, horizon=10
     ))
-    
+
     # Config 6: Medium (1.40x baseline) - 248k params
     configs.append(ModelConfig(
-        vocab_size=128, n_features=50,
+        vocab_size=128, n_features=18,
         d_codebook=56, d_features=56,
         d_model=112, n_heads=4, n_layers=2,
         dropout=0.2, ffn_expansion=4, window_size=50, horizon=10
     ))
-    
+
     # Config 7: Medium (1.44x baseline) - 254k params - compact FFN
     configs.append(ModelConfig(
-        vocab_size=128, n_features=50,
+        vocab_size=128, n_features=18,
         d_codebook=64, d_features=64,
         d_model=128, n_heads=8, n_layers=2,
         dropout=0.25, ffn_expansion=3, window_size=50, horizon=10
     ))
-    
+
     # Config 8: Medium-large (1.57x baseline) - 277k params
     configs.append(ModelConfig(
-        vocab_size=128, n_features=50,
+        vocab_size=128, n_features=18,
         d_codebook=60, d_features=60,
         d_model=120, n_heads=4, n_layers=2,
         dropout=0.2, ffn_expansion=4, window_size=50, horizon=10
     ))
-    
+
     # Config 9: Medium-large (1.61x baseline) - 285k params - compact FFN
     configs.append(ModelConfig(
-        vocab_size=128, n_features=50,
+        vocab_size=128, n_features=18,
         d_codebook=72, d_features=72,
         d_model=144, n_heads=4, n_layers=2,
         dropout=0.2, ffn_expansion=3, window_size=50, horizon=10
     ))
-    
+
     # Config 10: Large single-layer (1.65x baseline) - 292k params
     configs.append(ModelConfig(
-        vocab_size=128, n_features=50,
+        vocab_size=128, n_features=18,
         d_codebook=80, d_features=80,
         d_model=160, n_heads=4, n_layers=1,
         dropout=0.2, ffn_expansion=4, window_size=50, horizon=10
     ))
-    
+
     # Config 11: Large (1.74x baseline) - 307k params
     configs.append(ModelConfig(
-        vocab_size=128, n_features=50,
+        vocab_size=128, n_features=18,
         d_codebook=64, d_features=64,
         d_model=128, n_heads=4, n_layers=2,
         dropout=0.2, ffn_expansion=4, window_size=50, horizon=10
     ))
-    
+
     # Config 12: Largest (1.93x baseline) - 341k params
     configs.append(ModelConfig(
-        vocab_size=128, n_features=50,
+        vocab_size=128, n_features=18,
         d_codebook=68, d_features=68,
         d_model=136, n_heads=4, n_layers=2,
         dropout=0.2, ffn_expansion=4, window_size=50, horizon=10

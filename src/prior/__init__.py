@@ -20,6 +20,7 @@ from .prior_data_loader import (
     get_sequence_dataset_size
 )
 from .prior_hyperparameter_search import run_prior_hyperparameter_search
+from .prior_production_trainer import run_production_training
 from .synthetic_generator import SyntheticLOBGenerator, load_models_for_generation
 from .prior_config import (
     PRIOR_HYPERPARAM_GRID,
@@ -44,6 +45,9 @@ __all__ = [
     
     # Hyperparameter search
     'run_prior_hyperparameter_search',
+
+    # Production training
+    'run_production_training',
 
     # Synthetic generation (production)
     'SyntheticLOBGenerator',

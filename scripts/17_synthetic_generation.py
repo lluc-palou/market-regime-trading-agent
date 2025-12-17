@@ -1,13 +1,15 @@
 """
-Synthetic LOB Generation Script (Stage 15)
+Synthetic LOB Generation Script (Stage 17)
 
 Generates synthetic LOB sequences using trained prior and VQ-VAE models.
 
-Input: split_X_prior.pth + split_X_vqvae_model.pth
-Output: split_X_synthetic collections
+This is Stage 17 in the pipeline - follows Prior production training (Stage 16).
+
+Input: Production Prior models (Stage 16) + Production VQ-VAE models (Stage 14)
+Output: split_X_synthetic collections with synthetic LOB data
 
 Usage:
-    python scripts/15_synthetic_lob_generation.py
+    python scripts/17_synthetic_generation.py
 """
 
 import os
@@ -75,7 +77,7 @@ VQVAE_MODEL_DIR = Path(REPO_ROOT) / "artifacts" / "vqvae_models" / "production"
 
 def main():
     logger('=' * 100, "INFO")
-    logger('SYNTHETIC LOB GENERATION (STAGE 15)', "INFO")
+    logger('SYNTHETIC LOB GENERATION (STAGE 17)', "INFO")
     logger('=' * 100, "INFO")
     
     # Setup device
@@ -130,7 +132,8 @@ def main():
                 logger('=' * 100, "INFO")
                 
                 # Model paths
-                prior_model_path = PRIOR_MODEL_DIR / f"split_{split_id}_prior.pth"
+                # Prior models are saved in split-specific directories: production/split_X/prior_model.pth
+                prior_model_path = PRIOR_MODEL_DIR / f"split_{split_id}" / "prior_model.pth"
                 vqvae_model_path = VQVAE_MODEL_DIR / f"split_{split_id}_model.pth"
                 
                 if not prior_model_path.exists():
@@ -229,7 +232,7 @@ if __name__ == "__main__":
         
         logger('', "INFO")
         logger(f'Total time: {hours}h {minutes}m', "INFO")
-        logger('Stage 15 completed successfully', "INFO")
+        logger('Stage 17 (Synthetic Generation) completed successfully', "INFO")
         
     except Exception:
         sys.exit(1)

@@ -6,6 +6,7 @@ Components:
 - Encoder: Convolutional encoder with dropout regularization
 - Decoder: Transposed convolutional decoder with dropout regularization
 - VQVAEModel: Complete model wrapper
+- Loss functions: MSE and Wasserstein distance for distributions
 """
 
 import torch
@@ -16,44 +17,117 @@ from typing import Tuple, Dict
 from .config import MODEL_CONFIG
 
 
+def wasserstein_1d_loss(pred: torch.Tensor, target: torch.Tensor, reduction: str = 'mean') -> torch.Tensor:
+    """
+    Compute normalized 1-Wasserstein distance (Earth Mover's Distance) for 1D distributions.
+
+    For discrete distributions over ordered bins, the 1-Wasserstein distance is:
+    W1(p, q) = sum_i |CDF_p(i) - CDF_q(i)|
+
+    This is superior to MSE for probability distributions because it considers
+    the geometry of the space - moving mass between nearby bins costs less than
+    moving it between distant bins.
+
+    The result is normalized by the number of bins to be comparable to MSE loss
+    (both in 0-1 range), ensuring hyperparameters (beta, usage_penalty) remain balanced.
+
+    Args:
+        pred: Predicted distribution (batch_size, num_bins)
+        target: Target distribution (batch_size, num_bins)
+        reduction: 'mean', 'sum', or 'none'
+
+    Returns:
+        Wasserstein distance loss (normalized to 0-1 range like MSE)
+    """
+    # Ensure non-negative values (distributions should be non-negative)
+    pred = torch.clamp(pred, min=0.0)
+    target = torch.clamp(target, min=0.0)
+
+    # Normalize to ensure they sum to the same value (distribution constraint)
+    # This handles cases where reconstruction doesn't perfectly preserve mass
+    pred_sum = pred.sum(dim=1, keepdim=True).clamp(min=1e-8)
+    target_sum = target.sum(dim=1, keepdim=True).clamp(min=1e-8)
+    pred_normalized = pred / pred_sum
+    target_normalized = target / target_sum
+
+    # Compute CDFs (cumulative distribution functions)
+    pred_cdf = torch.cumsum(pred_normalized, dim=1)
+    target_cdf = torch.cumsum(target_normalized, dim=1)
+
+    # 1-Wasserstein distance = L1 distance between CDFs
+    # CRITICAL: Normalize by number of bins to make comparable to MSE (both in 0-1 range)
+    # Without normalization, loss scales with num_bins (1001), making it ~100-1000x larger than MSE
+    num_bins = pred.shape[1]
+    wasserstein_dist = torch.abs(pred_cdf - target_cdf).sum(dim=1) / num_bins
+
+    if reduction == 'mean':
+        return wasserstein_dist.mean()
+    elif reduction == 'sum':
+        return wasserstein_dist.sum()
+    elif reduction == 'none':
+        return wasserstein_dist
+    else:
+        raise ValueError(f"Invalid reduction mode: {reduction}. Use 'mean', 'sum', or 'none'.")
+
+
 class VectorQuantizer(nn.Module):
     """
     Vector quantization layer with learnable codebook.
-    
+
+    Supports both gradient-based and EMA-based codebook updates.
+    EMA updates improve training stability and prevent codebook collapse.
+
     Uses straight-through estimator for gradient flow during backprop.
     """
-    
-    def __init__(self, num_embeddings: int, embedding_dim: int):
+
+    def __init__(self, num_embeddings: int, embedding_dim: int,
+                 use_ema: bool = False, ema_decay: float = 0.99, ema_epsilon: float = 1e-5):
         """
         Initialize vector quantizer.
-        
+
         Args:
             num_embeddings: Number of codebook vectors (K)
             embedding_dim: Dimension of each codebook vector (D)
+            use_ema: Use EMA updates instead of gradient-based updates
+            ema_decay: EMA decay rate (gamma), typically 0.99
+            ema_epsilon: Small constant for numerical stability
         """
         super().__init__()
         self.num_embeddings = num_embeddings
         self.embedding_dim = embedding_dim
-        
+        self.use_ema = use_ema
+        self.ema_decay = ema_decay
+        self.ema_epsilon = ema_epsilon
+
         # Learnable codebook
         self.embedding = nn.Embedding(num_embeddings, embedding_dim)
-        self.embedding.weight.data.uniform_(-1/num_embeddings, 1/num_embeddings)
+        # Xavier initialization for better initial diversity and prevents early collapse
+        # Old: uniform(-1/K, 1/K) gave tiny range (e.g., -0.008 to 0.008 for K=128)
+        # Xavier: scales based on both K and D for optimal variance
+        nn.init.xavier_uniform_(self.embedding.weight)
+
+        if use_ema:
+            # EMA cluster size (N_i): running count of samples assigned to each code
+            # Initialize to 1.0 (not 0) to prevent division by near-zero for unused codes
+            self.register_buffer('ema_cluster_size', torch.ones(num_embeddings))
+            # EMA embedding average (m_i): running average of encoder outputs per code
+            self.register_buffer('ema_embedding_avg', self.embedding.weight.data.clone())
     
     def forward(self, z_e: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
         """
         Quantize encoder outputs to nearest codebook vectors.
-        
+
         Args:
             z_e: Encoder output (batch_size, embedding_dim)
-            
+
         Returns:
             z_q: Quantized vectors (batch_size, embedding_dim)
             commitment_loss: Commitment loss for encoder
-            codebook_loss: Codebook loss for embeddings
+            codebook_loss: Codebook loss for embeddings (0 if using EMA)
             encoding_indices: Indices of selected codebook vectors (batch_size,)
         """
         B, D = z_e.shape
-        
+
         # Compute distances to all codebook vectors
         # ||z_e - e||^2 = ||z_e||^2 + ||e||^2 - 2*z_e·e
         distances = (
@@ -61,22 +135,58 @@ class VectorQuantizer(nn.Module):
             torch.sum(self.embedding.weight**2, dim=1) -
             2 * torch.matmul(z_e, self.embedding.weight.t())
         )
-        
+
         # Find nearest codebook vectors
         encoding_indices = torch.argmin(distances, dim=1)
         z_q = self.embedding(encoding_indices)
-        
-        # Compute VQ losses
-        # Commitment loss: encoder commits to codebook
+
+        # Compute commitment loss (always used)
         commitment_loss = F.mse_loss(z_e, z_q.detach())
-        
-        # Codebook loss: codebook moves toward encoder outputs
-        codebook_loss = F.mse_loss(z_e.detach(), z_q)
-        
+
+        if self.use_ema and self.training:
+            # EMA codebook updates (no gradient-based loss)
+            self._ema_update(z_e, encoding_indices)
+            codebook_loss = torch.tensor(0.0, device=z_e.device)
+        else:
+            # Gradient-based codebook update
+            codebook_loss = F.mse_loss(z_e.detach(), z_q)
+
         # Straight-through estimator: copy gradients from decoder to encoder
         z_q = z_e + (z_q - z_e).detach()
-        
+
         return z_q, commitment_loss, codebook_loss, encoding_indices
+
+    def _ema_update(self, z_e: torch.Tensor, encoding_indices: torch.Tensor):
+        """
+        Update codebook using EMA.
+
+        Updates cluster counts and embedding averages, then recomputes embeddings.
+
+        Args:
+            z_e: Encoder outputs (batch_size, embedding_dim)
+            encoding_indices: Selected code indices (batch_size,)
+        """
+        # Create one-hot encodings: (batch_size, num_embeddings)
+        encodings = F.one_hot(encoding_indices, self.num_embeddings).float()
+
+        # Update cluster sizes with EMA
+        # N_i = γ * N_i + (1 - γ) * n_i
+        # n_i = number of samples assigned to code i in current batch
+        n_i = encodings.sum(0)  # (num_embeddings,)
+        self.ema_cluster_size = self.ema_cluster_size * self.ema_decay + n_i * (1 - self.ema_decay)
+
+        # Update embedding averages with EMA
+        # m_i = γ * m_i + (1 - γ) * sum(z_e for samples assigned to i)
+        dw = torch.matmul(encodings.t(), z_e)  # (num_embeddings, embedding_dim)
+        self.ema_embedding_avg = self.ema_embedding_avg * self.ema_decay + dw * (1 - self.ema_decay)
+
+        # Normalize to get updated embeddings
+        # e_i = m_i / N_i
+        # Add epsilon for numerical stability (Laplace smoothing)
+        cluster_size = self.ema_cluster_size + self.ema_epsilon
+
+        # Update embedding weights (no gradient needed since we're in training mode)
+        self.embedding.weight.data = self.ema_embedding_avg / cluster_size.unsqueeze(1)
     
     def get_codebook_usage(self, encoding_indices: torch.Tensor) -> float:
         """
@@ -336,7 +446,7 @@ class VQVAEModel(nn.Module):
     def __init__(self, config: Dict):
         """
         Initialize VQ-VAE model.
-        
+
         Args:
             config: Hyperparameter configuration with keys:
                 - B: Number of LOB bins
@@ -344,20 +454,30 @@ class VQVAEModel(nn.Module):
                 - D: Embedding dimension
                 - n_conv_layers: Number of conv layers (2 or 3)
                 - dropout: Dropout probability
+                - use_ema: Use EMA updates for codebook (optional, default: False)
+                - ema_decay: EMA decay rate (optional, default: 0.99)
+                - recon_loss_type: Reconstruction loss type ('mse' or 'wasserstein', default: 'wasserstein')
         """
         super().__init__()
-        
+
         self.config = config
-        
+
         B = config['B']
         K = config['K']
         D = config['D']
         n_conv_layers = config['n_conv_layers']
         dropout = config['dropout']
-        
+        use_ema = config.get('use_ema', False)
+        ema_decay = config.get('ema_decay', 0.99)
+        self.recon_loss_type = config.get('recon_loss_type', 'wasserstein')
+
+        # Validate loss type
+        if self.recon_loss_type not in ['mse', 'wasserstein']:
+            raise ValueError(f"Invalid recon_loss_type: {self.recon_loss_type}. Use 'mse' or 'wasserstein'.")
+
         # Initialize components
         self.encoder = Encoder(B, D, n_conv_layers, dropout)
-        self.vq = VectorQuantizer(K, D)
+        self.vq = VectorQuantizer(K, D, use_ema=use_ema, ema_decay=ema_decay)
         self.decoder = Decoder(D, B, n_conv_layers, self.encoder.flatten_size, dropout)
     
     def forward(self, x: torch.Tensor) -> Tuple[torch.Tensor, Dict]:
@@ -373,15 +493,18 @@ class VQVAEModel(nn.Module):
         """
         # Encode
         z_e = self.encoder(x)
-        
+
         # Quantize
         z_q, commitment_loss, codebook_loss, encoding_indices = self.vq(z_e)
-        
+
         # Decode
         x_recon = self.decoder(z_q)
-        
-        # Compute reconstruction loss
-        recon_loss = F.mse_loss(x_recon, x)
+
+        # Compute reconstruction loss based on loss type
+        if self.recon_loss_type == 'wasserstein':
+            recon_loss = wasserstein_1d_loss(x_recon, x)
+        else:  # mse
+            recon_loss = F.mse_loss(x_recon, x)
         
         # Compute codebook usage
         codebook_usage = self.vq.get_codebook_usage(encoding_indices)

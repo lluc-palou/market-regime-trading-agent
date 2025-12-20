@@ -319,13 +319,14 @@ class Encoder(nn.Module):
 class Decoder(nn.Module):
     """
     Transposed convolutional decoder with dropout regularization.
-    
+
     Architecture:
     - FC expansion from embedding space
     - Progressive upsampling with transposed convolutions
     - Batch normalization for stability
     - Dropout for regularization
     - Final projection to output dimension
+    - Softmax activation to ensure output is a valid probability distribution
     """
     
     def __init__(
@@ -410,26 +411,32 @@ class Decoder(nn.Module):
     
     def forward(self, z_q: torch.Tensor) -> torch.Tensor:
         """
-        Decode quantized vectors to reconstruct input.
-        
+        Decode quantized vectors to reconstruct input probability distribution.
+
         Args:
             z_q: Quantized representation (batch_size, D)
-            
+
         Returns:
-            x_recon: Reconstructed input (batch_size, B)
+            x_recon: Reconstructed probability distribution (batch_size, B)
+                     Guaranteed to have non-negative values that sum to 1
         """
         x = self.fc(z_q)  # (batch_size, flatten_size)
         x = x.view(x.size(0), self.reshape_channels, self.reshape_length)  # (batch_size, C, L)
         x = self.conv_layers(x)  # (batch_size, 1, B')
         x = x.squeeze(1)  # (batch_size, B')
-        
+
         # Trim or pad to exact output dimension
         if x.size(1) > self.output_dim:
             x = x[:, :self.output_dim]
         elif x.size(1) < self.output_dim:
             padding = torch.zeros(x.size(0), self.output_dim - x.size(1), device=x.device)
             x = torch.cat([x, padding], dim=1)
-        
+
+        # Apply softmax to ensure output is a valid probability distribution:
+        # - All values are positive (exp function)
+        # - All values sum to 1 (normalization)
+        x = F.softmax(x, dim=1)
+
         return x
 
 

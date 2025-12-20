@@ -45,16 +45,28 @@ HYPERPARAM_GRID = {
 # =================================================================================================
 # Optimized for AWS g4dn.xlarge GPU (NVIDIA T4)
 # Hour accumulation + large batches = 50-80× speedup vs laptop CPU
+#
+# Extended training capacity:
+# - max_epochs: 100 (up from 25) - model still learning at epoch 40
+# - patience: 10 (up from 3) - allows learning through plateaus
+# - Learning rate scheduler: ReduceLROnPlateau with patience=5
+#   * Reduces LR by 0.5× when validation loss plateaus for 5 epochs
+#   * Minimum LR: 1e-6 (prevents too-small learning rates)
 # =================================================================================================
 
 TRAINING_CONFIG = {
-    'max_epochs': 25,               # Increased for larger models with more capacity
-    'patience': 3,                  # Early stopping patience
-    'hours_per_accumulation': 100,  # NEW: Accumulate 100 hours before processing
-    'mini_batch_size': 2048,        # NEW: Large batches for GPU (was 32)
+    'max_epochs': 100,              # Increased to allow more learning (model still learning at epoch 40)
+    'patience': 10,                 # Increased patience for early stopping (allows plateaus)
+    'hours_per_accumulation': 100,  # Accumulate 100 hours before processing
+    'mini_batch_size': 2048,        # Large batches for GPU (was 32)
     'grad_clip_norm': 1.0,          # Gradient clipping
     'weight_decay': 1e-5,           # L2 regularization
-    'usage_penalty_weight': 0.1     # Codebook diversity penalty
+    'usage_penalty_weight': 0.1,    # Codebook diversity penalty
+    # Learning rate scheduler config
+    'lr_scheduler_type': 'plateau', # 'plateau' or 'cosine' or None
+    'lr_scheduler_factor': 0.5,     # ReduceLROnPlateau: multiply LR by this on plateau
+    'lr_scheduler_patience': 5,     # ReduceLROnPlateau: epochs to wait before reducing LR
+    'lr_min': 1e-6                  # Minimum learning rate
 }
 
 # Performance impact:

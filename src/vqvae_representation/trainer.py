@@ -73,12 +73,45 @@ class VQVAETrainer:
             lr=config['lr'],
             weight_decay=TRAINING_CONFIG['weight_decay']
         )
-        
+
+        # Initialize learning rate scheduler
+        self.scheduler = self._create_lr_scheduler()
+
         # Training state
         self.best_val_loss = float('inf')
         self.best_epoch = 0
         self.best_model_state = None
-    
+
+    def _create_lr_scheduler(self):
+        """
+        Create learning rate scheduler based on config.
+
+        Returns:
+            Learning rate scheduler or None
+        """
+        scheduler_type = TRAINING_CONFIG.get('lr_scheduler_type', None)
+
+        if scheduler_type == 'plateau':
+            # ReduceLROnPlateau: reduce LR when validation loss plateaus
+            return optim.lr_scheduler.ReduceLROnPlateau(
+                self.optimizer,
+                mode='min',
+                factor=TRAINING_CONFIG['lr_scheduler_factor'],
+                patience=TRAINING_CONFIG['lr_scheduler_patience'],
+                min_lr=TRAINING_CONFIG['lr_min'],
+                verbose=True
+            )
+        elif scheduler_type == 'cosine':
+            # CosineAnnealingLR: smooth decay following cosine curve
+            return optim.lr_scheduler.CosineAnnealingLR(
+                self.optimizer,
+                T_max=TRAINING_CONFIG['max_epochs'],
+                eta_min=TRAINING_CONFIG['lr_min']
+            )
+        else:
+            # No scheduler
+            return None
+
     def train_split(self, all_hours: List[datetime]) -> Dict:
         """
         Train and validate on a single split.
@@ -174,7 +207,21 @@ class VQVAETrainer:
                 # Deep copy model state (clone tensors, not just dict structure)
                 self.best_model_state = {k: v.clone() for k, v in self.model.state_dict().items()}
                 logger(f'  → New best validation loss: {self.best_val_loss:.4f}', "INFO")
-            
+
+            # Update learning rate scheduler
+            if self.scheduler is not None:
+                if isinstance(self.scheduler, optim.lr_scheduler.ReduceLROnPlateau):
+                    # ReduceLROnPlateau needs validation loss
+                    self.scheduler.step(val_losses['total_loss'])
+                else:
+                    # Other schedulers just step
+                    self.scheduler.step()
+
+                # Log current learning rate
+                current_lr = self.optimizer.param_groups[0]['lr']
+                if current_lr != self.config['lr'] or epoch == 0:
+                    logger(f'  → Learning rate: {current_lr:.2e}', "INFO")
+
             # Early stopping check
             if epoch - self.best_epoch >= TRAINING_CONFIG['patience']:
                 logger(f'Early stopping at epoch {epoch+1} (patience={TRAINING_CONFIG["patience"]})', "INFO")

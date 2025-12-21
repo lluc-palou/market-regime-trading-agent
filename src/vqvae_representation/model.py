@@ -19,7 +19,7 @@ from .config import MODEL_CONFIG
 
 def wasserstein_1d_loss(pred: torch.Tensor, target: torch.Tensor, reduction: str = 'mean') -> torch.Tensor:
     """
-    Compute 1-Wasserstein distance (Earth Mover's Distance) for 1D distributions.
+    Compute normalized 1-Wasserstein distance (Earth Mover's Distance) for 1D distributions.
 
     For discrete distributions over ordered bins, the 1-Wasserstein distance is:
     W1(p, q) = sum_i |CDF_p(i) - CDF_q(i)|
@@ -28,13 +28,17 @@ def wasserstein_1d_loss(pred: torch.Tensor, target: torch.Tensor, reduction: str
     the geometry of the space - moving mass between nearby bins costs less than
     moving it between distant bins.
 
+    Normalization: Divides by maximum possible distance (num_bins - 1), which occurs
+    when all mass must move from one extreme to the other. This ensures the loss
+    is in [0, 1] range, comparable to MSE and other loss components.
+
     Args:
         pred: Predicted distribution (batch_size, num_bins)
         target: Target distribution (batch_size, num_bins)
         reduction: 'mean', 'sum', or 'none'
 
     Returns:
-        Wasserstein distance loss (original scale)
+        Wasserstein distance loss normalized by maximum possible distance
     """
     # Ensure non-negative values (distributions should be non-negative)
     pred = torch.clamp(pred, min=0.0)
@@ -51,8 +55,12 @@ def wasserstein_1d_loss(pred: torch.Tensor, target: torch.Tensor, reduction: str
     pred_cdf = torch.cumsum(pred_normalized, dim=1)
     target_cdf = torch.cumsum(target_normalized, dim=1)
 
-    # 1-Wasserstein distance = L1 distance between CDFs (original scale)
-    wasserstein_dist = torch.abs(pred_cdf - target_cdf).sum(dim=1)
+    # 1-Wasserstein distance = L1 distance between CDFs
+    # Normalize by maximum possible distance: (num_bins - 1)
+    # Maximum occurs when all mass at position 0 must move to position (num_bins-1)
+    num_bins = pred.shape[1]
+    max_distance = num_bins - 1
+    wasserstein_dist = torch.abs(pred_cdf - target_cdf).sum(dim=1) / max_distance
 
     if reduction == 'mean':
         return wasserstein_dist.mean()

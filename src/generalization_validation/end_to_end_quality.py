@@ -102,7 +102,7 @@ class EndToEndValidator:
         logger('  Generating UMAP visualization...', "INFO")
         plot_umap_comparison(
             val_reconstructed, synthetic_vectors,
-            title='Original vs. Synthetic Data',
+            title='End-to-End Synthetic Generation',
             save_path=split_output_dir / f"umap_end_to_end_split_{split_id}.png",
             method='umap'
         )

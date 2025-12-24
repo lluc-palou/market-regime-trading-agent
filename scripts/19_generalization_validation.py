@@ -250,7 +250,8 @@ def main():
                         mlflow.log_metrics({
                             'exp1_mse_overall': exp1_results['mse_overall'],
                             'exp1_ks_rejection_rate': exp1_results['ks_rejection_rate'],
-                            'exp1_corr_frobenius': exp1_results['corr_frobenius']
+                            'exp1_corr_frobenius_correlation': exp1_results['corr_frobenius_correlation'],
+                            'exp1_cosine_similarity_mean': exp1_results['cosine_similarity_mean']
                         })
 
                     except Exception as e:
@@ -271,7 +272,8 @@ def main():
                         # Log to MLflow
                         mlflow.log_metrics({
                             'exp2_js_divergence': exp2_results['js_divergence_freq'],
-                            'exp2_transition_frobenius': exp2_results['transition_frobenius'],
+                            'exp2_transition_frobenius_correlation': exp2_results['transition_frobenius_correlation'],
+                            'exp2_transition_mean_abs_diff': exp2_results['transition_mean_abs_diff'],
                             'exp2_bigram_overlap': exp2_results['bigram_overlap_ratio']
                         })
 
@@ -294,7 +296,7 @@ def main():
                         mlflow.log_metrics({
                             'exp3_mmd': exp3_results['mmd'],
                             'exp3_ks_rejection_rate': exp3_results['ks_rejection_rate'],
-                            'exp3_corr_frobenius': exp3_results['corr_frobenius']
+                            'exp3_corr_frobenius_correlation': exp3_results['corr_frobenius_correlation']
                         })
 
                     except Exception as e:
@@ -321,22 +323,26 @@ def main():
 
             exp1_mse = compute_aggregate_statistics(all_results['exp1'], 'mse_overall')
             exp1_ks = compute_aggregate_statistics(all_results['exp1'], 'ks_rejection_rate')
-            exp1_corr = compute_aggregate_statistics(all_results['exp1'], 'corr_frobenius')
+            exp1_corr = compute_aggregate_statistics(all_results['exp1'], 'corr_frobenius_correlation')
+            exp1_cosine = compute_aggregate_statistics(all_results['exp1'], 'cosine_similarity_mean')
 
             logger(f'  MSE: {exp1_mse["mean"]:.6f} ± {exp1_mse["std"]:.6f}', "INFO")
             logger(f'  KS Rejection Rate: {exp1_ks["mean"]:.4f} ± {exp1_ks["std"]:.4f}', "INFO")
-            logger(f'  Corr Frobenius: {exp1_corr["mean"]:.6f} ± {exp1_corr["std"]:.6f}', "INFO")
+            logger(f'  Corr Frobenius Correlation: {exp1_corr["mean"]:.6f} ± {exp1_corr["std"]:.6f}', "INFO")
+            logger(f'  Cosine Similarity: {exp1_cosine["mean"]:.6f} ± {exp1_cosine["std"]:.6f}', "INFO")
 
             aggregate_stats['exp1'] = {
                 'mse': exp1_mse,
                 'ks_rejection_rate': exp1_ks,
-                'corr_frobenius': exp1_corr
+                'corr_frobenius_correlation': exp1_corr,
+                'cosine_similarity_mean': exp1_cosine
             }
 
             mlflow.log_metrics({
                 'agg_exp1_mse_mean': exp1_mse['mean'],
                 'agg_exp1_ks_rejection_mean': exp1_ks['mean'],
-                'agg_exp1_corr_frobenius_mean': exp1_corr['mean']
+                'agg_exp1_corr_frobenius_correlation_mean': exp1_corr['mean'],
+                'agg_exp1_cosine_similarity_mean': exp1_cosine['mean']
             })
 
         # Experiment 2 aggregates
@@ -345,22 +351,26 @@ def main():
             logger('Experiment 2: Prior Quality', "INFO")
 
             exp2_js = compute_aggregate_statistics(all_results['exp2'], 'js_divergence_freq')
-            exp2_trans = compute_aggregate_statistics(all_results['exp2'], 'transition_frobenius')
+            exp2_trans = compute_aggregate_statistics(all_results['exp2'], 'transition_frobenius_correlation')
+            exp2_trans_mad = compute_aggregate_statistics(all_results['exp2'], 'transition_mean_abs_diff')
             exp2_bigram = compute_aggregate_statistics(all_results['exp2'], 'bigram_overlap_ratio')
 
             logger(f'  JS Divergence: {exp2_js["mean"]:.6f} ± {exp2_js["std"]:.6f}', "INFO")
-            logger(f'  Transition Frobenius: {exp2_trans["mean"]:.6f} ± {exp2_trans["std"]:.6f}', "INFO")
+            logger(f'  Transition Frobenius Correlation: {exp2_trans["mean"]:.6f} ± {exp2_trans["std"]:.6f}', "INFO")
+            logger(f'  Transition Mean Abs Diff: {exp2_trans_mad["mean"]:.6f} ± {exp2_trans_mad["std"]:.6f}', "INFO")
             logger(f'  Bigram Overlap: {exp2_bigram["mean"]:.4f} ± {exp2_bigram["std"]:.4f}', "INFO")
 
             aggregate_stats['exp2'] = {
                 'js_divergence': exp2_js,
-                'transition_frobenius': exp2_trans,
+                'transition_frobenius_correlation': exp2_trans,
+                'transition_mean_abs_diff': exp2_trans_mad,
                 'bigram_overlap': exp2_bigram
             }
 
             mlflow.log_metrics({
                 'agg_exp2_js_divergence_mean': exp2_js['mean'],
-                'agg_exp2_transition_frobenius_mean': exp2_trans['mean'],
+                'agg_exp2_transition_frobenius_correlation_mean': exp2_trans['mean'],
+                'agg_exp2_transition_mean_abs_diff_mean': exp2_trans_mad['mean'],
                 'agg_exp2_bigram_overlap_mean': exp2_bigram['mean']
             })
 
@@ -371,22 +381,22 @@ def main():
 
             exp3_mmd = compute_aggregate_statistics(all_results['exp3'], 'mmd')
             exp3_ks = compute_aggregate_statistics(all_results['exp3'], 'ks_rejection_rate')
-            exp3_corr = compute_aggregate_statistics(all_results['exp3'], 'corr_frobenius')
+            exp3_corr = compute_aggregate_statistics(all_results['exp3'], 'corr_frobenius_correlation')
 
             logger(f'  MMD: {exp3_mmd["mean"]:.6f} ± {exp3_mmd["std"]:.6f}', "INFO")
             logger(f'  KS Rejection Rate: {exp3_ks["mean"]:.4f} ± {exp3_ks["std"]:.4f}', "INFO")
-            logger(f'  Corr Frobenius: {exp3_corr["mean"]:.6f} ± {exp3_corr["std"]:.6f}', "INFO")
+            logger(f'  Corr Frobenius Correlation: {exp3_corr["mean"]:.6f} ± {exp3_corr["std"]:.6f}', "INFO")
 
             aggregate_stats['exp3'] = {
                 'mmd': exp3_mmd,
                 'ks_rejection_rate': exp3_ks,
-                'corr_frobenius': exp3_corr
+                'corr_frobenius_correlation': exp3_corr
             }
 
             mlflow.log_metrics({
                 'agg_exp3_mmd_mean': exp3_mmd['mean'],
                 'agg_exp3_ks_rejection_mean': exp3_ks['mean'],
-                'agg_exp3_corr_frobenius_mean': exp3_corr['mean']
+                'agg_exp3_corr_frobenius_correlation_mean': exp3_corr['mean']
             })
 
         # Save all results to JSON

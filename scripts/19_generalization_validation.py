@@ -115,20 +115,10 @@ def discover_splits() -> list:
     """Discover available splits from VQ-VAE models."""
     splits = []
 
-    if not VQVAE_MODEL_DIR.exists():
-        logger(f'WARNING: VQ-VAE model directory does not exist: {VQVAE_MODEL_DIR}', "WARNING")
-        logger('Please ensure VQ-VAE models have been trained first (Stage 15)', "WARNING")
-        return splits
-
     for model_file in VQVAE_MODEL_DIR.glob("split_*_model.pth"):
         # Extract split ID from filename
         split_id = int(model_file.stem.split('_')[1])
         splits.append(split_id)
-
-    if len(splits) == 0:
-        logger(f'WARNING: No VQ-VAE model files found in: {VQVAE_MODEL_DIR}', "WARNING")
-        logger('Expected files matching pattern: split_*_model.pth', "WARNING")
-        logger(f'Directory contents: {list(VQVAE_MODEL_DIR.glob("*"))}', "WARNING")
 
     return sorted(splits)
 
@@ -189,15 +179,6 @@ def main():
 
     logger(f'Found {len(all_splits)} splits: {all_splits}', "INFO")
     logger(f'Validating {len(splits_to_run)} splits: {splits_to_run}', "INFO")
-
-    if len(splits_to_run) == 0:
-        logger('', "ERROR")
-        logger('ERROR: No splits to validate!', "ERROR")
-        logger('Please ensure:', "ERROR")
-        logger('  1. VQ-VAE models have been trained (Stage 15)', "ERROR")
-        logger('  2. Model files exist in: ' + str(VQVAE_MODEL_DIR), "ERROR")
-        logger('  3. Files match the pattern: split_*_model.pth', "ERROR")
-        return
 
     # Create output directory
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)

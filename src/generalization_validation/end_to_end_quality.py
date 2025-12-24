@@ -175,7 +175,7 @@ class EndToEndValidator:
 
             ax.set_xlabel('Value', color='black')
             ax.set_ylabel('Density', color='black')
-            ax.set_title(f'Feature {feat_idx}', color='black')
+            ax.set_title(f'Feature {feat_idx}', color='black', fontweight='bold', pad=15)
             ax.legend()
             ax.tick_params(colors='black')
             for spine in ax.spines.values():

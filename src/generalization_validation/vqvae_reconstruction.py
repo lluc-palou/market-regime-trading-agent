@@ -116,7 +116,7 @@ class VQVAEReconstructionValidator:
         logger('  Generating UMAP visualization...', "INFO")
         plot_umap_comparison(
             original_vectors, reconstructed_vectors,
-            title=f'VQ-VAE Reconstruction - Split {split_id}',
+            title='Original vs. Reconstruction',
             save_path=split_output_dir / f"umap_reconstruction_split_{split_id}.png",
             method='umap',
             label_second='Reconstruction'

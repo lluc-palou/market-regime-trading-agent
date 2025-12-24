@@ -91,7 +91,8 @@ class EndToEndValidator:
 
         logger('  Computing correlation distance...', "INFO")
         corr_results = compute_correlation_distance(val_reconstructed, synthetic_vectors)
-        logger(f'  Correlation Frobenius norm: {corr_results["frobenius_norm"]:.6f}', "INFO")
+        logger(f'  Correlation Frobenius correlation: {corr_results["frobenius_correlation"]:.6f}', "INFO")
+        logger(f'  Mean absolute difference: {corr_results["mean_absolute_diff"]:.6f}', "INFO")
 
         # Visualizations
         split_output_dir = self.output_dir / "experiment3_end_to_end" / f"split_{split_id}"
@@ -131,7 +132,7 @@ class EndToEndValidator:
             'ks_mean_statistic': float(ks_results['mean_ks_statistic']),
             'ks_max_statistic': float(ks_results['max_ks_statistic']),
             'ks_rejection_rate': float(ks_results['rejection_rate']),
-            'corr_frobenius': float(corr_results['frobenius_norm']),
+            'corr_frobenius_correlation': float(corr_results['frobenius_correlation']),
             'corr_mean_abs_diff': float(corr_results['mean_absolute_diff']),
             'corr_max_abs_diff': float(corr_results['max_absolute_diff'])
         }
@@ -168,9 +169,9 @@ class EndToEndValidator:
             ax = axes[idx]
 
             ax.hist(val_data[:, feat_idx], bins=50, alpha=0.5, label='Validation',
-                   density=True, color='blue')
+                   density=True, color='#0072B2')
             ax.hist(syn_data[:, feat_idx], bins=50, alpha=0.5, label='Synthetic',
-                   density=True, color='orange')
+                   density=True, color='#D55E00')
 
             ax.set_xlabel('Value', color='black')
             ax.set_ylabel('Density', color='black')
@@ -181,5 +182,5 @@ class EndToEndValidator:
                 spine.set_color('black')
 
         plt.tight_layout()
-        plt.savefig(save_path, dpi=150, bbox_inches='tight')
+        plt.savefig(save_path, dpi=300, bbox_inches='tight')
         plt.close()

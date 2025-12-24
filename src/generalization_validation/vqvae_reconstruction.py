@@ -92,7 +92,8 @@ class VQVAEReconstructionValidator:
         # Correlation distance
         logger('  Computing correlation distance...', "INFO")
         corr_results = compute_correlation_distance(original_vectors, reconstructed_vectors)
-        logger(f'  Correlation Frobenius norm: {corr_results["frobenius_norm"]:.6f}', "INFO")
+        logger(f'  Correlation Frobenius correlation: {corr_results["frobenius_correlation"]:.6f}', "INFO")
+        logger(f'  Mean absolute difference: {corr_results["mean_absolute_diff"]:.6f}', "INFO")
 
         # Cosine similarity
         logger('  Computing cosine similarity...', "INFO")
@@ -110,7 +111,8 @@ class VQVAEReconstructionValidator:
             original_vectors, reconstructed_vectors,
             title=f'VQ-VAE Reconstruction - Split {split_id}',
             save_path=split_output_dir / f"umap_reconstruction_split_{split_id}.png",
-            method='umap'
+            method='umap',
+            label_second='Reconstruction'
         )
 
         # Per-feature reconstruction error plot
@@ -134,7 +136,7 @@ class VQVAEReconstructionValidator:
             'ks_mean_statistic': float(ks_results['mean_ks_statistic']),
             'ks_max_statistic': float(ks_results['max_ks_statistic']),
             'ks_rejection_rate': float(ks_results['rejection_rate']),
-            'corr_frobenius': float(corr_results['frobenius_norm']),
+            'corr_frobenius_correlation': float(corr_results['frobenius_correlation']),
             'corr_mean_abs_diff': float(corr_results['mean_absolute_diff']),
             'corr_max_abs_diff': float(corr_results['max_absolute_diff']),
             'cosine_similarity_mean': float(cosine_results['mean_cosine_similarity']),

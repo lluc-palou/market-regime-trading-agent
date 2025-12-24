@@ -143,17 +143,27 @@ def compute_correlation_distance(X: np.ndarray, Y: np.ndarray) -> Dict[str, floa
     corr_X = np.nan_to_num(corr_X, nan=0.0)
     corr_Y = np.nan_to_num(corr_Y, nan=0.0)
 
-    # Frobenius norm
-    frobenius = np.linalg.norm(corr_X - corr_Y, ord='fro')
+    # Frobenius norm (unbounded, for backward compatibility)
+    frobenius_norm = np.linalg.norm(corr_X - corr_Y, ord='fro')
 
-    # Mean absolute difference
+    # Frobenius correlation (bounded [-1, 1], more interpretable)
+    # Treats correlation matrices as vectors and computes their correlation
+    norm_X = np.linalg.norm(corr_X, ord='fro')
+    norm_Y = np.linalg.norm(corr_Y, ord='fro')
+    if norm_X > 0 and norm_Y > 0:
+        frobenius_corr = np.trace(corr_X.T @ corr_Y) / (norm_X * norm_Y)
+    else:
+        frobenius_corr = 0.0
+
+    # Mean absolute difference (bounded [0, 2])
     mad = np.mean(np.abs(corr_X - corr_Y))
 
-    # Max absolute difference
+    # Max absolute difference (bounded [0, 2])
     max_diff = np.max(np.abs(corr_X - corr_Y))
 
     return {
-        'frobenius_norm': frobenius,
+        'frobenius_norm': frobenius_norm,
+        'frobenius_correlation': frobenius_corr,
         'mean_absolute_diff': mad,
         'max_absolute_diff': max_diff,
         'corr_original': corr_X,

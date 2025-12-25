@@ -154,10 +154,27 @@ class EndToEndValidator:
         for idx, feat_idx in enumerate(feature_indices):
             ax = axes[idx]
 
-            ax.hist(val_data[:, feat_idx], bins=50, alpha=0.5, label='Validation',
+            # Get data for this feature
+            val_feature = val_data[:, feat_idx]
+            syn_feature = syn_data[:, feat_idx]
+
+            # Compute data range for proper x-axis scaling
+            data_min = min(val_feature.min(), syn_feature.min())
+            data_max = max(val_feature.max(), syn_feature.max())
+            data_range = data_max - data_min
+
+            # Add 5% padding to the range for better visualization
+            padding = 0.05 * data_range if data_range > 0 else 0.1
+            xlim_min = data_min - padding
+            xlim_max = data_max + padding
+
+            ax.hist(val_feature, bins=50, alpha=0.5, label='Validation',
                    density=True, color='#0072B2')
-            ax.hist(syn_data[:, feat_idx], bins=50, alpha=0.5, label='Synthetic',
+            ax.hist(syn_feature, bins=50, alpha=0.5, label='Synthetic',
                    density=True, color='#D55E00')
+
+            # Set x-axis limits based on actual data range
+            ax.set_xlim(xlim_min, xlim_max)
 
             ax.set_xlabel('Value', color='black', fontweight='bold')
             ax.set_ylabel('Density', color='black', fontweight='bold')

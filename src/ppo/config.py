@@ -2,7 +2,16 @@
 
 from dataclasses import dataclass, field
 from typing import Optional, List, Dict, Any
+from enum import Enum
 import json
+
+
+class ExperimentType(Enum):
+    """Experiment types for PPO training."""
+    EXP1_BOTH_ORIGINAL = 1      # Both codebook + features, original data
+    EXP2_FEATURES_ORIGINAL = 2  # Features only, original data
+    EXP3_CODEBOOK_ORIGINAL = 3  # Codebook only, original data
+    EXP4_CODEBOOK_SYNTHETIC = 4 # Codebook only, synthetic data
 
 
 @dataclass
@@ -27,7 +36,7 @@ class ModelConfig:
     d_model: int = 128                   # Transformer model dimension
     n_heads: int = 4                     # Number of attention heads
     n_layers: int = 2                    # Number of transformer layers
-    dropout: float = 0.2                 # Dropout rate
+    dropout: float = 0.15                # Dropout rate
     window_size: int = 50                # Observation window (W samples)
     horizon: int = 10                    # Reward horizon (H samples)
     min_log_std: float = -20.0           # Minimum log std for policy
@@ -117,6 +126,7 @@ class DataConfig:
     role_train: str = "train"            # Training role filter
     role_val: str = "val"                # Validation role filter
     stream_episodes: bool = True         # Stream episodes on-demand
+    experiment_type: ExperimentType = ExperimentType.EXP1_BOTH_ORIGINAL  # Experiment type
 
 
 @dataclass
@@ -132,6 +142,9 @@ class ExperimentConfig:
     
     def to_dict(self) -> Dict[str, Any]:
         """Convert to dictionary for logging."""
+        data_dict = self.data.__dict__.copy()
+        data_dict['experiment_type'] = self.data.experiment_type.value  # Convert enum to int
+
         return {
             "name": self.name,
             "vqvae": self.vqvae.__dict__,
@@ -139,7 +152,7 @@ class ExperimentConfig:
             "ppo": self.ppo.__dict__,
             "reward": self.reward.__dict__,
             "training": self.training.__dict__,
-            "data": self.data.__dict__,
+            "data": data_dict,
             "total_parameters": self.model.count_parameters()
         }
     

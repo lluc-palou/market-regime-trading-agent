@@ -25,11 +25,12 @@ class Episode:
 
 class EpisodeLoader:
     """Loads and manages episodes from MongoDB."""
-    
+
     def __init__(self, config):
         self.config = config
         self.client = MongoClient(config.mongodb_uri, serverSelectionTimeoutMS=5000)
         self.db = self.client[config.database_name]
+        self.is_synthetic = (config.experiment_type.value == 4)  # Experiment 4 uses synthetic data
         self._ensure_indexes()
     
     def load_episodes(
@@ -39,11 +40,32 @@ class EpisodeLoader:
     ) -> List[Episode]:
         """
         Load episodes for a split.
-        
+
         Args:
             split_id: Split identifier
             role: 'train' or 'val'
-        
+
+        Returns:
+            List of Episode objects
+        """
+        # Route to synthetic loader for Experiment 4
+        if self.is_synthetic:
+            return self._load_synthetic_episodes(split_id, role)
+
+        return self._load_original_episodes(split_id, role)
+
+    def _load_original_episodes(
+        self,
+        split_id: int,
+        role: str
+    ) -> List[Episode]:
+        """
+        Load episodes from original data (Experiments 1, 2, 3).
+
+        Args:
+            split_id: Split identifier
+            role: 'train' or 'val'
+
         Returns:
             List of Episode objects
         """
@@ -115,7 +137,81 @@ class EpisodeLoader:
                 episodes.append(Episode(split_id, date, samples))
         
         return episodes
-    
+
+    def _load_synthetic_episodes(
+        self,
+        split_id: int,
+        role: str
+    ) -> List[Episode]:
+        """
+        Load episodes from synthetic data (Experiment 4).
+
+        Synthetic data is organized by sequence_id (120 samples each).
+        For training, use first 80% of sequences; for validation, use last 20%.
+
+        Args:
+            split_id: Split identifier
+            role: 'train' or 'val'
+
+        Returns:
+            List of Episode objects
+        """
+        collection = self.db[f'split_{split_id}_synthetic']
+
+        # Query all synthetic samples sorted by sequence_id and position
+        cursor = collection.find(
+            {'is_synthetic': True},
+            sort=[('sequence_id', 1), ('position_in_sequence', 1)]
+        )
+
+        # Group samples by sequence_id
+        sequences_by_id = defaultdict(list)
+
+        for doc in cursor:
+            sequence_id = doc['sequence_id']
+
+            # Prepare sample
+            sample = {
+                'codebook': doc['codebook_index'],  # Note: field is 'codebook_index' in synthetic
+                'features': None,  # No features in synthetic data
+                'timestamp': doc['timestamp'].timestamp() if isinstance(doc['timestamp'], datetime) else doc['timestamp'],
+                'target': 0.0,  # Placeholder - synthetic data has no targets
+                'fold_id': 0,  # No fold concept in synthetic data
+                'position_in_sequence': doc['position_in_sequence']
+            }
+
+            sequences_by_id[sequence_id].append(sample)
+
+        # Split sequences into train/val
+        sequence_ids = sorted(sequences_by_id.keys())
+        n_sequences = len(sequence_ids)
+        split_idx = int(0.8 * n_sequences)  # 80/20 split
+
+        if role == 'train':
+            selected_ids = sequence_ids[:split_idx]
+        else:  # validation
+            selected_ids = sequence_ids[split_idx:]
+
+        # Create episodes (each sequence is an episode)
+        episodes = []
+        for seq_id in selected_ids:
+            samples = sequences_by_id[seq_id]
+
+            # Sort by position_in_sequence to ensure correct order
+            samples.sort(key=lambda s: s['position_in_sequence'])
+
+            # Remove position_in_sequence field (not needed after sorting)
+            for sample in samples:
+                del sample['position_in_sequence']
+
+            # Use sequence_id as "date" for Episode
+            from datetime import date
+            synthetic_date = date(2024, 1, 1)  # Placeholder date
+
+            episodes.append(Episode(split_id, synthetic_date, samples))
+
+        return episodes
+
     def _ensure_indexes(self):
         """
         Ensure timestamp indexes exist on all split collections.

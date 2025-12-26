@@ -78,6 +78,8 @@ from pymongo import MongoClient, ASCENDING
 from src.utils.logging import logger
 from src.ppo import (
     ActorCriticTransformer,
+    ActorCriticFeatures,
+    ActorCriticCodebook,
     EpisodeLoader,
     StateBuffer,
     TrajectoryBuffer,
@@ -99,6 +101,7 @@ from src.ppo import (
     save_checkpoint,
     print_metrics
 )
+from src.ppo.config import ExperimentType
 
 # =================================================================================================
 # Configuration
@@ -189,13 +192,14 @@ def ensure_indexes(mongo_uri: str, db_name: str, split_ids: list):
 
 
 def run_episode(
-    agent: ActorCriticTransformer,
+    agent,
     episode,
     state_buffer: StateBuffer,
     trajectory_buffer: TrajectoryBuffer,
     agent_state: AgentState,
     reward_config: RewardConfig,
     model_config: ModelConfig,
+    experiment_type: ExperimentType,
     device: str,
     deterministic: bool = False
 ):
@@ -203,13 +207,14 @@ def run_episode(
     Run one episode and collect trajectories.
 
     Args:
-        agent: PPO agent model
+        agent: PPO agent model (ActorCriticTransformer, ActorCriticFeatures, or ActorCriticCodebook)
         episode: Episode object with samples
         state_buffer: Rolling window state buffer
         trajectory_buffer: Trajectory buffer for PPO updates
         agent_state: Agent trading state
         reward_config: Reward function config
         model_config: Model config
+        experiment_type: Type of experiment (determines which inputs to use)
         device: Device
         deterministic: Use deterministic actions (for validation)
 
@@ -251,12 +256,26 @@ def run_episode(
         # Get current sample
         current_sample = episode.samples[t]
 
-        # Agent selects action
+        # Agent selects action based on experiment type
         with torch.no_grad():
-            action, log_prob, value = agent.act(
-                codebooks, features, timestamps,
-                deterministic=deterministic
-            )
+            if experiment_type == ExperimentType.EXP1_BOTH_ORIGINAL:
+                # Experiment 1: Both codebook + features
+                action, log_prob, value = agent.act(
+                    codebooks, features, timestamps,
+                    deterministic=deterministic
+                )
+            elif experiment_type == ExperimentType.EXP2_FEATURES_ORIGINAL:
+                # Experiment 2: Features only
+                action, log_prob, value = agent.act(
+                    features, timestamps,
+                    deterministic=deterministic
+                )
+            else:  # EXP3_CODEBOOK_ORIGINAL or EXP4_CODEBOOK_SYNTHETIC
+                # Experiments 3 & 4: Codebook only
+                action, log_prob, value = agent.act(
+                    codebooks, timestamps,
+                    deterministic=deterministic
+                )
 
         action_val = action.item()
         log_prob_val = log_prob.item() if not deterministic else 0.0
@@ -335,12 +354,13 @@ def run_episode(
 
 
 def train_epoch(
-    agent: ActorCriticTransformer,
+    agent,
     optimizer: torch.optim.Optimizer,
     episodes: list,
     ppo_config: PPOConfig,
     reward_config: RewardConfig,
     model_config: ModelConfig,
+    experiment_type: ExperimentType,
     device: str
 ):
     """
@@ -370,7 +390,7 @@ def train_epoch(
     for episode in episodes_to_run:
         metrics = run_episode(
             agent, episode, state_buffer, trajectory_buffer, agent_state,
-            reward_config, model_config, device, deterministic=False
+            reward_config, model_config, experiment_type, device, deterministic=False
         )
 
         if metrics is None:
@@ -412,10 +432,11 @@ def train_epoch(
 
 
 def validate_epoch(
-    agent: ActorCriticTransformer,
+    agent,
     episodes: list,
     reward_config: RewardConfig,
     model_config: ModelConfig,
+    experiment_type: ExperimentType,
     device: str
 ):
     """
@@ -441,7 +462,7 @@ def validate_epoch(
     for episode in episodes:
         metrics = run_episode(
             agent, episode, state_buffer, trajectory_buffer, agent_state,
-            reward_config, model_config, device, deterministic=True
+            reward_config, model_config, experiment_type, device, deterministic=True
         )
 
         if metrics is None:
@@ -479,14 +500,12 @@ def train_split(
     logger('', "INFO")
     logger(f'Training agent on split {split_id}...', "INFO")
 
-    # Initialize episode loader
-    data_config = DataConfig(
-        mongodb_uri=MONGO_URI,
-        database_name=DB_NAME,
-        split_ids=[split_id],
-        role_train='train',
-        role_val='validation'
-    )
+    # Get experiment type from config
+    experiment_type = config.data.experiment_type
+
+    # Initialize episode loader with experiment type
+    data_config = config.data
+    data_config.split_ids = [split_id]
 
     episode_loader = EpisodeLoader(data_config)
 
@@ -499,8 +518,15 @@ def train_split(
     val_episodes = episode_loader.load_episodes(split_id, role='validation')
     logger(f'  Loaded {len(val_episodes)} validation episodes', "INFO")
 
-    # Initialize agent
-    agent = ActorCriticTransformer(config.model).to(device)
+    # Initialize agent based on experiment type
+    logger(f'Initializing agent for Experiment {experiment_type.value}...', "INFO")
+    if experiment_type == ExperimentType.EXP1_BOTH_ORIGINAL:
+        agent = ActorCriticTransformer(config.model).to(device)
+    elif experiment_type == ExperimentType.EXP2_FEATURES_ORIGINAL:
+        agent = ActorCriticFeatures(config.model).to(device)
+    else:  # EXP3_CODEBOOK_ORIGINAL or EXP4_CODEBOOK_SYNTHETIC
+        agent = ActorCriticCodebook(config.model).to(device)
+
     optimizer = optim.Adam(
         agent.parameters(),
         lr=config.ppo.learning_rate,
@@ -523,7 +549,7 @@ def train_split(
         # Training
         train_metrics = train_epoch(
             agent, optimizer, train_episodes,
-            config.ppo, config.reward, config.model, device
+            config.ppo, config.reward, config.model, experiment_type, device
         )
 
         logger(f'  Train - Sharpe: {train_metrics["sharpe"]:.4f}, '
@@ -532,7 +558,7 @@ def train_split(
 
         # Validation (every epoch)
         val_metrics = validate_epoch(
-            agent, val_episodes, config.reward, config.model, device
+            agent, val_episodes, config.reward, config.model, experiment_type, device
         )
 
         logger(f'  Val - Sharpe: {val_metrics["sharpe"]:.4f}, '
@@ -582,9 +608,28 @@ def train_split(
 
 def main():
     """Main execution function."""
+    import argparse
+
+    # Parse command line arguments
+    parser = argparse.ArgumentParser(description='PPO Agent Training with Different Experiments')
+    parser.add_argument('--experiment', type=int, default=1, choices=[1, 2, 3, 4],
+                        help='Experiment type: 1=Both sources (original), 2=Features only (original), '
+                             '3=Codebook only (original), 4=Codebook only (synthetic)')
+    args = parser.parse_args()
+
+    # Map experiment number to enum
+    experiment_mapping = {
+        1: ExperimentType.EXP1_BOTH_ORIGINAL,
+        2: ExperimentType.EXP2_FEATURES_ORIGINAL,
+        3: ExperimentType.EXP3_CODEBOOK_ORIGINAL,
+        4: ExperimentType.EXP4_CODEBOOK_SYNTHETIC
+    }
+    selected_experiment = experiment_mapping[args.experiment]
+
     logger('=' * 100, "INFO")
-    logger('PPO AGENT TRAINING (STAGE 17)', "INFO")
+    logger(f'PPO AGENT TRAINING - EXPERIMENT {args.experiment} (STAGE 18)', "INFO")
     logger('=' * 100, "INFO")
+    logger(f'Experiment: {selected_experiment.name}', "INFO")
 
     # Setup device
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
@@ -620,14 +665,18 @@ def main():
     CHECKPOINT_DIR.mkdir(parents=True, exist_ok=True)
     LOG_DIR.mkdir(parents=True, exist_ok=True)
 
-    # Create experiment config
+    # Create experiment config with selected experiment type
     config = ExperimentConfig(
-        name=f"ppo_training_{datetime.now().strftime('%Y%m%d_%H%M%S')}",
+        name=f"ppo_exp{args.experiment}_{datetime.now().strftime('%Y%m%d_%H%M%S')}",
         model=ModelConfig(window_size=WINDOW_SIZE, horizon=HORIZON),
         ppo=PPOConfig(),
         reward=RewardConfig(),
         training=TrainingConfig(device=str(device)),
-        data=DataConfig(database_name=DB_NAME, split_ids=split_ids)
+        data=DataConfig(
+            database_name=DB_NAME,
+            split_ids=split_ids,
+            experiment_type=selected_experiment
+        )
     )
 
     # Save config

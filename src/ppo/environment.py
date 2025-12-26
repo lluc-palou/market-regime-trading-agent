@@ -98,7 +98,7 @@ class EpisodeLoader:
             
             # Prepare sample
             sample = {
-                'codebook': doc['codebook'],  # VQVAE writes 'codebook' field
+                'codebook': doc['codebook_index'],  # Field name is 'codebook_index' in database
                 'features': torch.tensor(doc['features'], dtype=torch.float32),
                 'timestamp': timestamp.timestamp() if isinstance(timestamp, datetime) else timestamp,
                 'target': doc['target'],

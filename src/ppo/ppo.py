@@ -55,13 +55,15 @@ def ppo_update(
     buffer: TrajectoryBuffer,
     optimizer: torch.optim.Optimizer,
     config,
+    experiment_type,
     device: str = 'cuda'
 ) -> Dict[str, float]:
     """
     Perform PPO update using trajectories in buffer.
-    
+
     Args:
-        agent: ActorCriticTransformer model
+        agent: Actor-critic model (Transformer, Features, or Codebook)
+        experiment_type: ExperimentType enum to determine input format
         buffer: TrajectoryBuffer with collected experience
         optimizer: Optimizer
         config: PPOConfig with hyperparameters
@@ -113,11 +115,25 @@ def ppo_update(
             mb_old_log_probs = old_log_probs[start:end]
             mb_advantages = advantages[start:end]
             mb_returns = returns[start:end]
-            
-            # Forward pass
-            new_log_probs, new_values, entropy = agent.evaluate_actions(
-                mb_codebooks, mb_features, mb_timestamps, mb_actions
-            )
+
+            # Forward pass - call evaluate_actions with correct arguments based on experiment
+            from src.ppo.config import ExperimentType
+
+            if experiment_type == ExperimentType.EXP1_BOTH_ORIGINAL:
+                # Experiment 1: Both codebook + features
+                new_log_probs, new_values, entropy = agent.evaluate_actions(
+                    mb_codebooks, mb_features, mb_timestamps, mb_actions
+                )
+            elif experiment_type == ExperimentType.EXP2_FEATURES_ORIGINAL:
+                # Experiment 2: Features only
+                new_log_probs, new_values, entropy = agent.evaluate_actions(
+                    mb_features, mb_timestamps, mb_actions
+                )
+            else:  # ExperimentType.EXP3_CODEBOOK_ORIGINAL
+                # Experiment 3: Codebook only
+                new_log_probs, new_values, entropy = agent.evaluate_actions(
+                    mb_codebooks, mb_timestamps, mb_actions
+                )
             
             # Policy loss (PPO clipped objective)
             ratio = torch.exp(new_log_probs - mb_old_log_probs)

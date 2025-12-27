@@ -413,14 +413,14 @@ def train_epoch(
         # Perform PPO update if buffer is full
         if trajectory_buffer.is_full():
             loss_metrics = ppo_update(
-                agent, trajectory_buffer, optimizer, ppo_config, device
+                agent, trajectory_buffer, optimizer, ppo_config, experiment_type, device
             )
             trajectory_buffer.clear()
 
     # Final PPO update with remaining trajectories
     if len(trajectory_buffer) > 0:
         loss_metrics = ppo_update(
-            agent, trajectory_buffer, optimizer, ppo_config, device
+            agent, trajectory_buffer, optimizer, ppo_config, experiment_type, device
         )
         trajectory_buffer.clear()
 

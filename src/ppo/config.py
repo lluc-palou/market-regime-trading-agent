@@ -83,8 +83,8 @@ class PPOConfig:
     weight_decay: float = 1e-3           # L2 regularization
     gamma: float = 0.95                  # Discount factor
     gae_lambda: float = 0.95             # GAE lambda parameter
-    clip_ratio: float = 0.2              # PPO clipping parameter
-    value_coef: float = 0.5              # Value loss coefficient
+    clip_ratio: float = 0.1              # PPO clipping parameter (reduced for stability with high variance)
+    value_coef: float = 1.0              # Value loss coefficient (increased for better value estimates)
     entropy_coef: float = 0.01           # Entropy bonus coefficient
     max_grad_norm: float = 0.5           # Gradient clipping norm
     n_epochs: int = 4                    # PPO epochs per update

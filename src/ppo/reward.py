@@ -48,15 +48,20 @@ def compute_forward_looking_reward(
     # Tracking risk (volatility scaled by position size)
     tracking_risk = volatility * (abs(action_curr) + epsilon)
     
-    # Information ratio component
-    info_ratio = active_return / tracking_risk
-    
+    # Information ratio component (raw, unbounded)
+    info_ratio_raw = active_return / tracking_risk
+
+    # Apply tanh to bound the ratio to [-1, 1] and prevent explosions
+    # This prevents extreme rewards when volatility is very low
+    info_ratio = torch.tanh(torch.tensor(info_ratio_raw)).item()
+
     # Position size penalty (regularization)
     position_penalty = alpha_penalty * (action_curr ** 2)
-    
-    # Final reward
-    reward = lambda_risk * info_ratio - position_penalty
-    
+
+    # Final reward - scale info_ratio by 10 to maintain learning signal
+    # Typical range: [-10, +10] instead of unbounded [-500, +500]
+    reward = lambda_risk * 10.0 * info_ratio - position_penalty
+
     return reward
 
 

@@ -124,7 +124,6 @@ LOG_DIR = ARTIFACT_BASE_DIR / "logs"
 # Training configuration
 WINDOW_SIZE = 50  # Observation window (W samples)
 HORIZON = 10      # Reward horizon (H samples)
-MAX_EPISODES_PER_EPOCH = 10  # Limit episodes per epoch for fast training (reduced from 20)
 
 # =================================================================================================
 # Helper Functions
@@ -384,11 +383,10 @@ def train_epoch(
 
     episode_returns = []
 
-    # Limit episodes per epoch for manageable training
-    episodes_to_run = episodes[:MAX_EPISODES_PER_EPOCH]
-    total_episodes = len(episodes_to_run)
+    # Use ALL training episodes each epoch
+    total_episodes = len(episodes)
 
-    for ep_idx, episode in enumerate(episodes_to_run, 1):
+    for ep_idx, episode in enumerate(episodes, 1):
         metrics = run_episode(
             agent, episode, state_buffer, trajectory_buffer, agent_state,
             reward_config, model_config, experiment_type, device, deterministic=False
@@ -737,14 +735,17 @@ def main():
         logger('', "INFO")
         logger('Training Configuration:', "INFO")
         logger(f'  Max epochs: {config.training.max_epochs}', "INFO")
-        logger(f'  Episodes per epoch: {MAX_EPISODES_PER_EPOCH}', "INFO")
+        logger(f'  Episodes per epoch: ALL (no limit)', "INFO")
         logger(f'  Splits to train: {len(split_ids)}', "INFO")
         logger(f'  Early stopping patience: {config.training.patience} epochs', "INFO")
 
-        # Estimate training time (assuming ~300s per epoch based on 10 episodes)
-        # Note: Early stopping (patience=5) will likely reduce actual time by 50-70%
-        estimated_time_per_split_max = (config.training.max_epochs * 300) / 3600  # hours (worst case)
-        estimated_time_per_split_typical = (10 * 300) / 3600  # hours (with early stopping)
+        # Estimate training time (assuming ~40 train episodes per split, ~30s per episode)
+        # Each epoch processes ALL training episodes
+        # Early stopping (patience=3) will likely stop around epoch 5-7
+        estimated_episodes_per_split = 40  # typical 80% of ~50 total episodes
+        estimated_time_per_epoch = (estimated_episodes_per_split * 30) / 3600  # hours
+        estimated_time_per_split_max = config.training.max_epochs * estimated_time_per_epoch
+        estimated_time_per_split_typical = 5 * estimated_time_per_epoch  # with early stopping
         total_estimated_time_max = estimated_time_per_split_max * len(split_ids)
         total_estimated_time_typical = estimated_time_per_split_typical * len(split_ids)
         logger(f'  Estimated time per split: ~{estimated_time_per_split_typical:.1f}h (typical) to {estimated_time_per_split_max:.1f}h (max)', "INFO")

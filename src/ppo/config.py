@@ -105,9 +105,9 @@ class RewardConfig:
 @dataclass
 class TrainingConfig:
     """Training procedure configuration."""
-    max_epochs: int = 20                 # Maximum training epochs (reduced for faster experiments)
-    patience: int = 5                    # Early stopping patience (reduced - stop faster if not improving)
-    min_delta: float = 0.01              # Minimum improvement for early stopping (more sensitive)
+    max_epochs: int = 10                 # Maximum training epochs (each epoch uses ALL episodes)
+    patience: int = 3                    # Early stopping patience
+    min_delta: float = 0.01              # Minimum improvement for early stopping
     validate_every: int = 1              # Validate every N epochs
     log_every: int = 10                  # Log every N episodes
     checkpoint_dir: str = "checkpoints"  # Directory for model checkpoints

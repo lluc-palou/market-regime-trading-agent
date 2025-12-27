@@ -87,9 +87,9 @@ class PPOConfig:
     value_coef: float = 1.0              # Value loss coefficient (increased for better value estimates)
     entropy_coef: float = 0.01           # Entropy bonus coefficient
     max_grad_norm: float = 0.5           # Gradient clipping norm
-    n_epochs: int = 4                    # PPO epochs per update
-    batch_size: int = 32                 # Minibatch size
-    buffer_capacity: int = 512           # Trajectory buffer size
+    n_epochs: int = 2                    # PPO epochs per update (reduced for speed)
+    batch_size: int = 256                # Minibatch size (increased 8x to utilize GPU)
+    buffer_capacity: int = 2048          # Trajectory buffer size (increased 4x)
     
 
 @dataclass

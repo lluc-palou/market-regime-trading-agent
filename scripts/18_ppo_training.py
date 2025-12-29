@@ -382,6 +382,7 @@ def train_epoch(
         'total_policy_loss': 0.0,
         'total_value_loss': 0.0,
         'total_entropy': 0.0,
+        'total_uncertainty': 0.0,
         'n_ppo_updates': 0
     }
 
@@ -457,6 +458,7 @@ def train_epoch(
             epoch_metrics['total_policy_loss'] += loss_metrics['policy_loss']
             epoch_metrics['total_value_loss'] += loss_metrics['value_loss']
             epoch_metrics['total_entropy'] += loss_metrics['entropy']
+            epoch_metrics['total_uncertainty'] += loss_metrics['uncertainty']
             epoch_metrics['n_ppo_updates'] += 1
             trajectory_buffer.clear()
 
@@ -468,6 +470,7 @@ def train_epoch(
         epoch_metrics['total_policy_loss'] += loss_metrics['policy_loss']
         epoch_metrics['total_value_loss'] += loss_metrics['value_loss']
         epoch_metrics['total_entropy'] += loss_metrics['entropy']
+        epoch_metrics['total_uncertainty'] += loss_metrics['uncertainty']
         epoch_metrics['n_ppo_updates'] += 1
         trajectory_buffer.clear()
 
@@ -488,10 +491,12 @@ def train_epoch(
         epoch_metrics['avg_policy_loss'] = epoch_metrics['total_policy_loss'] / epoch_metrics['n_ppo_updates']
         epoch_metrics['avg_value_loss'] = epoch_metrics['total_value_loss'] / epoch_metrics['n_ppo_updates']
         epoch_metrics['avg_entropy'] = epoch_metrics['total_entropy'] / epoch_metrics['n_ppo_updates']
+        epoch_metrics['avg_uncertainty'] = epoch_metrics['total_uncertainty'] / epoch_metrics['n_ppo_updates']
     else:
         epoch_metrics['avg_policy_loss'] = 0.0
         epoch_metrics['avg_value_loss'] = 0.0
         epoch_metrics['avg_entropy'] = 0.0
+        epoch_metrics['avg_uncertainty'] = 0.0
 
     return epoch_metrics
 
@@ -673,7 +678,8 @@ def train_split(
                f'Avg PnL: {train_metrics["avg_pnl"]:.4f}', "INFO")
         logger(f'  Losses - Policy: {train_metrics["avg_policy_loss"]:.4f}, '
                f'Value: {train_metrics["avg_value_loss"]:.4f}, '
-               f'Entropy: {train_metrics["avg_entropy"]:.4f}', "INFO")
+               f'Entropy: {train_metrics["avg_entropy"]:.4f}, '
+               f'Uncertainty: {train_metrics["avg_uncertainty"]:.4f}', "INFO")
 
         # Validation (every epoch)
         val_metrics = validate_epoch(
@@ -696,6 +702,7 @@ def train_split(
         mlflow.log_metric("train_policy_loss", train_metrics["avg_policy_loss"], step=epoch)
         mlflow.log_metric("train_value_loss", train_metrics["avg_value_loss"], step=epoch)
         mlflow.log_metric("train_entropy", train_metrics["avg_entropy"], step=epoch)
+        mlflow.log_metric("train_uncertainty", train_metrics["avg_uncertainty"], step=epoch)
         mlflow.log_metric("val_sharpe", val_metrics["sharpe"], step=epoch)
         mlflow.log_metric("val_avg_reward", val_metrics["avg_reward"], step=epoch)
         mlflow.log_metric("val_avg_pnl", val_metrics["avg_pnl"], step=epoch)

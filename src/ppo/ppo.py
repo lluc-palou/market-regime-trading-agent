@@ -101,6 +101,7 @@ def ppo_update(
     total_policy_loss = 0
     total_value_loss = 0
     total_entropy = 0
+    total_uncertainty = 0
     n_updates = 0
     
     for epoch in range(config.n_epochs):
@@ -124,17 +125,17 @@ def ppo_update(
 
             if experiment_type == ExperimentType.EXP1_BOTH_ORIGINAL:
                 # Experiment 1: Both codebook + features
-                new_log_probs, new_values, entropy = agent.evaluate_actions(
+                new_log_probs, new_values, entropy, std = agent.evaluate_actions(
                     mb_codebooks, mb_features, mb_timestamps, mb_actions
                 )
             elif experiment_type == ExperimentType.EXP2_FEATURES_ORIGINAL:
                 # Experiment 2: Features only
-                new_log_probs, new_values, entropy = agent.evaluate_actions(
+                new_log_probs, new_values, entropy, std = agent.evaluate_actions(
                     mb_features, mb_timestamps, mb_actions
                 )
             else:  # ExperimentType.EXP3_CODEBOOK_ORIGINAL
                 # Experiment 3: Codebook only
-                new_log_probs, new_values, entropy = agent.evaluate_actions(
+                new_log_probs, new_values, entropy, std = agent.evaluate_actions(
                     mb_codebooks, mb_timestamps, mb_actions
                 )
             
@@ -148,12 +149,19 @@ def ppo_update(
             # Value loss (MSE)
             # Uses RAW (unnormalized) returns - value function predicts actual reward scale
             value_loss = F.mse_loss(new_values, mb_returns)
-            
+
             # Entropy bonus
             entropy_loss = -entropy.mean()
-            
+
+            # Uncertainty penalty (discourages extreme std to prevent no-trading exploit)
+            # Penalizes high std values to encourage confident predictions
+            uncertainty_penalty = std.mean()
+
             # Total loss
-            loss = policy_loss + config.value_coef * value_loss + config.entropy_coef * entropy_loss
+            loss = (policy_loss +
+                   config.value_coef * value_loss +
+                   config.entropy_coef * entropy_loss +
+                   config.uncertainty_coef * uncertainty_penalty)
             
             # Optimization step
             optimizer.zero_grad()
@@ -165,11 +173,13 @@ def ppo_update(
             total_policy_loss += policy_loss.item()
             total_value_loss += value_loss.item()
             total_entropy += entropy.mean().item()
+            total_uncertainty += std.mean().item()
             n_updates += 1
-    
+
     return {
         'policy_loss': total_policy_loss / n_updates,
         'value_loss': total_value_loss / n_updates,
         'entropy': total_entropy / n_updates,
+        'uncertainty': total_uncertainty / n_updates,
         'n_updates': n_updates
     }

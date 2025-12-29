@@ -86,6 +86,7 @@ class PPOConfig:
     clip_ratio: float = 0.1              # PPO clipping parameter (reduced for stability with high variance)
     value_coef: float = 1.0              # Value loss coefficient (increased for better value estimates)
     entropy_coef: float = 0.01           # Entropy bonus coefficient
+    uncertainty_coef: float = 0.1        # Uncertainty penalty coefficient (discourages extreme std)
     max_grad_norm: float = 0.5           # Gradient clipping norm
     n_epochs: int = 2                    # PPO epochs per update (reduced for speed)
     batch_size: int = 256                # Minibatch size (increased 8x to utilize GPU)

@@ -226,39 +226,40 @@ class ActorCriticTransformer(nn.Module):
         features: torch.Tensor,
         timestamps: torch.Tensor,
         actions: torch.Tensor
-    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
         """
         Evaluate log probs and values for batch of states/actions (for PPO update).
-        
+
         Args:
             codebooks: (batch, seq_len)
             features: (batch, seq_len, n_features)
             timestamps: (batch, seq_len)
             actions: (batch,) actions in [-1, 1]
-        
+
         Returns:
             log_probs: (batch,) log probabilities
             values: (batch,) state values
             entropy: (batch,) policy entropy
+            std: (batch,) action standard deviation
         """
         # Forward pass
         mean, log_std, value = self.forward(codebooks, features, timestamps)
-        
+
         # Compute log probs
         std = torch.exp(log_std)
         normal = torch.distributions.Normal(mean.squeeze(-1), std.squeeze(-1))
-        
+
         # Inverse tanh to get unbounded actions
         actions_clamped = torch.clamp(actions, -0.999, 0.999)
         actions_unbounded = torch.atanh(actions_clamped)
-        
+
         log_prob = normal.log_prob(actions_unbounded)
         log_prob -= torch.log(1 - actions ** 2 + 1e-6)
-        
+
         # Compute entropy
         entropy = normal.entropy()
-        
-        return log_prob, value.squeeze(-1), entropy
+
+        return log_prob, value.squeeze(-1), entropy, std.squeeze(-1)
     
     def count_parameters(self) -> int:
         """Count total trainable parameters."""
@@ -418,7 +419,7 @@ class ActorCriticFeatures(nn.Module):
         features: torch.Tensor,
         timestamps: torch.Tensor,
         actions: torch.Tensor
-    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
         """
         Evaluate log probs and values for batch of states/actions (for PPO update).
 
@@ -431,6 +432,7 @@ class ActorCriticFeatures(nn.Module):
             log_probs: (batch,) log probabilities
             values: (batch,) state values
             entropy: (batch,) policy entropy
+            std: (batch,) action standard deviation
         """
         # Forward pass
         mean, log_std, value = self.forward(features, timestamps)
@@ -449,7 +451,7 @@ class ActorCriticFeatures(nn.Module):
         # Compute entropy
         entropy = normal.entropy()
 
-        return log_prob, value.squeeze(-1), entropy
+        return log_prob, value.squeeze(-1), entropy, std.squeeze(-1)
 
     def count_parameters(self) -> int:
         """Count total trainable parameters."""
@@ -610,7 +612,7 @@ class ActorCriticCodebook(nn.Module):
         codebooks: torch.Tensor,
         timestamps: torch.Tensor,
         actions: torch.Tensor
-    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
         """
         Evaluate log probs and values for batch of states/actions (for PPO update).
 
@@ -623,6 +625,7 @@ class ActorCriticCodebook(nn.Module):
             log_probs: (batch,) log probabilities
             values: (batch,) state values
             entropy: (batch,) policy entropy
+            std: (batch,) action standard deviation
         """
         # Forward pass
         mean, log_std, value = self.forward(codebooks, timestamps)
@@ -641,7 +644,7 @@ class ActorCriticCodebook(nn.Module):
         # Compute entropy
         entropy = normal.entropy()
 
-        return log_prob, value.squeeze(-1), entropy
+        return log_prob, value.squeeze(-1), entropy, std.squeeze(-1)
 
     def count_parameters(self) -> int:
         """Count total trainable parameters."""

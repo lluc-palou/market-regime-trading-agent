@@ -37,7 +37,7 @@ class ModelConfig:
     n_layers: int = 4                    # Number of transformer layers (increased from 2)
     dropout: float = 0.2                 # Dropout rate (increased for regularization)
     window_size: int = 10                # Observation window (W samples) - reduced from 50
-    horizon: int = 10                    # Reward horizon (H samples)
+    horizon: int = 1                     # Reward horizon - immediate next return (not lookahead)
     min_log_std: float = -20.0           # Minimum log std for policy
     max_log_std: float = 2.0             # Maximum log std for policy
     ffn_expansion: int = 4               # FFN dimension = d_model × ffn_expansion

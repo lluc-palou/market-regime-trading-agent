@@ -5,7 +5,8 @@ from .buffer import StateBuffer, TrajectoryBuffer, AgentState, Transition
 from .ppo import ppo_update, compute_gae
 from .environment import Episode, EpisodeLoader, get_valid_timesteps
 from .reward import (
-    compute_forward_looking_reward,
+    compute_volatility_scaled_position,
+    compute_simple_reward,
     compute_transaction_cost,
     compute_unrealized_pnl
 )
@@ -38,7 +39,8 @@ __all__ = [
     'Episode',
     'EpisodeLoader',
     'get_valid_timesteps',
-    'compute_forward_looking_reward',
+    'compute_volatility_scaled_position',
+    'compute_simple_reward',
     'compute_transaction_cost',
     'compute_unrealized_pnl',
     'MetricsLogger',

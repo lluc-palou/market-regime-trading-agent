@@ -283,9 +283,9 @@ def run_episode(
         # Get immediate target (one-step forward return)
         target = current_sample['target']
 
-        # Extract volatility from features (standardized/normalized)
-        # Assuming volatility is at index 1 (second feature)
-        volatility = current_sample['features'][1].item()
+        # Extract volatility from features (standardized/normalized, already computed)
+        # Volatility is at index 6 (feature_names[6] = "volatility")
+        volatility = current_sample['features'][6].item()
 
         # Scale action to position using volatility
         position_curr = compute_volatility_scaled_position(

@@ -168,20 +168,21 @@ class ActorCriticTransformer(nn.Module):
         features: torch.Tensor,
         timestamps: torch.Tensor,
         deterministic: bool = False
-    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
         """
         Select action given current state.
-        
+
         Args:
             codebooks: (seq_len,) or (batch, seq_len)
             features: (seq_len, n_features) or (batch, seq_len, n_features)
             timestamps: (seq_len,) or (batch, seq_len)
             deterministic: If True, return mean action (for evaluation)
-        
+
         Returns:
             action: sampled action in [-1, 1]
             log_prob: log probability of action
             value: estimated state value
+            std: policy standard deviation (agent's uncertainty)
         """
         # Add batch dimension if needed
         if codebooks.dim() == 1:
@@ -194,28 +195,30 @@ class ActorCriticTransformer(nn.Module):
         
         # Forward pass
         mean, log_std, value = self.forward(codebooks, features, timestamps)
-        
+
+        # Compute std (always needed for position sizing)
+        std = torch.exp(log_std)
+
         if deterministic:
             # Use mean action (for evaluation)
             action = torch.tanh(mean)
             log_prob = torch.zeros_like(action)  # Not used in evaluation
         else:
             # Sample from Gaussian policy
-            std = torch.exp(log_std)
             normal = torch.distributions.Normal(mean, std)
             action_unbounded = normal.rsample()  # Reparameterization trick
-            
+
             # Apply tanh squashing
             action = torch.tanh(action_unbounded)
-            
+
             # Compute log prob with Jacobian correction
             log_prob = normal.log_prob(action_unbounded)
             log_prob -= torch.log(1 - action ** 2 + 1e-6)
-        
+
         if squeeze_output:
-            return action.squeeze(), log_prob.squeeze(), value.squeeze()
+            return action.squeeze(), log_prob.squeeze(), value.squeeze(), std.squeeze()
         else:
-            return action, log_prob, value
+            return action, log_prob, value, std
     
     def evaluate_actions(
         self,
@@ -366,7 +369,7 @@ class ActorCriticFeatures(nn.Module):
         features: torch.Tensor,
         timestamps: torch.Tensor,
         deterministic: bool = False
-    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
         """
         Select action given current state (features only).
 
@@ -379,6 +382,7 @@ class ActorCriticFeatures(nn.Module):
             action: sampled action in [-1, 1]
             log_prob: log probability of action
             value: estimated state value
+            std: policy standard deviation (agent's uncertainty)
         """
         # Add batch dimension if needed
         if features.dim() == 2:
@@ -391,11 +395,13 @@ class ActorCriticFeatures(nn.Module):
         # Forward pass
         mean, log_std, value = self.forward(features, timestamps)
 
+        # Compute std (always needed for position sizing)
+        std = torch.exp(log_std)
+
         if deterministic:
             action = torch.tanh(mean)
             log_prob = torch.zeros_like(action)
         else:
-            std = torch.exp(log_std)
             normal = torch.distributions.Normal(mean, std)
             action_unbounded = normal.rsample()
             action = torch.tanh(action_unbounded)
@@ -403,9 +409,9 @@ class ActorCriticFeatures(nn.Module):
             log_prob -= torch.log(1 - action ** 2 + 1e-6)
 
         if squeeze_output:
-            return action.squeeze(), log_prob.squeeze(), value.squeeze()
+            return action.squeeze(), log_prob.squeeze(), value.squeeze(), std.squeeze()
         else:
-            return action, log_prob, value
+            return action, log_prob, value, std
 
     def evaluate_actions(
         self,
@@ -555,7 +561,7 @@ class ActorCriticCodebook(nn.Module):
         codebooks: torch.Tensor,
         timestamps: torch.Tensor,
         deterministic: bool = False
-    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
         """
         Select action given current state (codebook only).
 
@@ -568,6 +574,7 @@ class ActorCriticCodebook(nn.Module):
             action: sampled action in [-1, 1]
             log_prob: log probability of action
             value: estimated state value
+            std: policy standard deviation (agent's uncertainty)
         """
         # Add batch dimension if needed
         if codebooks.dim() == 1:
@@ -580,11 +587,13 @@ class ActorCriticCodebook(nn.Module):
         # Forward pass
         mean, log_std, value = self.forward(codebooks, timestamps)
 
+        # Compute std (always needed for position sizing)
+        std = torch.exp(log_std)
+
         if deterministic:
             action = torch.tanh(mean)
             log_prob = torch.zeros_like(action)
         else:
-            std = torch.exp(log_std)
             normal = torch.distributions.Normal(mean, std)
             action_unbounded = normal.rsample()
             action = torch.tanh(action_unbounded)
@@ -592,9 +601,9 @@ class ActorCriticCodebook(nn.Module):
             log_prob -= torch.log(1 - action ** 2 + 1e-6)
 
         if squeeze_output:
-            return action.squeeze(), log_prob.squeeze(), value.squeeze()
+            return action.squeeze(), log_prob.squeeze(), value.squeeze(), std.squeeze()
         else:
-            return action, log_prob, value
+            return action, log_prob, value, std
 
     def evaluate_actions(
         self,

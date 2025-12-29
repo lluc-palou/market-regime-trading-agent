@@ -84,14 +84,17 @@ def ppo_update(
     old_values = batch['values']
     dones = batch['dones']
     
-    # Compute advantages using GAE
+    # Compute advantages and returns using GAE
+    # returns = raw discounted rewards (NOT normalized)
+    # advantages = how much better/worse actions were vs baseline
     advantages, returns = compute_gae(
         rewards, old_values, dones,
         gamma=config.gamma,
         gae_lambda=config.gae_lambda
     )
-    
-    # Normalize advantages
+
+    # Normalize advantages for policy gradient (stabilizes training)
+    # NOTE: returns are NOT normalized - value function learns raw reward scale
     advantages = (advantages - advantages.mean()) / (advantages.std() + 1e-8)
     
     # PPO epochs
@@ -136,12 +139,14 @@ def ppo_update(
                 )
             
             # Policy loss (PPO clipped objective)
+            # Uses normalized advantages for stable gradients
             ratio = torch.exp(new_log_probs - mb_old_log_probs)
             surr1 = ratio * mb_advantages
             surr2 = torch.clamp(ratio, 1 - config.clip_ratio, 1 + config.clip_ratio) * mb_advantages
             policy_loss = -torch.min(surr1, surr2).mean()
-            
+
             # Value loss (MSE)
+            # Uses RAW (unnormalized) returns - value function predicts actual reward scale
             value_loss = F.mse_loss(new_values, mb_returns)
             
             # Entropy bonus

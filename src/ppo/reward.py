@@ -4,6 +4,55 @@ import torch
 from typing import Optional
 
 
+def compute_policy_based_position(
+    action: float,
+    action_std: float,
+    confidence_weight: float = 1.0,
+    min_std: float = 0.1,
+    max_std: float = 3.0
+) -> float:
+    """
+    Compute position using agent's policy distribution (action mean and std).
+
+    This allows the PPO algorithm to learn position sizing directly:
+    - action (after tanh): direction ∈ [-1, 1]
+    - action_std: agent's uncertainty/confidence
+    - Lower std → higher confidence → larger position
+    - Higher std → lower confidence → smaller position
+
+    Formula: position = action × exp(-confidence_weight × (std - min_std))
+
+    Args:
+        action: Agent action (tanh-squashed, in [-1, 1])
+        action_std: Policy standard deviation (agent's uncertainty)
+        confidence_weight: How strongly std affects position size (default: 1.0)
+        min_std: Minimum expected std for scaling (default: 0.1)
+        max_std: Maximum expected std for capping (default: 3.0)
+
+    Returns:
+        Position in range approximately [-1, 1]
+
+    Examples:
+        With confidence_weight=1.0, min_std=0.1:
+        - action=0.5, std=0.1 (very confident) → position ≈ 0.5 × exp(0) = 0.50
+        - action=0.5, std=0.5 (uncertain) → position ≈ 0.5 × exp(-0.4) = 0.34
+        - action=0.5, std=1.0 (very uncertain) → position ≈ 0.5 × exp(-0.9) = 0.20
+        - action=0.5, std=2.0 (extremely uncertain) → position ≈ 0.5 × exp(-1.9) = 0.08
+    """
+    # Clamp std to reasonable range
+    std_clamped = max(min_std, min(action_std, max_std))
+
+    # Confidence scaling: exp(-k × (std - min_std))
+    # When std = min_std → scale = 1.0 (maximum position)
+    # When std increases → scale decreases exponentially
+    confidence_scale = torch.exp(torch.tensor(-confidence_weight * (std_clamped - min_std))).item()
+
+    # Compute position
+    position = action * confidence_scale
+
+    return position
+
+
 def compute_volatility_scaled_position(
     action: float,
     volatility: float,
@@ -11,7 +60,11 @@ def compute_volatility_scaled_position(
     epsilon: float = 0.1
 ) -> float:
     """
-    Scale agent's action to actual position using volatility.
+    [DEPRECATED] Scale agent's action to actual position using volatility.
+
+    NOTE: This function decouples position sizing from agent learning, which prevents
+    the PPO algorithm from learning optimal position sizing. Use compute_policy_based_position()
+    instead to allow the agent to learn both direction and sizing.
 
     Formula: position = action × min(1.0, C / max(σ, epsilon))
 

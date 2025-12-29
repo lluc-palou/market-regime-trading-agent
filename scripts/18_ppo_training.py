@@ -87,7 +87,7 @@ from src.ppo import (
     Transition,
     ppo_update,
     get_valid_timesteps,
-    compute_volatility_scaled_position,
+    compute_policy_based_position,
     compute_simple_reward,
     compute_unrealized_pnl,
     ModelConfig,
@@ -260,42 +260,40 @@ def run_episode(
         with torch.no_grad():
             if experiment_type == ExperimentType.EXP1_BOTH_ORIGINAL:
                 # Experiment 1: Both codebook + features
-                action, log_prob, value = agent.act(
+                action, log_prob, value, action_std = agent.act(
                     codebooks, features, timestamps,
                     deterministic=deterministic
                 )
             elif experiment_type == ExperimentType.EXP2_FEATURES_ORIGINAL:
                 # Experiment 2: Features only
-                action, log_prob, value = agent.act(
+                action, log_prob, value, action_std = agent.act(
                     features, timestamps,
                     deterministic=deterministic
                 )
             else:  # EXP3_CODEBOOK_ORIGINAL
                 # Experiment 3: Codebook only
-                action, log_prob, value = agent.act(
+                action, log_prob, value, action_std = agent.act(
                     codebooks, timestamps,
                     deterministic=deterministic
                 )
 
         action_val = action.item()
+        action_std_val = action_std.item()
         log_prob_val = log_prob.item() if not deterministic else 0.0
         value_val = value.item()
 
         # Get immediate target (one-step forward return)
         target = current_sample['target']
 
-        # Extract volatility from features (standardized/normalized, already computed)
-        # Volatility is at index 6 (feature_names[6] = "volatility")
-        volatility = current_sample['features'][6].item()
-
-        # Scale action to position using volatility
-        # C=0.05 gives ~6% positions at typical volatility (σ≈0.8)
-        # epsilon=0.1 floors volatility to prevent position explosions when σ→0
-        position_curr = compute_volatility_scaled_position(
-            action_val, volatility, vol_constant=0.05, epsilon=0.1
+        # Compute position using agent's policy distribution (action mean + std)
+        # This allows PPO to learn position sizing directly through confidence (std)
+        # Lower std → higher confidence → larger position
+        # Higher std → lower confidence → smaller position
+        position_curr = compute_policy_based_position(
+            action_val, action_std_val, confidence_weight=1.0
         )
 
-        # Get previous position (volatility-scaled from previous timestep)
+        # Get previous position (policy-based from previous timestep)
         position_prev = agent_state.current_position
 
         # Compute reward using simple PnL-based formula
@@ -313,8 +311,9 @@ def run_episode(
         else:
             log_return = episode.samples[t - 1]['target']
 
-        # Update agent state with scaled position
-        agent_state.update(position_curr, log_return, tc, reward, unrealized, gross_pnl, volatility)
+        # Update agent state with policy-based position
+        # Track action_std instead of volatility (agent's learned uncertainty)
+        agent_state.update(position_curr, log_return, tc, reward, unrealized, gross_pnl, action_std_val)
         episode_returns.append(reward)
 
         # Check if episode should end
@@ -397,7 +396,7 @@ def train_epoch(
         'total_reward': 0.0, 'total_pnl': 0.0, 'chunks': 0,
         'total_trades': 0, 'total_steps': 0,
         'sum_mean_pos': 0.0, 'max_pos': 0.0,
-        'sum_mean_vol': 0.0, 'min_vol': float('inf'), 'max_vol': float('-inf'),
+        'sum_mean_std': 0.0, 'min_std': float('inf'), 'max_std': float('-inf'),
         'sum_gross_pnl_per_trade': 0.0, 'sum_tc_per_trade': 0.0
     })
 
@@ -426,9 +425,9 @@ def train_epoch(
         dm['total_steps'] += metrics['episode_length']
         dm['sum_mean_pos'] += metrics['mean_abs_position']
         dm['max_pos'] = max(dm['max_pos'], metrics['max_position'])
-        dm['sum_mean_vol'] += metrics['mean_volatility']
-        dm['min_vol'] = min(dm['min_vol'], metrics['min_volatility'])
-        dm['max_vol'] = max(dm['max_vol'], metrics['max_volatility'])
+        dm['sum_mean_std'] += metrics['mean_action_std']
+        dm['min_std'] = min(dm['min_std'], metrics['min_action_std'])
+        dm['max_std'] = max(dm['max_std'], metrics['max_action_std'])
         dm['sum_gross_pnl_per_trade'] += metrics['avg_gross_pnl_per_trade']
         dm['sum_tc_per_trade'] += metrics['avg_tc_per_trade']
 
@@ -445,7 +444,7 @@ def train_epoch(
                    f'PnL: {dm["total_pnl"]:.4f}, '
                    f'Trades: {dm["total_trades"]} ({dm["total_trades"]/dm["total_steps"]:.2%}), '
                    f'Pos[μ={dm["sum_mean_pos"]/n_chunks:.4f}, max={dm["max_pos"]:.4f}], '
-                   f'Vol[μ={dm["sum_mean_vol"]/n_chunks:.4f}, range=[{dm["min_vol"]:.4f},{dm["max_vol"]:.4f}]], '
+                   f'Std[μ={dm["sum_mean_std"]/n_chunks:.4f}, range=[{dm["min_std"]:.4f},{dm["max_std"]:.4f}]], '
                    f'Gross PnL/Trade: {dm["sum_gross_pnl_per_trade"]/n_chunks:.6f}, '
                    f'TC/Trade: {dm["sum_tc_per_trade"]/n_chunks:.6f}, '
                    f'Steps: {dm["total_steps"]}', "INFO")
@@ -532,7 +531,7 @@ def validate_epoch(
         'total_reward': 0.0, 'total_pnl': 0.0, 'chunks': 0,
         'total_trades': 0, 'total_steps': 0,
         'sum_mean_pos': 0.0, 'max_pos': 0.0,
-        'sum_mean_vol': 0.0, 'min_vol': float('inf'), 'max_vol': float('-inf'),
+        'sum_mean_std': 0.0, 'min_std': float('inf'), 'max_std': float('-inf'),
         'sum_gross_pnl_per_trade': 0.0, 'sum_tc_per_trade': 0.0
     })
 
@@ -560,9 +559,9 @@ def validate_epoch(
         dm['total_steps'] += metrics['episode_length']
         dm['sum_mean_pos'] += metrics['mean_abs_position']
         dm['max_pos'] = max(dm['max_pos'], metrics['max_position'])
-        dm['sum_mean_vol'] += metrics['mean_volatility']
-        dm['min_vol'] = min(dm['min_vol'], metrics['min_volatility'])
-        dm['max_vol'] = max(dm['max_vol'], metrics['max_volatility'])
+        dm['sum_mean_std'] += metrics['mean_action_std']
+        dm['min_std'] = min(dm['min_std'], metrics['min_action_std'])
+        dm['max_std'] = max(dm['max_std'], metrics['max_action_std'])
         dm['sum_gross_pnl_per_trade'] += metrics['avg_gross_pnl_per_trade']
         dm['sum_tc_per_trade'] += metrics['avg_tc_per_trade']
 
@@ -579,7 +578,7 @@ def validate_epoch(
                    f'PnL: {dm["total_pnl"]:.4f}, '
                    f'Trades: {dm["total_trades"]} ({dm["total_trades"]/dm["total_steps"]:.2%}), '
                    f'Pos[μ={dm["sum_mean_pos"]/n_chunks:.4f}, max={dm["max_pos"]:.4f}], '
-                   f'Vol[μ={dm["sum_mean_vol"]/n_chunks:.4f}, range=[{dm["min_vol"]:.4f},{dm["max_vol"]:.4f}]], '
+                   f'Std[μ={dm["sum_mean_std"]/n_chunks:.4f}, range=[{dm["min_std"]:.4f},{dm["max_std"]:.4f}]], '
                    f'Gross PnL/Trade: {dm["sum_gross_pnl_per_trade"]/n_chunks:.6f}, '
                    f'TC/Trade: {dm["sum_tc_per_trade"]/n_chunks:.6f}, '
                    f'Steps: {dm["total_steps"]}', "INFO")

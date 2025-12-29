@@ -645,11 +645,11 @@ def train_split(
 
     # Learning rate scheduler - reduces LR when validation Sharpe plateaus
     scheduler = optim.lr_scheduler.ReduceLROnPlateau(
-        optimizer, mode='max', factor=0.5, patience=2, min_lr=1e-6
+        optimizer, mode='max', factor=0.5, patience=3, min_lr=1e-6
     )
 
     logger(f'Agent initialized: {agent.count_parameters():,} parameters', "INFO")
-    logger(f'Learning rate scheduler: ReduceLROnPlateau (factor=0.5, patience=2)', "INFO")
+    logger(f'Learning rate scheduler: ReduceLROnPlateau (factor=0.5, patience=3)', "INFO")
 
     # Training loop
     metrics_logger = MetricsLogger(log_dir=str(LOG_DIR))

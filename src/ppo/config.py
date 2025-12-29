@@ -30,12 +30,12 @@ class ModelConfig:
     """Transformer architecture configuration."""
     vocab_size: int = 128                # VQ-VAE codebook size (K)
     n_features: int = 18                 # Number of hand-crafted features
-    d_codebook: int = 64                 # Codebook embedding dimension
-    d_features: int = 64                 # Feature projection dimension
-    d_model: int = 128                   # Transformer model dimension
-    n_heads: int = 4                     # Number of attention heads
-    n_layers: int = 2                    # Number of transformer layers
-    dropout: float = 0.15                # Dropout rate
+    d_codebook: int = 80                 # Codebook embedding dimension (increased from 64)
+    d_features: int = 80                 # Feature projection dimension (increased from 64)
+    d_model: int = 160                   # Transformer model dimension (increased from 128)
+    n_heads: int = 8                     # Number of attention heads (increased from 4)
+    n_layers: int = 4                    # Number of transformer layers (increased from 2)
+    dropout: float = 0.2                 # Dropout rate (increased for regularization)
     window_size: int = 50                # Observation window (W samples)
     horizon: int = 10                    # Reward horizon (H samples)
     min_log_std: float = -20.0           # Minimum log std for policy
@@ -105,8 +105,8 @@ class RewardConfig:
 @dataclass
 class TrainingConfig:
     """Training procedure configuration."""
-    max_epochs: int = 10                 # Maximum training epochs (each epoch uses ALL episodes)
-    patience: int = 3                    # Early stopping patience
+    max_epochs: int = 50                 # Maximum training epochs (increased from 10)
+    patience: int = 7                    # Early stopping patience (increased from 3)
     min_delta: float = 0.01              # Minimum improvement for early stopping
     validate_every: int = 1              # Validate every N epochs
     log_every: int = 10                  # Log every N episodes

@@ -124,7 +124,7 @@ LOG_DIR = ARTIFACT_BASE_DIR / "logs"
 # Training configuration
 WINDOW_SIZE = 50  # Observation window (W samples)
 HORIZON = 10      # Reward horizon (H samples)
-MAX_EPISODE_LENGTH = 120  # Truncate episodes to ~1 hour of trading (was ~2500 for full day)
+EPISODE_CHUNK_SIZE = 120  # Split day episodes into hourly chunks (120 samples ≈ 1 hour)
 
 # =================================================================================================
 # Helper Functions
@@ -230,10 +230,6 @@ def run_episode(
     if len(valid_steps) == 0:
         # Episode too short
         return None
-
-    # Truncate episode to MAX_EPISODE_LENGTH for faster learning
-    if len(valid_steps) > MAX_EPISODE_LENGTH:
-        valid_steps = valid_steps[:MAX_EPISODE_LENGTH]
 
     episode_returns = []
 
@@ -395,6 +391,16 @@ def train_epoch(
     # Use ALL training episodes each epoch
     total_episodes = len(episodes)
 
+    # Group episodes by parent_id for aggregated logging
+    from collections import defaultdict
+    day_metrics = defaultdict(lambda: {
+        'total_reward': 0.0, 'total_pnl': 0.0, 'chunks': 0,
+        'total_trades': 0, 'total_steps': 0,
+        'sum_mean_pos': 0.0, 'max_pos': 0.0,
+        'sum_mean_vol': 0.0, 'min_vol': float('inf'), 'max_vol': float('-inf'),
+        'sum_gross_pnl_per_trade': 0.0, 'sum_tc_per_trade': 0.0
+    })
+
     for ep_idx, episode in enumerate(episodes, 1):
         metrics = run_episode(
             agent, episode, state_buffer, trajectory_buffer, agent_state,
@@ -410,17 +416,39 @@ def train_epoch(
         epoch_metrics['avg_episode_length'] += metrics['episode_length']
         episode_returns.append(metrics['total_reward'])
 
-        # Log progress every episode
-        from src.utils.logging import logger
-        logger(f'    Episode {ep_idx}/{total_episodes} - '
-               f'Reward: {metrics["total_reward"]:.4f}, '
-               f'PnL: {metrics["total_pnl"]:.4f}, '
-               f'Trades: {metrics["trade_count"]} ({metrics["trade_frequency"]:.2%}), '
-               f'Pos[μ={metrics["mean_abs_position"]:.4f}, max={metrics["max_position"]:.4f}], '
-               f'Vol[μ={metrics["mean_volatility"]:.4f}, range=[{metrics["min_volatility"]:.4f},{metrics["max_volatility"]:.4f}]], '
-               f'Gross PnL/Trade: {metrics["avg_gross_pnl_per_trade"]:.6f}, '
-               f'TC/Trade: {metrics["avg_tc_per_trade"]:.6f}, '
-               f'Steps: {metrics["episode_length"]}', "INFO")
+        # Aggregate metrics by parent episode (day)
+        parent_id = episode.parent_id if episode.parent_id is not None else ep_idx
+        dm = day_metrics[parent_id]
+        dm['total_reward'] += metrics['total_reward']
+        dm['total_pnl'] += metrics['total_pnl']
+        dm['chunks'] += 1
+        dm['total_trades'] += metrics['trade_count']
+        dm['total_steps'] += metrics['episode_length']
+        dm['sum_mean_pos'] += metrics['mean_abs_position']
+        dm['max_pos'] = max(dm['max_pos'], metrics['max_position'])
+        dm['sum_mean_vol'] += metrics['mean_volatility']
+        dm['min_vol'] = min(dm['min_vol'], metrics['min_volatility'])
+        dm['max_vol'] = max(dm['max_vol'], metrics['max_volatility'])
+        dm['sum_gross_pnl_per_trade'] += metrics['avg_gross_pnl_per_trade']
+        dm['sum_tc_per_trade'] += metrics['avg_tc_per_trade']
+
+        # Log when completing a parent episode (all chunks done)
+        is_last_chunk = (ep_idx == total_episodes or
+                        (ep_idx < total_episodes and episodes[ep_idx].parent_id != parent_id))
+
+        if is_last_chunk:
+            from src.utils.logging import logger
+            n_chunks = dm['chunks']
+            logger(f'    Day {len([k for k in day_metrics.keys() if day_metrics[k]["chunks"] > 0])}/{len(set(e.parent_id if e.parent_id is not None else i for i, e in enumerate(episodes, 1)))} '
+                   f'({n_chunks} chunks) - '
+                   f'Reward: {dm["total_reward"]:.4f}, '
+                   f'PnL: {dm["total_pnl"]:.4f}, '
+                   f'Trades: {dm["total_trades"]} ({dm["total_trades"]/dm["total_steps"]:.2%}), '
+                   f'Pos[μ={dm["sum_mean_pos"]/n_chunks:.4f}, max={dm["max_pos"]:.4f}], '
+                   f'Vol[μ={dm["sum_mean_vol"]/n_chunks:.4f}, range=[{dm["min_vol"]:.4f},{dm["max_vol"]:.4f}]], '
+                   f'Gross PnL/Trade: {dm["sum_gross_pnl_per_trade"]/n_chunks:.6f}, '
+                   f'TC/Trade: {dm["sum_tc_per_trade"]/n_chunks:.6f}, '
+                   f'Steps: {dm["total_steps"]}', "INFO")
 
         # Perform PPO update if buffer is full
         if trajectory_buffer.is_full():
@@ -498,6 +526,16 @@ def validate_epoch(
     episode_returns = []
     total_episodes = len(episodes)
 
+    # Group episodes by parent_id for aggregated logging
+    from collections import defaultdict
+    day_metrics = defaultdict(lambda: {
+        'total_reward': 0.0, 'total_pnl': 0.0, 'chunks': 0,
+        'total_trades': 0, 'total_steps': 0,
+        'sum_mean_pos': 0.0, 'max_pos': 0.0,
+        'sum_mean_vol': 0.0, 'min_vol': float('inf'), 'max_vol': float('-inf'),
+        'sum_gross_pnl_per_trade': 0.0, 'sum_tc_per_trade': 0.0
+    })
+
     for ep_idx, episode in enumerate(episodes, 1):
         metrics = run_episode(
             agent, episode, state_buffer, trajectory_buffer, agent_state,
@@ -512,17 +550,39 @@ def validate_epoch(
         val_metrics['episode_count'] += 1
         episode_returns.append(metrics['total_reward'])
 
-        # Log progress every episode
-        from src.utils.logging import logger
-        logger(f'    Episode {ep_idx}/{total_episodes} - '
-               f'Reward: {metrics["total_reward"]:.4f}, '
-               f'PnL: {metrics["total_pnl"]:.4f}, '
-               f'Trades: {metrics["trade_count"]} ({metrics["trade_frequency"]:.2%}), '
-               f'Pos[μ={metrics["mean_abs_position"]:.4f}, max={metrics["max_position"]:.4f}], '
-               f'Vol[μ={metrics["mean_volatility"]:.4f}, range=[{metrics["min_volatility"]:.4f},{metrics["max_volatility"]:.4f}]], '
-               f'Gross PnL/Trade: {metrics["avg_gross_pnl_per_trade"]:.6f}, '
-               f'TC/Trade: {metrics["avg_tc_per_trade"]:.6f}, '
-               f'Steps: {metrics["episode_length"]}', "INFO")
+        # Aggregate metrics by parent episode (day)
+        parent_id = episode.parent_id if episode.parent_id is not None else ep_idx
+        dm = day_metrics[parent_id]
+        dm['total_reward'] += metrics['total_reward']
+        dm['total_pnl'] += metrics['total_pnl']
+        dm['chunks'] += 1
+        dm['total_trades'] += metrics['trade_count']
+        dm['total_steps'] += metrics['episode_length']
+        dm['sum_mean_pos'] += metrics['mean_abs_position']
+        dm['max_pos'] = max(dm['max_pos'], metrics['max_position'])
+        dm['sum_mean_vol'] += metrics['mean_volatility']
+        dm['min_vol'] = min(dm['min_vol'], metrics['min_volatility'])
+        dm['max_vol'] = max(dm['max_vol'], metrics['max_volatility'])
+        dm['sum_gross_pnl_per_trade'] += metrics['avg_gross_pnl_per_trade']
+        dm['sum_tc_per_trade'] += metrics['avg_tc_per_trade']
+
+        # Log when completing a parent episode (all chunks done)
+        is_last_chunk = (ep_idx == total_episodes or
+                        (ep_idx < total_episodes and episodes[ep_idx].parent_id != parent_id))
+
+        if is_last_chunk:
+            from src.utils.logging import logger
+            n_chunks = dm['chunks']
+            logger(f'    Day {len([k for k in day_metrics.keys() if day_metrics[k]["chunks"] > 0])}/{len(set(e.parent_id if e.parent_id is not None else i for i, e in enumerate(episodes, 1)))} '
+                   f'({n_chunks} chunks) - '
+                   f'Reward: {dm["total_reward"]:.4f}, '
+                   f'PnL: {dm["total_pnl"]:.4f}, '
+                   f'Trades: {dm["total_trades"]} ({dm["total_trades"]/dm["total_steps"]:.2%}), '
+                   f'Pos[μ={dm["sum_mean_pos"]/n_chunks:.4f}, max={dm["max_pos"]:.4f}], '
+                   f'Vol[μ={dm["sum_mean_vol"]/n_chunks:.4f}, range=[{dm["min_vol"]:.4f},{dm["max_vol"]:.4f}]], '
+                   f'Gross PnL/Trade: {dm["sum_gross_pnl_per_trade"]/n_chunks:.6f}, '
+                   f'TC/Trade: {dm["sum_tc_per_trade"]/n_chunks:.6f}, '
+                   f'Steps: {dm["total_steps"]}', "INFO")
 
     # Compute averages
     if val_metrics['episode_count'] > 0:
@@ -554,11 +614,11 @@ def train_split(
     # Get experiment type from config
     experiment_type = config.data.experiment_type
 
-    # Initialize episode loader with experiment type
+    # Initialize episode loader with experiment type and chunk size
     data_config = config.data
     data_config.split_ids = [split_id]
 
-    episode_loader = EpisodeLoader(data_config)
+    episode_loader = EpisodeLoader(data_config, episode_chunk_size=EPISODE_CHUNK_SIZE)
 
     # Load episodes
     logger('Loading training episodes...', "INFO")

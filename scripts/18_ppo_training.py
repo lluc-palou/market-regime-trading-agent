@@ -124,6 +124,7 @@ LOG_DIR = ARTIFACT_BASE_DIR / "logs"
 # Training configuration
 WINDOW_SIZE = 50  # Observation window (W samples)
 HORIZON = 10      # Reward horizon (H samples)
+MAX_EPISODE_LENGTH = 120  # Truncate episodes to ~1 hour of trading (was ~2500 for full day)
 
 # =================================================================================================
 # Helper Functions
@@ -229,6 +230,10 @@ def run_episode(
     if len(valid_steps) == 0:
         # Episode too short
         return None
+
+    # Truncate episode to MAX_EPISODE_LENGTH for faster learning
+    if len(valid_steps) > MAX_EPISODE_LENGTH:
+        valid_steps = valid_steps[:MAX_EPISODE_LENGTH]
 
     episode_returns = []
 
@@ -378,7 +383,11 @@ def train_epoch(
         'total_reward': 0.0,
         'total_pnl': 0.0,
         'episode_count': 0,
-        'avg_episode_length': 0.0
+        'avg_episode_length': 0.0,
+        'total_policy_loss': 0.0,
+        'total_value_loss': 0.0,
+        'total_entropy': 0.0,
+        'n_ppo_updates': 0
     }
 
     episode_returns = []
@@ -418,6 +427,10 @@ def train_epoch(
             loss_metrics = ppo_update(
                 agent, trajectory_buffer, optimizer, ppo_config, experiment_type, device
             )
+            epoch_metrics['total_policy_loss'] += loss_metrics['policy_loss']
+            epoch_metrics['total_value_loss'] += loss_metrics['value_loss']
+            epoch_metrics['total_entropy'] += loss_metrics['entropy']
+            epoch_metrics['n_ppo_updates'] += 1
             trajectory_buffer.clear()
 
     # Final PPO update with remaining trajectories
@@ -425,6 +438,10 @@ def train_epoch(
         loss_metrics = ppo_update(
             agent, trajectory_buffer, optimizer, ppo_config, experiment_type, device
         )
+        epoch_metrics['total_policy_loss'] += loss_metrics['policy_loss']
+        epoch_metrics['total_value_loss'] += loss_metrics['value_loss']
+        epoch_metrics['total_entropy'] += loss_metrics['entropy']
+        epoch_metrics['n_ppo_updates'] += 1
         trajectory_buffer.clear()
 
     # Compute averages
@@ -438,6 +455,16 @@ def train_epoch(
         epoch_metrics['avg_pnl'] = 0.0
         epoch_metrics['avg_episode_length'] = 0.0
         epoch_metrics['sharpe'] = 0.0
+
+    # Compute loss averages
+    if epoch_metrics['n_ppo_updates'] > 0:
+        epoch_metrics['avg_policy_loss'] = epoch_metrics['total_policy_loss'] / epoch_metrics['n_ppo_updates']
+        epoch_metrics['avg_value_loss'] = epoch_metrics['total_value_loss'] / epoch_metrics['n_ppo_updates']
+        epoch_metrics['avg_entropy'] = epoch_metrics['total_entropy'] / epoch_metrics['n_ppo_updates']
+    else:
+        epoch_metrics['avg_policy_loss'] = 0.0
+        epoch_metrics['avg_value_loss'] = 0.0
+        epoch_metrics['avg_entropy'] = 0.0
 
     return epoch_metrics
 
@@ -557,7 +584,13 @@ def train_split(
         weight_decay=config.ppo.weight_decay
     )
 
+    # Learning rate scheduler - reduces LR when validation Sharpe plateaus
+    scheduler = optim.lr_scheduler.ReduceLROnPlateau(
+        optimizer, mode='max', factor=0.5, patience=2, verbose=True, min_lr=1e-6
+    )
+
     logger(f'Agent initialized: {agent.count_parameters():,} parameters', "INFO")
+    logger(f'Learning rate scheduler: ReduceLROnPlateau (factor=0.5, patience=2)', "INFO")
 
     # Training loop
     metrics_logger = MetricsLogger(log_dir=str(LOG_DIR))
@@ -579,6 +612,9 @@ def train_split(
         logger(f'  Train - Sharpe: {train_metrics["sharpe"]:.4f}, '
                f'Avg Reward: {train_metrics["avg_reward"]:.4f}, '
                f'Avg PnL: {train_metrics["avg_pnl"]:.4f}', "INFO")
+        logger(f'  Losses - Policy: {train_metrics["avg_policy_loss"]:.4f}, '
+               f'Value: {train_metrics["avg_value_loss"]:.4f}, '
+               f'Entropy: {train_metrics["avg_entropy"]:.4f}', "INFO")
 
         # Validation (every epoch)
         val_metrics = validate_epoch(
@@ -589,13 +625,22 @@ def train_split(
                f'Avg Reward: {val_metrics["avg_reward"]:.4f}, '
                f'Avg PnL: {val_metrics["avg_pnl"]:.4f}', "INFO")
 
+        # Update learning rate based on validation Sharpe
+        scheduler.step(val_metrics["sharpe"])
+        current_lr = optimizer.param_groups[0]['lr']
+        logger(f'  Learning rate: {current_lr:.6f}', "INFO")
+
         # Log to MLflow
         mlflow.log_metric("train_sharpe", train_metrics["sharpe"], step=epoch)
         mlflow.log_metric("train_avg_reward", train_metrics["avg_reward"], step=epoch)
         mlflow.log_metric("train_avg_pnl", train_metrics["avg_pnl"], step=epoch)
+        mlflow.log_metric("train_policy_loss", train_metrics["avg_policy_loss"], step=epoch)
+        mlflow.log_metric("train_value_loss", train_metrics["avg_value_loss"], step=epoch)
+        mlflow.log_metric("train_entropy", train_metrics["avg_entropy"], step=epoch)
         mlflow.log_metric("val_sharpe", val_metrics["sharpe"], step=epoch)
         mlflow.log_metric("val_avg_reward", val_metrics["avg_reward"], step=epoch)
         mlflow.log_metric("val_avg_pnl", val_metrics["avg_pnl"], step=epoch)
+        mlflow.log_metric("learning_rate", current_lr, step=epoch)
 
         # Save checkpoint if best
         if val_metrics["sharpe"] > best_val_sharpe:

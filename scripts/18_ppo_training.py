@@ -301,6 +301,14 @@ def run_episode(
             position_prev, position_curr, target, taker_fee=0.0005
         )
 
+        # Scale reward by volatility (standardized features, index 6)
+        # Volatility is standardized: mean≈0, std≈1, range≈[-3,3]
+        # Use exp(vol_std) as scaling factor: always positive, increases with volatility
+        import math
+        vol_std = current_sample['features'][6].item()  # Standardized volatility
+        vol_scale = math.exp(vol_std)  # Range: [exp(-3), exp(3)] ≈ [0.05, 20]
+        reward = reward / vol_scale
+
         # Unrealized PnL for next timestep
         unrealized = compute_unrealized_pnl(position_curr, target)
 
@@ -360,7 +368,9 @@ def train_epoch(
     reward_config: RewardConfig,
     model_config: ModelConfig,
     experiment_type: ExperimentType,
-    device: str
+    device: str,
+    log_alpha: torch.Tensor = None,
+    alpha_optimizer: torch.optim.Optimizer = None
 ):
     """
     Train one epoch across multiple episodes.
@@ -382,7 +392,7 @@ def train_epoch(
         'total_policy_loss': 0.0,
         'total_value_loss': 0.0,
         'total_entropy': 0.0,
-        'total_uncertainty': 0.0,
+        'total_alpha': 0.0,
         'n_ppo_updates': 0
     }
 
@@ -453,24 +463,26 @@ def train_epoch(
         # Perform PPO update if buffer is full
         if trajectory_buffer.is_full():
             loss_metrics = ppo_update(
-                agent, trajectory_buffer, optimizer, ppo_config, experiment_type, device
+                agent, trajectory_buffer, optimizer, ppo_config, experiment_type, device,
+                log_alpha, alpha_optimizer
             )
             epoch_metrics['total_policy_loss'] += loss_metrics['policy_loss']
             epoch_metrics['total_value_loss'] += loss_metrics['value_loss']
             epoch_metrics['total_entropy'] += loss_metrics['entropy']
-            epoch_metrics['total_uncertainty'] += loss_metrics['uncertainty']
+            epoch_metrics['total_alpha'] += loss_metrics['alpha']
             epoch_metrics['n_ppo_updates'] += 1
             trajectory_buffer.clear()
 
     # Final PPO update with remaining trajectories
     if len(trajectory_buffer) > 0:
         loss_metrics = ppo_update(
-            agent, trajectory_buffer, optimizer, ppo_config, experiment_type, device
+            agent, trajectory_buffer, optimizer, ppo_config, experiment_type, device,
+            log_alpha, alpha_optimizer
         )
         epoch_metrics['total_policy_loss'] += loss_metrics['policy_loss']
         epoch_metrics['total_value_loss'] += loss_metrics['value_loss']
         epoch_metrics['total_entropy'] += loss_metrics['entropy']
-        epoch_metrics['total_uncertainty'] += loss_metrics['uncertainty']
+        epoch_metrics['total_alpha'] += loss_metrics['alpha']
         epoch_metrics['n_ppo_updates'] += 1
         trajectory_buffer.clear()
 
@@ -491,12 +503,12 @@ def train_epoch(
         epoch_metrics['avg_policy_loss'] = epoch_metrics['total_policy_loss'] / epoch_metrics['n_ppo_updates']
         epoch_metrics['avg_value_loss'] = epoch_metrics['total_value_loss'] / epoch_metrics['n_ppo_updates']
         epoch_metrics['avg_entropy'] = epoch_metrics['total_entropy'] / epoch_metrics['n_ppo_updates']
-        epoch_metrics['avg_uncertainty'] = epoch_metrics['total_uncertainty'] / epoch_metrics['n_ppo_updates']
+        epoch_metrics['avg_alpha'] = epoch_metrics['total_alpha'] / epoch_metrics['n_ppo_updates']
     else:
         epoch_metrics['avg_policy_loss'] = 0.0
         epoch_metrics['avg_value_loss'] = 0.0
         epoch_metrics['avg_entropy'] = 0.0
-        epoch_metrics['avg_uncertainty'] = 0.0
+        epoch_metrics['avg_alpha'] = 0.0
 
     return epoch_metrics
 
@@ -562,15 +574,14 @@ def compute_validation_metrics(agent, buffer, ppo_config, experiment_type, devic
         # Value loss
         value_loss = F.mse_loss(new_values, returns)
 
-        # Entropy and uncertainty
+        # Entropy (no alpha adaptation during validation)
         mean_entropy = entropy.mean()
-        mean_uncertainty = std.mean()
 
     return {
         'policy_loss': policy_loss.item(),
         'value_loss': value_loss.item(),
         'entropy': mean_entropy.item(),
-        'uncertainty': mean_uncertainty.item()
+        'alpha': 0.05  # Fixed for validation
     }
 
 
@@ -672,14 +683,14 @@ def validate_epoch(
         val_metrics['avg_pnl'] = 0.0
         val_metrics['sharpe'] = 0.0
 
-    # Compute model metrics (losses, entropy, uncertainty) on validation data
+    # Compute model metrics (losses, entropy, alpha) on validation data
     model_metrics = compute_validation_metrics(
         agent, trajectory_buffer, ppo_config, experiment_type, device
     )
     val_metrics['policy_loss'] = model_metrics['policy_loss']
     val_metrics['value_loss'] = model_metrics['value_loss']
     val_metrics['entropy'] = model_metrics['entropy']
-    val_metrics['uncertainty'] = model_metrics['uncertainty']
+    val_metrics['alpha'] = model_metrics['alpha']
 
     return val_metrics
 
@@ -731,6 +742,10 @@ def train_split(
         weight_decay=config.ppo.weight_decay
     )
 
+    # Initialize adaptive entropy temperature (SAC-style)
+    log_alpha = torch.zeros(1, requires_grad=True, device=device)
+    alpha_optimizer = optim.Adam([log_alpha], lr=config.ppo.alpha_lr)
+
     # Learning rate scheduler - reduces LR when validation Sharpe plateaus
     scheduler = optim.lr_scheduler.ReduceLROnPlateau(
         optimizer, mode='max', factor=0.3, patience=2, min_lr=1e-6
@@ -738,6 +753,7 @@ def train_split(
 
     logger(f'Agent initialized: {agent.count_parameters():,} parameters', "INFO")
     logger(f'Learning rate scheduler: ReduceLROnPlateau (factor=0.3, patience=2)', "INFO")
+    logger(f'Adaptive entropy: target={config.ppo.target_entropy:.2f}, alpha_lr={config.ppo.alpha_lr}', "INFO")
 
     # Training loop
     metrics_logger = MetricsLogger(log_dir=str(LOG_DIR))
@@ -753,7 +769,8 @@ def train_split(
         # Training
         train_metrics = train_epoch(
             agent, optimizer, train_episodes,
-            config.ppo, config.reward, config.model, experiment_type, device
+            config.ppo, config.reward, config.model, experiment_type, device,
+            log_alpha, alpha_optimizer
         )
 
         logger(f'  Train - Sharpe: {train_metrics["sharpe"]:.4f}, '
@@ -762,7 +779,7 @@ def train_split(
         logger(f'  Losses - Policy: {train_metrics["avg_policy_loss"]:.4f}, '
                f'Value: {train_metrics["avg_value_loss"]:.4f}, '
                f'Entropy: {train_metrics["avg_entropy"]:.4f}, '
-               f'Uncertainty: {train_metrics["avg_uncertainty"]:.4f}', "INFO")
+               f'Alpha: {train_metrics["avg_alpha"]:.4f}', "INFO")
 
         # Validation (every epoch)
         val_metrics = validate_epoch(
@@ -775,7 +792,7 @@ def train_split(
         logger(f'  Losses - Policy: {val_metrics["policy_loss"]:.4f}, '
                f'Value: {val_metrics["value_loss"]:.4f}, '
                f'Entropy: {val_metrics["entropy"]:.4f}, '
-               f'Uncertainty: {val_metrics["uncertainty"]:.4f}', "INFO")
+               f'Alpha: {val_metrics["alpha"]:.4f}', "INFO")
 
         # Update learning rate based on validation Sharpe
         scheduler.step(val_metrics["sharpe"])
@@ -789,14 +806,14 @@ def train_split(
         mlflow.log_metric("train_policy_loss", train_metrics["avg_policy_loss"], step=epoch)
         mlflow.log_metric("train_value_loss", train_metrics["avg_value_loss"], step=epoch)
         mlflow.log_metric("train_entropy", train_metrics["avg_entropy"], step=epoch)
-        mlflow.log_metric("train_uncertainty", train_metrics["avg_uncertainty"], step=epoch)
+        mlflow.log_metric("train_alpha", train_metrics["avg_alpha"], step=epoch)
         mlflow.log_metric("val_sharpe", val_metrics["sharpe"], step=epoch)
         mlflow.log_metric("val_avg_reward", val_metrics["avg_reward"], step=epoch)
         mlflow.log_metric("val_avg_pnl", val_metrics["avg_pnl"], step=epoch)
         mlflow.log_metric("val_policy_loss", val_metrics["policy_loss"], step=epoch)
         mlflow.log_metric("val_value_loss", val_metrics["value_loss"], step=epoch)
         mlflow.log_metric("val_entropy", val_metrics["entropy"], step=epoch)
-        mlflow.log_metric("val_uncertainty", val_metrics["uncertainty"], step=epoch)
+        mlflow.log_metric("val_alpha", val_metrics["alpha"], step=epoch)
         mlflow.log_metric("learning_rate", current_lr, step=epoch)
 
         # Save checkpoint if best

@@ -428,7 +428,7 @@ def compare_target_distributions(
     val_min = float(np.min(val_targets))
     syn_min = float(np.min(syn_targets))
     val_max = float(np.max(val_targets))
-    syn_max = float(np.max(val_targets))
+    syn_max = float(np.max(syn_targets))
 
     mean_diff = float(np.abs(val_mean - syn_mean))
     std_ratio = float(syn_std / (val_std + 1e-10))
@@ -462,7 +462,7 @@ def compare_target_distributions(
         'syn_min': syn_min,
         'val_max': val_max,
         'syn_max': syn_max,
-        'mean_abs_diff': mean_diff,
+        'mean_diff': mean_diff,
         'std_ratio': std_ratio,
         'ks_statistic': float(ks_statistic),
         'ks_p_value': float(ks_p_value),

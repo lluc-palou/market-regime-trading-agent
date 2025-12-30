@@ -196,6 +196,13 @@ def run_production_training(
                 if training_results['final_train_loss'] is not None:
                     mlflow.log_metric("final_train_loss", training_results['final_train_loss'])
 
+                # Log loss components for detailed analysis
+                if training_results.get('final_val_codebook_loss') is not None:
+                    mlflow.log_metric("final_val_codebook_loss", training_results['final_val_codebook_loss'])
+                    mlflow.log_metric("final_val_target_loss", training_results['final_val_target_loss'])
+                    mlflow.log_metric("final_train_codebook_loss", training_results['final_train_codebook_loss'])
+                    mlflow.log_metric("final_train_target_loss", training_results['final_train_target_loss'])
+
                 # Create split-specific directory
                 split_dir = production_dir / f"split_{split_id}"
                 split_dir.mkdir(parents=True, exist_ok=True)

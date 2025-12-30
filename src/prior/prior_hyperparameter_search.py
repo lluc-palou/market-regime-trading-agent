@@ -143,10 +143,17 @@ def run_prior_hyperparameter_search(
                     mlflow.log_param("config_idx", config_idx)
                     for key, value in config.items():
                         mlflow.log_param(key, value)
-                    
+
                     mlflow.log_metric("best_val_loss", result['best_val_loss'])
                     mlflow.log_metric("best_epoch", result['best_epoch'])
                     mlflow.log_metric("epochs_trained", result['epochs_trained'])
+
+                    # Log loss components for analysis
+                    if result.get('final_val_codebook_loss') is not None:
+                        mlflow.log_metric("final_val_codebook_loss", result['final_val_codebook_loss'])
+                        mlflow.log_metric("final_val_target_loss", result['final_val_target_loss'])
+                        mlflow.log_metric("final_train_codebook_loss", result['final_train_codebook_loss'])
+                        mlflow.log_metric("final_train_target_loss", result['final_train_target_loss'])
                     
                     config_results.append(result)
             

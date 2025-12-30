@@ -115,27 +115,34 @@ class PriorTrainer:
         
         for epoch in range(PRIOR_TRAINING_CONFIG['max_epochs']):
             epoch_start = time.time()
-            
+
             # Train
-            train_loss = self._train_epoch(all_hours, epoch)
-            
+            train_loss, train_codebook_loss, train_target_loss = self._train_epoch(all_hours, epoch)
+
             # Validate
-            val_loss = self._validate_epoch(all_hours, epoch)
-            
+            val_loss, val_codebook_loss, val_target_loss = self._validate_epoch(all_hours, epoch)
+
             epoch_duration = time.time() - epoch_start
-            
-            # Log
+
+            # Log with both loss components
             logger(
                 f'Epoch {epoch+1}/{PRIOR_TRAINING_CONFIG["max_epochs"]} '
                 f'[{epoch_duration:.1f}s] - '
-                f'train_loss: {train_loss:.4f}, val_loss: {val_loss:.4f}',
+                f'train_loss: {train_loss:.4f} '
+                f'(codebook: {train_codebook_loss:.4f}, target: {train_target_loss:.4f}), '
+                f'val_loss: {val_loss:.4f} '
+                f'(codebook: {val_codebook_loss:.4f}, target: {val_target_loss:.4f})',
                 "INFO"
             )
-            
+
             train_history.append({
                 'epoch': epoch,
                 'train_loss': train_loss,
-                'val_loss': val_loss
+                'train_codebook_loss': train_codebook_loss,
+                'train_target_loss': train_target_loss,
+                'val_loss': val_loss,
+                'val_codebook_loss': val_codebook_loss,
+                'val_target_loss': val_target_loss
             })
             
             # Check for improvement
@@ -161,14 +168,21 @@ class PriorTrainer:
             'best_val_loss': self.best_val_loss,
             'best_epoch': self.best_epoch,
             'final_train_loss': train_history[self.best_epoch]['train_loss'] if train_history else None,
-            'epochs_trained': len(train_history)
+            'final_train_codebook_loss': train_history[self.best_epoch]['train_codebook_loss'] if train_history else None,
+            'final_train_target_loss': train_history[self.best_epoch]['train_target_loss'] if train_history else None,
+            'final_val_codebook_loss': train_history[self.best_epoch]['val_codebook_loss'] if train_history else None,
+            'final_val_target_loss': train_history[self.best_epoch]['val_target_loss'] if train_history else None,
+            'epochs_trained': len(train_history),
+            'train_history': train_history  # Include full history for detailed analysis
         }
     
-    def _train_epoch(self, all_hours: List[datetime], epoch: int) -> float:
+    def _train_epoch(self, all_hours: List[datetime], epoch: int) -> tuple[float, float, float]:
         """Train for one epoch with hour accumulation and prefetching."""
         self.model.train()
 
         epoch_loss = 0.0
+        epoch_codebook_loss = 0.0
+        epoch_target_loss = 0.0
         num_batches = 0
 
         hours_per_acc = PRIOR_TRAINING_CONFIG['hours_per_accumulation']
@@ -264,15 +278,23 @@ class PriorTrainer:
                     self.optimizer.step()
 
                     epoch_loss += loss.item()
+                    epoch_codebook_loss += codebook_loss.item()
+                    epoch_target_loss += target_loss.item()
                     num_batches += 1
 
-        return epoch_loss / max(num_batches, 1)
+        avg_loss = epoch_loss / max(num_batches, 1)
+        avg_codebook_loss = epoch_codebook_loss / max(num_batches, 1)
+        avg_target_loss = epoch_target_loss / max(num_batches, 1)
+
+        return avg_loss, avg_codebook_loss, avg_target_loss
     
-    def _validate_epoch(self, all_hours: List[datetime], epoch: int) -> float:
+    def _validate_epoch(self, all_hours: List[datetime], epoch: int) -> tuple[float, float, float]:
         """Validate for one epoch with prefetching."""
         self.model.eval()
 
         epoch_loss = 0.0
+        epoch_codebook_loss = 0.0
+        epoch_target_loss = 0.0
         num_batches = 0
 
         hours_per_acc = PRIOR_TRAINING_CONFIG['hours_per_accumulation']
@@ -353,6 +375,12 @@ class PriorTrainer:
                         loss = self.task_loss_weight * codebook_loss + (1 - self.task_loss_weight) * target_loss
 
                         epoch_loss += loss.item()
+                        epoch_codebook_loss += codebook_loss.item()
+                        epoch_target_loss += target_loss.item()
                         num_batches += 1
 
-        return epoch_loss / max(num_batches, 1)
+        avg_loss = epoch_loss / max(num_batches, 1)
+        avg_codebook_loss = epoch_codebook_loss / max(num_batches, 1)
+        avg_target_loss = epoch_target_loss / max(num_batches, 1)
+
+        return avg_loss, avg_codebook_loss, avg_target_loss

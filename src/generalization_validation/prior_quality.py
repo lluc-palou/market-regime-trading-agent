@@ -23,7 +23,6 @@ from .visualization import (
     plot_umap_comparison,
     plot_target_distribution,
     plot_target_autocorrelation,
-    plot_target_scatter,
     plot_volatility_clustering
 )
 
@@ -242,13 +241,6 @@ class PriorQualityValidator:
             target_acf_metrics['acf_syn'],
             max_lag=20,
             save_path=split_output_dir / f"target_autocorrelation_split_{split_id}.png"
-        )
-
-        logger('  Plotting target scatter comparison...', "INFO")
-        plot_target_scatter(
-            val_targets, syn_targets,
-            save_path=split_output_dir / f"target_scatter_split_{split_id}.png",
-            max_points=5000
         )
 
         logger('  Plotting volatility clustering...', "INFO")

@@ -415,9 +415,14 @@ def plot_target_distribution(
 
     # Histogram + KDE
     ax = axes[0]
-    ax.hist(val_targets, bins=50, alpha=0.5, color=COLORS['non_significant'],
+
+    # Compute common bin edges for consistent bin widths
+    all_targets = np.concatenate([val_targets, syn_targets])
+    bin_edges = np.histogram_bin_edges(all_targets, bins=50)
+
+    ax.hist(val_targets, bins=bin_edges, alpha=0.5, color=COLORS['non_significant'],
             label='Validation', density=True, edgecolor='black', linewidth=0.5)
-    ax.hist(syn_targets, bins=50, alpha=0.5, color=COLORS['significant'],
+    ax.hist(syn_targets, bins=bin_edges, alpha=0.5, color=COLORS['significant'],
             label='Synthetic', density=True, edgecolor='black', linewidth=0.5)
 
     # Add KDE
@@ -439,7 +444,6 @@ def plot_target_distribution(
     ax.tick_params(colors='black')
     for spine in ax.spines.values():
         spine.set_color('black')
-    ax.grid(True, alpha=0.3)
 
     # Q-Q plot
     ax = axes[1]
@@ -475,7 +479,6 @@ def plot_target_distribution(
     ax.tick_params(colors='black')
     for spine in ax.spines.values():
         spine.set_color('black')
-    ax.grid(True, alpha=0.3)
 
     plt.tight_layout()
 
@@ -510,11 +513,6 @@ def plot_target_autocorrelation(
     ax.plot(lags, acf_syn, 's-', color=COLORS['significant'],
             linewidth=2, markersize=6, label='Synthetic', alpha=0.8)
 
-    # Add 95% confidence interval for white noise
-    n_samples = 1000  # Approximate for CI
-    ci = 1.96 / np.sqrt(n_samples)
-    ax.axhline(y=ci, color='gray', linestyle='--', linewidth=1, alpha=0.5)
-    ax.axhline(y=-ci, color='gray', linestyle='--', linewidth=1, alpha=0.5)
     ax.axhline(y=0, color='black', linestyle='-', linewidth=0.5)
 
     ax.set_xlabel('Lag', color='black', fontweight='bold')
@@ -524,67 +522,6 @@ def plot_target_autocorrelation(
     ax.tick_params(colors='black')
     for spine in ax.spines.values():
         spine.set_color('black')
-    ax.grid(True, alpha=0.3)
-
-    plt.tight_layout()
-
-    if save_path:
-        plt.savefig(save_path, dpi=300, bbox_inches='tight')
-        plt.close()
-    else:
-        plt.show()
-
-
-def plot_target_scatter(
-    val_targets: np.ndarray,
-    syn_targets: np.ndarray,
-    save_path: Optional[Path] = None,
-    max_points: int = 5000
-):
-    """
-    Scatter plot comparing validation vs synthetic target values.
-
-    Args:
-        val_targets: Validation target values
-        syn_targets: Synthetic target values
-        save_path: Path to save figure
-        max_points: Maximum points to plot (for performance)
-    """
-    fig, ax = plt.subplots(1, 1, figsize=(8, 8))
-
-    # Subsample if too many points
-    if len(val_targets) > max_points:
-        idx = np.random.choice(len(val_targets), max_points, replace=False)
-        val_plot = val_targets[idx]
-    else:
-        val_plot = val_targets
-
-    if len(syn_targets) > max_points:
-        idx = np.random.choice(len(syn_targets), max_points, replace=False)
-        syn_plot = syn_targets[idx]
-    else:
-        syn_plot = syn_targets
-
-    # 2D histogram (heatmap)
-    from matplotlib.colors import LogNorm
-    h = ax.hist2d(val_plot, syn_plot, bins=50, cmap='Blues', norm=LogNorm(),
-                  cmin=1, rasterized=True)
-    plt.colorbar(h[3], ax=ax, label='Count (log scale)')
-
-    # Reference line y=x
-    lims = [min(val_targets.min(), syn_targets.min()),
-            max(val_targets.max(), syn_targets.max())]
-    ax.plot(lims, lims, 'r--', alpha=0.75, linewidth=2, label='y=x (perfect match)')
-
-    ax.set_xlabel('Validation Targets', color='black', fontweight='bold')
-    ax.set_ylabel('Synthetic Targets', color='black', fontweight='bold')
-    ax.set_title('Target Values: Validation vs Synthetic', color='black', fontweight='bold', pad=15)
-    ax.legend()
-    ax.tick_params(colors='black')
-    for spine in ax.spines.values():
-        spine.set_color('black')
-    ax.grid(True, alpha=0.3)
-    ax.set_aspect('equal')
 
     plt.tight_layout()
 
@@ -615,15 +552,10 @@ def plot_volatility_clustering(
     lags = np.arange(0, max_lag + 1)
 
     ax.plot(lags, acf_abs_val, 'o-', color=COLORS['non_significant'],
-            linewidth=2, markersize=6, label='Validation |target|', alpha=0.8)
+            linewidth=2, markersize=6, label='Validation', alpha=0.8)
     ax.plot(lags, acf_abs_syn, 's-', color=COLORS['significant'],
-            linewidth=2, markersize=6, label='Synthetic |target|', alpha=0.8)
+            linewidth=2, markersize=6, label='Synthetic', alpha=0.8)
 
-    # Add 95% confidence interval
-    n_samples = 1000
-    ci = 1.96 / np.sqrt(n_samples)
-    ax.axhline(y=ci, color='gray', linestyle='--', linewidth=1, alpha=0.5)
-    ax.axhline(y=-ci, color='gray', linestyle='--', linewidth=1, alpha=0.5)
     ax.axhline(y=0, color='black', linestyle='-', linewidth=0.5)
 
     ax.set_xlabel('Lag', color='black', fontweight='bold')
@@ -633,7 +565,6 @@ def plot_volatility_clustering(
     ax.tick_params(colors='black')
     for spine in ax.spines.values():
         spine.set_color('black')
-    ax.grid(True, alpha=0.3)
 
     plt.tight_layout()
 

@@ -6,7 +6,7 @@ from typing import Dict, List, Tuple
 from collections import Counter
 
 
-def compute_mmd(X: np.ndarray, Y: np.ndarray, kernel: str = 'rbf', gamma: float = None) -> float:
+def compute_mmd(X: np.ndarray, Y: np.ndarray, kernel: str = 'rbf', gamma: float = None, max_samples: int = 5000) -> float:
     """
     Compute Maximum Mean Discrepancy between two distributions.
 
@@ -15,10 +15,20 @@ def compute_mmd(X: np.ndarray, Y: np.ndarray, kernel: str = 'rbf', gamma: float 
         Y: (m_samples, n_features) array
         kernel: Kernel type ('rbf' or 'linear')
         gamma: RBF kernel bandwidth (default: 1/n_features)
+        max_samples: Maximum samples to use (subsample if exceeded to avoid memory issues)
 
     Returns:
         MMD value
     """
+    # Subsample if too many samples (avoid memory issues)
+    if X.shape[0] > max_samples:
+        indices_X = np.random.choice(X.shape[0], max_samples, replace=False)
+        X = X[indices_X]
+
+    if Y.shape[0] > max_samples:
+        indices_Y = np.random.choice(Y.shape[0], max_samples, replace=False)
+        Y = Y[indices_Y]
+
     n = X.shape[0]
     m = Y.shape[0]
 
@@ -106,49 +116,103 @@ def compute_ks_tests(X: np.ndarray, Y: np.ndarray) -> Dict[str, float]:
     }
 
 
-def compute_correlation_distance(X: np.ndarray, Y: np.ndarray) -> Dict[str, float]:
+def compute_correlation_distance(X: np.ndarray, Y: np.ndarray, use_clr: bool = True) -> Dict[str, float]:
     """
     Compute distance between correlation matrices.
+
+    For compositional/normalized data (e.g., probability distributions),
+    uses Centered Log-Ratio (CLR) transformation to handle the sum-to-one constraint.
 
     Args:
         X: (n_samples, n_features) array
         Y: (m_samples, n_features) array
+        use_clr: Whether to use CLR transformation for compositional data (default: True)
 
     Returns:
         Dictionary with correlation distances
     """
     import warnings
 
+    # For compositional data (probability distributions), apply CLR transformation
+    # This removes the sum-to-one constraint and allows proper correlation computation
+    if use_clr:
+        X_transformed = _clr_transform(X)
+        Y_transformed = _clr_transform(Y)
+    else:
+        X_transformed = X
+        Y_transformed = Y
+
     # Suppress numpy warning about division by zero in corrcoef when features have zero variance
     # This is expected for constant features (e.g., LOB bins with no variation)
     # We handle NaNs properly by replacing them with 0 after computation
     with warnings.catch_warnings():
         warnings.filterwarnings('ignore', message='invalid value encountered in divide')
+        warnings.filterwarnings('ignore', message='invalid value encountered in scalar divide')
 
         # Compute correlation matrices
-        corr_X = np.corrcoef(X, rowvar=False)
-        corr_Y = np.corrcoef(Y, rowvar=False)
+        corr_X = np.corrcoef(X_transformed, rowvar=False)
+        corr_Y = np.corrcoef(Y_transformed, rowvar=False)
 
     # Replace NaNs with 0 (happens when feature is constant/zero variance)
     corr_X = np.nan_to_num(corr_X, nan=0.0)
     corr_Y = np.nan_to_num(corr_Y, nan=0.0)
 
-    # Frobenius norm
-    frobenius = np.linalg.norm(corr_X - corr_Y, ord='fro')
+    # Frobenius norm (unbounded, for backward compatibility)
+    frobenius_norm = np.linalg.norm(corr_X - corr_Y, ord='fro')
 
-    # Mean absolute difference
+    # Frobenius correlation (bounded [-1, 1], more interpretable)
+    # Treats correlation matrices as vectors and computes their correlation
+    norm_X = np.linalg.norm(corr_X, ord='fro')
+    norm_Y = np.linalg.norm(corr_Y, ord='fro')
+    if norm_X > 0 and norm_Y > 0:
+        frobenius_corr = np.trace(corr_X.T @ corr_Y) / (norm_X * norm_Y)
+    else:
+        frobenius_corr = 0.0
+
+    # Mean absolute difference (bounded [0, 2])
     mad = np.mean(np.abs(corr_X - corr_Y))
 
-    # Max absolute difference
+    # Max absolute difference (bounded [0, 2])
     max_diff = np.max(np.abs(corr_X - corr_Y))
 
     return {
-        'frobenius_norm': frobenius,
+        'frobenius_norm': frobenius_norm,
+        'frobenius_correlation': frobenius_corr,
         'mean_absolute_diff': mad,
         'max_absolute_diff': max_diff,
         'corr_original': corr_X,
         'corr_synthetic': corr_Y
     }
+
+
+def _clr_transform(X: np.ndarray, epsilon: float = 1e-10) -> np.ndarray:
+    """
+    Apply Centered Log-Ratio (CLR) transformation for compositional data.
+
+    The CLR transformation removes the sum-to-one constraint, allowing
+    proper correlation analysis of compositional data like probability distributions.
+
+    CLR(x) = log(x / geometric_mean(x))
+
+    Args:
+        X: (n_samples, n_features) array of compositional data
+        epsilon: Small constant to avoid log(0) (default: 1e-10)
+
+    Returns:
+        X_clr: (n_samples, n_features) CLR-transformed array
+    """
+    # Add small epsilon to avoid log(0)
+    X_safe = X + epsilon
+
+    # Compute geometric mean for each sample
+    # geometric_mean = exp(mean(log(x)))
+    log_X = np.log(X_safe)
+    geometric_mean = np.exp(np.mean(log_X, axis=1, keepdims=True))
+
+    # Apply CLR transformation
+    X_clr = np.log(X_safe / geometric_mean)
+
+    return X_clr
 
 
 def compute_transition_matrix(sequences: np.ndarray, vocab_size: int) -> np.ndarray:
@@ -232,10 +296,20 @@ def compare_ngrams(
 
     # Compute frequency correlation for common n-grams
     common = val_ngrams & syn_ngrams
-    if len(common) > 0:
+    if len(common) > 1:
         val_freqs = [ngrams_val[ng] for ng in common]
         syn_freqs = [ngrams_syn[ng] for ng in common]
-        freq_corr = np.corrcoef(val_freqs, syn_freqs)[0, 1]
+
+        # Check for zero variance (all values are the same)
+        if np.std(val_freqs) > 0 and np.std(syn_freqs) > 0:
+            import warnings
+            with warnings.catch_warnings():
+                warnings.filterwarnings('ignore', message='invalid value encountered')
+                warnings.filterwarnings('ignore', message='divide by zero encountered')
+                freq_corr = np.corrcoef(val_freqs, syn_freqs)[0, 1]
+                freq_corr = 0.0 if np.isnan(freq_corr) else freq_corr
+        else:
+            freq_corr = 0.0
     else:
         freq_corr = 0.0
 
@@ -295,3 +369,32 @@ def jensen_shannon_divergence(P: np.ndarray, Q: np.ndarray) -> float:
     js = 0.5 * (kl_pm + kl_qm)
 
     return js
+
+
+def compute_cosine_similarity(X: np.ndarray, Y: np.ndarray) -> Dict[str, float]:
+    """
+    Compute cosine similarity between corresponding samples.
+
+    Args:
+        X: (n_samples, n_features) array
+        Y: (n_samples, n_features) array
+
+    Returns:
+        Dictionary with cosine similarity statistics
+    """
+    # Compute per-sample cosine similarity
+    # Normalize each row
+    X_norm = X / (np.linalg.norm(X, axis=1, keepdims=True) + 1e-10)
+    Y_norm = Y / (np.linalg.norm(Y, axis=1, keepdims=True) + 1e-10)
+
+    # Compute dot product for each sample
+    per_sample_similarity = np.sum(X_norm * Y_norm, axis=1)
+
+    return {
+        'mean_cosine_similarity': float(np.mean(per_sample_similarity)),
+        'std_cosine_similarity': float(np.std(per_sample_similarity)),
+        'min_cosine_similarity': float(np.min(per_sample_similarity)),
+        'max_cosine_similarity': float(np.max(per_sample_similarity)),
+        'median_cosine_similarity': float(np.median(per_sample_similarity)),
+        'per_sample_similarities': per_sample_similarity
+    }

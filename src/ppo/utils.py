@@ -151,8 +151,8 @@ def load_checkpoint(
     Returns:
         Checkpoint metadata
     """
-    checkpoint = torch.load(filepath, map_location=device)
-    
+    checkpoint = torch.load(filepath, map_location=device, weights_only=False)
+
     agent.load_state_dict(checkpoint['model_state_dict'])
     
     if optimizer is not None and 'optimizer_state_dict' in checkpoint:

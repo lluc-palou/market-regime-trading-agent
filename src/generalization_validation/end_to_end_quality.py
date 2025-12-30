@@ -56,21 +56,7 @@ class EndToEndValidator:
         n_val_samples = len(original_vectors)
         logger(f'  Validation samples: {n_val_samples:,}', "INFO")
 
-        # Load VQ-VAE model
-        vqvae_path = self.vqvae_model_dir / f"split_{split_id}_model.pth"
-
-        if not vqvae_path.exists():
-            raise FileNotFoundError(f"VQ-VAE model not found: {vqvae_path}")
-
-        vqvae_model = load_vqvae_model(vqvae_path, self.device)
-
-        # Get validation reconstructions (fair comparison: both go through VQ-VAE)
-        logger('  Decoding validation codes...', "INFO")
-        val_reconstructed = decode_codes_batch(
-            vqvae_model, codebook_indices, self.device, batch_size=512
-        )
-
-        # Load pre-generated synthetic data (already decoded)
+        # Load pre-generated synthetic data
         logger('  Loading synthetic data...', "INFO")
         synthetic_vectors, syn_codebook_indices, _ = load_synthetic_samples(
             self.mongo_uri, self.db_name, split_id
@@ -79,19 +65,35 @@ class EndToEndValidator:
         n_syn_samples = len(synthetic_vectors)
         logger(f'  Synthetic samples: {n_syn_samples:,}', "INFO")
 
-        # Compute metrics
+        # Compute metrics comparing original validation data with synthetic data
         logger('  Computing MMD...', "INFO")
-        mmd = compute_mmd(val_reconstructed, synthetic_vectors, kernel='rbf')
+        mmd = compute_mmd(original_vectors, synthetic_vectors, kernel='rbf')
         logger(f'  MMD: {mmd:.6f}', "INFO")
 
         logger('  Running KS tests...', "INFO")
-        ks_results = compute_ks_tests(val_reconstructed, synthetic_vectors)
+        ks_results = compute_ks_tests(original_vectors, synthetic_vectors)
         logger(f'  Mean KS statistic: {ks_results["mean_ks_statistic"]:.6f}', "INFO")
         logger(f'  Rejection rate: {ks_results["rejection_rate"]:.4f}', "INFO")
 
         logger('  Computing correlation distance...', "INFO")
-        corr_results = compute_correlation_distance(val_reconstructed, synthetic_vectors)
-        logger(f'  Correlation Frobenius norm: {corr_results["frobenius_norm"]:.6f}', "INFO")
+        corr_results = compute_correlation_distance(original_vectors, synthetic_vectors)
+
+        # Diagnostic logging for correlation matrices
+        corr_orig = corr_results['corr_original']
+        corr_syn = corr_results['corr_synthetic']
+
+        # Check if correlation matrices are mostly diagonal
+        n_features = corr_orig.shape[0]
+        off_diagonal_orig = np.abs(corr_orig - np.eye(n_features))
+        off_diagonal_syn = np.abs(corr_syn - np.eye(n_features))
+
+        logger(f'  Original corr matrix off-diagonal mean: {off_diagonal_orig.mean():.6f}', "INFO")
+        logger(f'  Original corr matrix off-diagonal max: {off_diagonal_orig.max():.6f}', "INFO")
+        logger(f'  Synthetic corr matrix off-diagonal mean: {off_diagonal_syn.mean():.6f}', "INFO")
+        logger(f'  Synthetic corr matrix off-diagonal max: {off_diagonal_syn.max():.6f}', "INFO")
+
+        logger(f'  Correlation Frobenius correlation: {corr_results["frobenius_correlation"]:.6f}', "INFO")
+        logger(f'  Mean absolute difference: {corr_results["mean_absolute_diff"]:.6f}', "INFO")
 
         # Visualizations
         split_output_dir = self.output_dir / "experiment3_end_to_end" / f"split_{split_id}"
@@ -100,8 +102,8 @@ class EndToEndValidator:
         # UMAP visualization
         logger('  Generating UMAP visualization...', "INFO")
         plot_umap_comparison(
-            val_reconstructed, synthetic_vectors,
-            title=f'End-to-End Quality - Split {split_id}',
+            original_vectors, synthetic_vectors,
+            title='End-to-End Synthetic Generation',
             save_path=split_output_dir / f"umap_end_to_end_split_{split_id}.png",
             method='umap'
         )
@@ -118,7 +120,7 @@ class EndToEndValidator:
         # Marginal distribution comparisons (sample dimensions)
         logger('  Plotting marginal distributions...', "INFO")
         self._plot_marginals(
-            val_reconstructed, synthetic_vectors,
+            original_vectors, synthetic_vectors,
             save_path=split_output_dir / f"marginals_split_{split_id}.png"
         )
 
@@ -131,7 +133,7 @@ class EndToEndValidator:
             'ks_mean_statistic': float(ks_results['mean_ks_statistic']),
             'ks_max_statistic': float(ks_results['max_ks_statistic']),
             'ks_rejection_rate': float(ks_results['rejection_rate']),
-            'corr_frobenius': float(corr_results['frobenius_norm']),
+            'corr_frobenius_correlation': float(corr_results['frobenius_correlation']),
             'corr_mean_abs_diff': float(corr_results['mean_absolute_diff']),
             'corr_max_abs_diff': float(corr_results['max_absolute_diff'])
         }
@@ -167,17 +169,41 @@ class EndToEndValidator:
         for idx, feat_idx in enumerate(feature_indices):
             ax = axes[idx]
 
-            ax.hist(val_data[:, feat_idx], bins=50, alpha=0.5, label='Validation',
-                   density=True, color='blue')
-            ax.hist(syn_data[:, feat_idx], bins=50, alpha=0.5, label='Synthetic',
-                   density=True, color='red')
+            # Get data for this feature
+            val_feature = val_data[:, feat_idx]
+            syn_feature = syn_data[:, feat_idx]
 
-            ax.set_xlabel('Value')
-            ax.set_ylabel('Density')
-            ax.set_title(f'Feature {feat_idx}')
+            # Compute data range for proper x-axis scaling
+            data_min = min(val_feature.min(), syn_feature.min())
+            data_max = max(val_feature.max(), syn_feature.max())
+            data_range = data_max - data_min
+
+            # Add 5% padding to the range for better visualization
+            padding = 0.05 * data_range if data_range > 0 else 0.1
+            xlim_min = data_min - padding
+            xlim_max = data_max + padding
+
+            # Create histograms and get the bin heights for y-axis scaling
+            n_val, bins_val, _ = ax.hist(val_feature, bins=50, alpha=0.5, label='Validation',
+                   density=True, color='#0072B2')
+            n_syn, bins_syn, _ = ax.hist(syn_feature, bins=50, alpha=0.5, label='Synthetic',
+                   density=True, color='#D55E00')
+
+            # Set x-axis limits based on actual data range
+            ax.set_xlim(xlim_min, xlim_max)
+
+            # Set y-axis limits based on maximum density value with padding
+            max_density = max(n_val.max(), n_syn.max())
+            ax.set_ylim(0, max_density * 1.1)  # Add 10% padding at top
+
+            ax.set_xlabel('Value', color='black', fontweight='bold')
+            ax.set_ylabel('Density', color='black', fontweight='bold')
+            ax.set_title(f'Feature {feat_idx}', color='black', fontweight='bold', pad=15)
             ax.legend()
-            ax.grid(True, alpha=0.3)
+            ax.tick_params(colors='black')
+            for spine in ax.spines.values():
+                spine.set_color('black')
 
         plt.tight_layout()
-        plt.savefig(save_path, dpi=150, bbox_inches='tight')
+        plt.savefig(save_path, dpi=300, bbox_inches='tight')
         plt.close()

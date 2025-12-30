@@ -90,7 +90,7 @@ def load_vqvae_model(model_path: Path, device: torch.device):
     """
     from src.vqvae_representation.model import VQVAEModel
 
-    checkpoint = torch.load(model_path, map_location=device)
+    checkpoint = torch.load(model_path, map_location=device, weights_only=False)
     config = checkpoint['config']
 
     model = VQVAEModel(config).to(device)

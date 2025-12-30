@@ -73,12 +73,37 @@ class VQVAETrainer:
             lr=config['lr'],
             weight_decay=TRAINING_CONFIG['weight_decay']
         )
-        
+
+        # Initialize learning rate scheduler (cosine annealing for smooth decay)
+        self.scheduler = self._create_lr_scheduler()
+
         # Training state
         self.best_val_loss = float('inf')
         self.best_epoch = 0
         self.best_model_state = None
-    
+
+    def _create_lr_scheduler(self):
+        """
+        Create cosine annealing learning rate scheduler.
+
+        Provides smooth decay from initial LR to min_lr over all epochs.
+
+        Returns:
+            CosineAnnealingLR scheduler or None
+        """
+        scheduler_type = TRAINING_CONFIG.get('lr_scheduler_type', None)
+
+        if scheduler_type == 'cosine':
+            # CosineAnnealingLR: smooth cosine decay
+            return optim.lr_scheduler.CosineAnnealingLR(
+                self.optimizer,
+                T_max=TRAINING_CONFIG['max_epochs'],
+                eta_min=TRAINING_CONFIG['lr_min']
+            )
+        else:
+            # No scheduler
+            return None
+
     def train_split(self, all_hours: List[datetime]) -> Dict:
         """
         Train and validate on a single split.
@@ -149,7 +174,7 @@ class VQVAETrainer:
             
             epoch_duration = time.time() - epoch_start
             
-            # Log epoch results
+            # Log epoch results with detailed loss breakdown
             logger(
                 f'Epoch {epoch+1}/{TRAINING_CONFIG["max_epochs"]} '
                 f'[{epoch_duration:.1f}s] - '
@@ -157,6 +182,23 @@ class VQVAETrainer:
                 f'val_loss: {val_losses["total_loss"]:.4f}, '
                 f'val_perplexity: {val_losses["perplexity"]:.2f}, '
                 f'val_usage: {val_losses["codebook_usage"]:.3f}',
+                "INFO"
+            )
+            # Log detailed loss components for analysis
+            logger(
+                f'  Train components: '
+                f'recon={train_losses["recon_loss"]:.4f}, '
+                f'commit={train_losses["commitment_loss"]:.4f}, '
+                f'codebook={train_losses["codebook_loss"]:.4f}, '
+                f'usage_pen={train_losses["usage_penalty"]:.4f}',
+                "INFO"
+            )
+            logger(
+                f'  Val components: '
+                f'recon={val_losses["recon_loss"]:.4f}, '
+                f'commit={val_losses["commitment_loss"]:.4f}, '
+                f'codebook={val_losses["codebook_loss"]:.4f}, '
+                f'usage_pen={val_losses["usage_penalty"]:.4f}',
                 "INFO"
             )
             
@@ -174,7 +216,15 @@ class VQVAETrainer:
                 # Deep copy model state (clone tensors, not just dict structure)
                 self.best_model_state = {k: v.clone() for k, v in self.model.state_dict().items()}
                 logger(f'  → New best validation loss: {self.best_val_loss:.4f}', "INFO")
-            
+
+            # Update learning rate scheduler (cosine annealing)
+            if self.scheduler is not None:
+                self.scheduler.step()
+                # Log learning rate periodically (every 10 epochs or when it changes significantly)
+                current_lr = self.optimizer.param_groups[0]['lr']
+                if epoch % 10 == 0 or epoch == 0:
+                    logger(f'  → Learning rate: {current_lr:.2e}', "INFO")
+
             # Early stopping check
             if epoch - self.best_epoch >= TRAINING_CONFIG['patience']:
                 logger(f'Early stopping at epoch {epoch+1} (patience={TRAINING_CONFIG["patience"]})', "INFO")
@@ -561,6 +611,14 @@ class VQVAETrainer:
             f'perplexity: {final_metrics["perplexity"]:.2f}, '
             f'usage: {final_metrics["codebook_usage"]:.3f}, '
             f'samples: {final_metrics["num_samples"]:,}',
+            "INFO"
+        )
+        logger(
+            f'  Loss components: '
+            f'recon={final_metrics["recon_loss"]:.4f}, '
+            f'commit={final_metrics["commitment_loss"]:.4f}, '
+            f'codebook={final_metrics["codebook_loss"]:.4f}, '
+            f'usage_pen={final_metrics["usage_penalty"]:.4f}',
             "INFO"
         )
         

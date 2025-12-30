@@ -2,7 +2,15 @@
 
 from dataclasses import dataclass, field
 from typing import Optional, List, Dict, Any
+from enum import Enum
 import json
+
+
+class ExperimentType(Enum):
+    """Experiment types for PPO training."""
+    EXP1_BOTH_ORIGINAL = 1      # Both codebook + features, train/val on original
+    EXP2_FEATURES_ORIGINAL = 2  # Features only, train/val on original
+    EXP3_CODEBOOK_ORIGINAL = 3  # Codebook only, train/val on original
 
 
 @dataclass
@@ -22,14 +30,14 @@ class ModelConfig:
     """Transformer architecture configuration."""
     vocab_size: int = 128                # VQ-VAE codebook size (K)
     n_features: int = 18                 # Number of hand-crafted features
-    d_codebook: int = 64                 # Codebook embedding dimension
-    d_features: int = 64                 # Feature projection dimension
-    d_model: int = 128                   # Transformer model dimension
-    n_heads: int = 4                     # Number of attention heads
-    n_layers: int = 2                    # Number of transformer layers
-    dropout: float = 0.2                 # Dropout rate
-    window_size: int = 50                # Observation window (W samples)
-    horizon: int = 10                    # Reward horizon (H samples)
+    d_codebook: int = 80                 # Codebook embedding dimension (increased from 64)
+    d_features: int = 80                 # Feature projection dimension (increased from 64)
+    d_model: int = 160                   # Transformer model dimension (increased from 128)
+    n_heads: int = 8                     # Number of attention heads (increased from 4)
+    n_layers: int = 4                    # Number of transformer layers (increased from 2)
+    dropout: float = 0.2                 # Dropout rate (increased for regularization)
+    window_size: int = 10                # Observation window (W samples) - reduced from 50
+    horizon: int = 1                     # Reward horizon - immediate next return (not lookahead)
     min_log_std: float = -20.0           # Minimum log std for policy
     max_log_std: float = 2.0             # Maximum log std for policy
     ffn_expansion: int = 4               # FFN dimension = d_model × ffn_expansion
@@ -75,13 +83,14 @@ class PPOConfig:
     weight_decay: float = 1e-3           # L2 regularization
     gamma: float = 0.95                  # Discount factor
     gae_lambda: float = 0.95             # GAE lambda parameter
-    clip_ratio: float = 0.2              # PPO clipping parameter
-    value_coef: float = 0.5              # Value loss coefficient
-    entropy_coef: float = 0.01           # Entropy bonus coefficient
+    clip_ratio: float = 0.1              # PPO clipping parameter (reduced for stability with high variance)
+    value_coef: float = 1.0              # Value loss coefficient (increased for better value estimates)
+    entropy_coef: float = 0.05           # Entropy bonus coefficient (increased to encourage exploration)
+    uncertainty_coef: float = 0.05       # Uncertainty penalty coefficient (reduced to balance with entropy)
     max_grad_norm: float = 0.5           # Gradient clipping norm
-    n_epochs: int = 4                    # PPO epochs per update
-    batch_size: int = 32                 # Minibatch size
-    buffer_capacity: int = 512           # Trajectory buffer size
+    n_epochs: int = 2                    # PPO epochs per update (reduced for speed)
+    batch_size: int = 256                # Minibatch size (increased 8x to utilize GPU)
+    buffer_capacity: int = 2048          # Trajectory buffer size (increased 4x)
     
 
 @dataclass
@@ -97,9 +106,9 @@ class RewardConfig:
 @dataclass
 class TrainingConfig:
     """Training procedure configuration."""
-    max_epochs: int = 100                # Maximum training epochs
-    patience: int = 10                   # Early stopping patience
-    min_delta: float = 0.5               # Minimum improvement for early stopping
+    max_epochs: int = 50                 # Maximum training epochs (increased from 10)
+    patience: int = 7                    # Early stopping patience (increased from 3)
+    min_delta: float = 0.01              # Minimum improvement for early stopping
     validate_every: int = 1              # Validate every N epochs
     log_every: int = 10                  # Log every N episodes
     checkpoint_dir: str = "checkpoints"  # Directory for model checkpoints
@@ -117,6 +126,7 @@ class DataConfig:
     role_train: str = "train"            # Training role filter
     role_val: str = "val"                # Validation role filter
     stream_episodes: bool = True         # Stream episodes on-demand
+    experiment_type: ExperimentType = ExperimentType.EXP1_BOTH_ORIGINAL  # Experiment type
 
 
 @dataclass
@@ -132,6 +142,9 @@ class ExperimentConfig:
     
     def to_dict(self) -> Dict[str, Any]:
         """Convert to dictionary for logging."""
+        data_dict = self.data.__dict__.copy()
+        data_dict['experiment_type'] = self.data.experiment_type.value  # Convert enum to int
+
         return {
             "name": self.name,
             "vqvae": self.vqvae.__dict__,
@@ -139,7 +152,7 @@ class ExperimentConfig:
             "ppo": self.ppo.__dict__,
             "reward": self.reward.__dict__,
             "training": self.training.__dict__,
-            "data": self.data.__dict__,
+            "data": data_dict,
             "total_parameters": self.model.count_parameters()
         }
     

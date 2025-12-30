@@ -118,9 +118,22 @@ class PriorQualityValidator:
         trans_val = compute_transition_matrix(val_sequences, vocab_size)
         trans_syn = compute_transition_matrix(syn_sequences, vocab_size)
 
-        # Frobenius norm
-        trans_frobenius = np.linalg.norm(trans_val - trans_syn, ord='fro')
-        logger(f'  Transition matrix Frobenius norm: {trans_frobenius:.6f}', "INFO")
+        # Frobenius norm (unbounded, for reference)
+        trans_frobenius_norm = np.linalg.norm(trans_val - trans_syn, ord='fro')
+
+        # Frobenius correlation (bounded [-1, 1], more interpretable)
+        norm_val = np.linalg.norm(trans_val, ord='fro')
+        norm_syn = np.linalg.norm(trans_syn, ord='fro')
+        if norm_val > 0 and norm_syn > 0:
+            trans_frobenius_corr = np.trace(trans_val.T @ trans_syn) / (norm_val * norm_syn)
+        else:
+            trans_frobenius_corr = 0.0
+
+        # Mean absolute difference (bounded [0, 1] for probability matrices)
+        trans_mad = np.mean(np.abs(trans_val - trans_syn))
+
+        logger(f'  Transition matrix Frobenius correlation: {trans_frobenius_corr:.6f}', "INFO")
+        logger(f'  Transition matrix mean absolute diff: {trans_mad:.6f}', "INFO")
 
         # 3. N-gram statistics
         logger('  Extracting n-grams...', "INFO")
@@ -181,7 +194,7 @@ class PriorQualityValidator:
         plot_umap_comparison(
             val_sequences.astype(np.float32),
             syn_sequences.astype(np.float32),
-            title=f'Prior Sequences - Split {split_id}',
+            title='Codebook Index Sequences',
             save_path=split_output_dir / f"umap_sequences_split_{split_id}.png",
             method='umap'
         )
@@ -195,7 +208,8 @@ class PriorQualityValidator:
             'vocab_size': vocab_size,
             'js_divergence_freq': float(js_div),
             'frequency_correlation': float(freq_corr),
-            'transition_frobenius': float(trans_frobenius),
+            'transition_frobenius_correlation': float(trans_frobenius_corr),
+            'transition_mean_abs_diff': float(trans_mad),
             'bigram_overlap_ratio': float(bigram_comparison['overlap_ratio']),
             'bigram_freq_correlation': float(bigram_comparison['frequency_correlation']),
             'trigram_overlap_ratio': float(trigram_comparison['overlap_ratio']),

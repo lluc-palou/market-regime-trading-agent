@@ -7,29 +7,34 @@ Hyperparameter grids and training configurations for latent prior learning.
 # =================================================================================================
 # Hyperparameter Grid for Search
 # =================================================================================================
-# Budget-optimized: 12 configurations
+# Optimized for receptive field efficiency and matching VQ-VAE embedding dimension
+#
+# Key improvements:
+# - embedding_dim=64 matches VQ-VAE latent dimension
+# - Repeating dilation patterns prevent excessive receptive fields (seq_len=120)
+# - n_channels=[64, 80] restores capacity (learned from underfitting with n_channels=32)
+# - n_layers=[10, 12, 16] focuses on depth for capacity
+# - 6 focused configurations
 #
 # Expected runtime (assuming ~5s per epoch with prefetching):
-# - Worst case (75 epochs per split): 12 configs × 28 splits × 75 epochs × 5s = 126,000s = 35 hours = $24.85
-# - Expected case (early stopping ~15 epochs): 12 configs × 28 splits × 15 epochs × 5s = 25,200s = 7 hours = $4.97
-# - Per-split estimate: 12 configs × 15 epochs × 5s = 900s = 15 minutes
-#
-# Note: Prior model is much faster than VQVAE (smaller model, integer sequences vs LOB bins)
+# - Worst case (25 epochs per split): 6 configs × 28 splits × 25 epochs × 5s = 21,000s = 5.8 hours = $4.12
+# - Expected case (early stopping ~10 epochs): 6 configs × 28 splits × 10 epochs × 5s = 8,400s = 2.3 hours = $1.63
 # =================================================================================================
 
 PRIOR_HYPERPARAM_GRID = {
     # Architecture parameters
-    'embedding_dim': [128, 192],         # Code embedding size
-    'n_layers': [6, 8, 10],              # Causal CNN depth (receptive field)
-    'n_channels': [64, 80],              # Causal CNN width (capacity)
+    'embedding_dim': [64],               # Match VQ-VAE embedding dimension
+    'n_layers': [10, 12, 16],            # Depth with repeating dilations (RF controlled)
+    'n_channels': [64, 80],              # Restore capacity (64 or 80 channels)
     'kernel_size': [2],                  # Standard for causal convolutions
 
     # Training parameters
     'learning_rate': [1e-3],             # Adam learning rate
     'dropout': [0.15],                   # Regularization
 }
-# Total: 2 × 3 × 2 = 12 configurations
-# Parameter range: optimized for computational efficiency
+# Total: 1 × 3 × 2 × 1 × 1 × 1 = 6 configurations
+# Receptive field: Max 127 timesteps (fully covers seq_len=120)
+# Parameter range: ~270K-710K (K=128) or ~287K-726K (K=512)
 
 # =================================================================================================
 # Training Configuration

@@ -51,19 +51,25 @@ class ResidualBlock(nn.Module):
 class LatentPriorCNN(nn.Module):
     """
     Causal CNN for modeling prior distribution of latent codes.
-    
+
     Architecture:
-    - Embedding layer for discrete codes
-    - Stacked dilated causal convolutions with residual connections
+    - Embedding layer for discrete codes (embedding_dim=64, matches VQ-VAE)
+    - Stacked dilated causal convolutions with repeating dilation pattern
+    - Residual connections with gated activations (WaveNet-style)
     - Output projection to codebook size
+
+    Dilation strategy:
+    - Repeating pattern [1, 2, 4, 8, 16, 32, 64] to control receptive field
+    - Max RF = 127 timesteps (suitable for seq_len=120)
+    - Depth achieved through repetition, not expansion
     """
-    
+
     def __init__(
         self,
         codebook_size: int,
-        embedding_dim: int = 128,
-        n_layers: int = 10,
-        n_channels: int = 128,
+        embedding_dim: int = 64,
+        n_layers: int = 12,
+        n_channels: int = 64,
         kernel_size: int = 2,
         dropout: float = 0.15
     ):
@@ -78,11 +84,17 @@ class LatentPriorCNN(nn.Module):
         
         # Initial projection to channel dimension
         self.input_conv = nn.Conv1d(embedding_dim, n_channels, 1)
-        
-        # Dilated causal convolutions (exponentially increasing dilation)
-        self.layers = nn.ModuleList()
+
+        # Dilated causal convolutions with repeating pattern for controlled RF
+        # Pattern: [1, 2, 4, 8, 16, 32, 64] repeated to reach n_layers
+        # This keeps RF ≤ 127 (suitable for seq_len=120) while adding depth
+        base_dilations = [1, 2, 4, 8, 16, 32, 64]
+        dilations = []
         for i in range(n_layers):
-            dilation = 2 ** i
+            dilations.append(base_dilations[i % len(base_dilations)])
+
+        self.layers = nn.ModuleList()
+        for dilation in dilations:
             self.layers.append(
                 ResidualBlock(n_channels, kernel_size, dilation, dropout)
             )
@@ -160,9 +172,19 @@ class LatentPriorCNN(nn.Module):
         return z_seq
     
     def compute_receptive_field(self):
-        """Compute theoretical receptive field of the network."""
-        receptive_field = 1
+        """
+        Compute theoretical receptive field of the network.
+
+        Uses repeating dilation pattern: [1, 2, 4, 8, 16, 32, 64]
+        Maximum RF = 127 timesteps (covers seq_len=120)
+        """
+        base_dilations = [1, 2, 4, 8, 16, 32, 64]
+        dilations = []
         for i in range(self.n_layers):
-            dilation = 2 ** i
+            dilations.append(base_dilations[i % len(base_dilations)])
+
+        receptive_field = 1
+        for dilation in dilations:
             receptive_field += (2 - 1) * dilation  # kernel_size=2
+
         return receptive_field

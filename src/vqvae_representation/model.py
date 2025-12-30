@@ -28,8 +28,9 @@ def wasserstein_1d_loss(pred: torch.Tensor, target: torch.Tensor, reduction: str
     the geometry of the space - moving mass between nearby bins costs less than
     moving it between distant bins.
 
-    The result is normalized by the number of bins to be comparable to MSE loss
-    (both in 0-1 range), ensuring hyperparameters (beta, usage_penalty) remain balanced.
+    Normalization: Divides by maximum possible distance (num_bins - 1), which occurs
+    when all mass must move from one extreme to the other. This ensures the loss
+    is in [0, 1] range, comparable to MSE and other loss components.
 
     Args:
         pred: Predicted distribution (batch_size, num_bins)
@@ -37,7 +38,7 @@ def wasserstein_1d_loss(pred: torch.Tensor, target: torch.Tensor, reduction: str
         reduction: 'mean', 'sum', or 'none'
 
     Returns:
-        Wasserstein distance loss (normalized to 0-1 range like MSE)
+        Wasserstein distance loss normalized by maximum possible distance
     """
     # Ensure non-negative values (distributions should be non-negative)
     pred = torch.clamp(pred, min=0.0)
@@ -55,10 +56,11 @@ def wasserstein_1d_loss(pred: torch.Tensor, target: torch.Tensor, reduction: str
     target_cdf = torch.cumsum(target_normalized, dim=1)
 
     # 1-Wasserstein distance = L1 distance between CDFs
-    # CRITICAL: Normalize by number of bins to make comparable to MSE (both in 0-1 range)
-    # Without normalization, loss scales with num_bins (1001), making it ~100-1000x larger than MSE
+    # Normalize by maximum possible distance: (num_bins - 1)
+    # Maximum occurs when all mass at position 0 must move to position (num_bins-1)
     num_bins = pred.shape[1]
-    wasserstein_dist = torch.abs(pred_cdf - target_cdf).sum(dim=1) / num_bins
+    max_distance = num_bins - 1
+    wasserstein_dist = torch.abs(pred_cdf - target_cdf).sum(dim=1) / max_distance
 
     if reduction == 'mean':
         return wasserstein_dist.mean()
@@ -319,13 +321,14 @@ class Encoder(nn.Module):
 class Decoder(nn.Module):
     """
     Transposed convolutional decoder with dropout regularization.
-    
+
     Architecture:
     - FC expansion from embedding space
     - Progressive upsampling with transposed convolutions
     - Batch normalization for stability
     - Dropout for regularization
     - Final projection to output dimension
+    - Softmax activation to ensure output is a valid probability distribution
     """
     
     def __init__(
@@ -410,26 +413,32 @@ class Decoder(nn.Module):
     
     def forward(self, z_q: torch.Tensor) -> torch.Tensor:
         """
-        Decode quantized vectors to reconstruct input.
-        
+        Decode quantized vectors to reconstruct input probability distribution.
+
         Args:
             z_q: Quantized representation (batch_size, D)
-            
+
         Returns:
-            x_recon: Reconstructed input (batch_size, B)
+            x_recon: Reconstructed probability distribution (batch_size, B)
+                     Guaranteed to have non-negative values that sum to 1
         """
         x = self.fc(z_q)  # (batch_size, flatten_size)
         x = x.view(x.size(0), self.reshape_channels, self.reshape_length)  # (batch_size, C, L)
         x = self.conv_layers(x)  # (batch_size, 1, B')
         x = x.squeeze(1)  # (batch_size, B')
-        
+
         # Trim or pad to exact output dimension
         if x.size(1) > self.output_dim:
             x = x[:, :self.output_dim]
         elif x.size(1) < self.output_dim:
             padding = torch.zeros(x.size(0), self.output_dim - x.size(1), device=x.device)
             x = torch.cat([x, padding], dim=1)
-        
+
+        # Apply softmax to ensure output is a valid probability distribution:
+        # - All values are positive (exp function)
+        # - All values sum to 1 (normalization)
+        x = F.softmax(x, dim=1)
+
         return x
 
 

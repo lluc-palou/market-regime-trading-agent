@@ -218,8 +218,8 @@ def load_models_for_generation(
         vqvae_model: Loaded VQ-VAE model
     """
     # Load prior
-    prior_checkpoint = torch.load(prior_model_path, map_location=device)
-    
+    prior_checkpoint = torch.load(prior_model_path, map_location=device, weights_only=False)
+
     from .prior_model import LatentPriorCNN
     prior_model = LatentPriorCNN(
         codebook_size=prior_checkpoint['codebook_size'],
@@ -232,10 +232,10 @@ def load_models_for_generation(
     
     prior_model.load_state_dict(prior_checkpoint['model_state_dict'])
     prior_model.eval()
-    
+
     # Load VQ-VAE
-    vqvae_checkpoint = torch.load(vqvae_model_path, map_location=device)
-    
+    vqvae_checkpoint = torch.load(vqvae_model_path, map_location=device, weights_only=False)
+
     from src.vqvae_representation.model import VQVAEModel
     vqvae_model = VQVAEModel(vqvae_checkpoint['config']).to(device)
     vqvae_model.load_state_dict(vqvae_checkpoint['model_state_dict'])

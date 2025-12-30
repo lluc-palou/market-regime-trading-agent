@@ -45,16 +45,24 @@ HYPERPARAM_GRID = {
 # =================================================================================================
 # Optimized for AWS g4dn.xlarge GPU (NVIDIA T4)
 # Hour accumulation + large batches = 50-80× speedup vs laptop CPU
+#
+# Extended training capacity with smooth LR decay:
+# - max_epochs: 100 (up from 25) - allows model to fully converge
+# - patience: 10 (up from 3) - tolerates longer plateaus
+# - Cosine annealing LR: smooth decay from initial LR to min_lr over all epochs
 # =================================================================================================
 
 TRAINING_CONFIG = {
-    'max_epochs': 25,               # Increased for larger models with more capacity
-    'patience': 3,                  # Early stopping patience
-    'hours_per_accumulation': 100,  # NEW: Accumulate 100 hours before processing
-    'mini_batch_size': 2048,        # NEW: Large batches for GPU (was 32)
+    'max_epochs': 100,              # Extended epochs for full convergence
+    'patience': 10,                 # Increased patience for early stopping
+    'hours_per_accumulation': 100,  # Accumulate 100 hours before processing
+    'mini_batch_size': 2048,        # Large batches for GPU (was 32)
     'grad_clip_norm': 1.0,          # Gradient clipping
     'weight_decay': 1e-5,           # L2 regularization
-    'usage_penalty_weight': 0.1     # Codebook diversity penalty
+    'usage_penalty_weight': 0.1,    # Codebook diversity penalty
+    # Learning rate scheduler config
+    'lr_scheduler_type': 'cosine',  # Cosine annealing for smooth decay
+    'lr_min': 1e-6                  # Minimum learning rate (cosine annealing floor)
 }
 
 # Performance impact:

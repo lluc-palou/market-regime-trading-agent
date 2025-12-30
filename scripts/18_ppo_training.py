@@ -78,6 +78,8 @@ from pymongo import MongoClient, ASCENDING
 from src.utils.logging import logger
 from src.ppo import (
     ActorCriticTransformer,
+    ActorCriticFeatures,
+    ActorCriticCodebook,
     EpisodeLoader,
     StateBuffer,
     TrajectoryBuffer,
@@ -85,8 +87,8 @@ from src.ppo import (
     Transition,
     ppo_update,
     get_valid_timesteps,
-    compute_forward_looking_reward,
-    compute_transaction_cost,
+    compute_policy_based_position,
+    compute_simple_reward,
     compute_unrealized_pnl,
     ModelConfig,
     PPOConfig,
@@ -99,6 +101,7 @@ from src.ppo import (
     save_checkpoint,
     print_metrics
 )
+from src.ppo.config import ExperimentType
 
 # =================================================================================================
 # Configuration
@@ -121,7 +124,7 @@ LOG_DIR = ARTIFACT_BASE_DIR / "logs"
 # Training configuration
 WINDOW_SIZE = 50  # Observation window (W samples)
 HORIZON = 10      # Reward horizon (H samples)
-MAX_EPISODES_PER_EPOCH = 50  # Limit episodes per epoch for manageable training
+EPISODE_CHUNK_SIZE = 120  # Split day episodes into hourly chunks (120 samples ≈ 1 hour)
 
 # =================================================================================================
 # Helper Functions
@@ -189,13 +192,14 @@ def ensure_indexes(mongo_uri: str, db_name: str, split_ids: list):
 
 
 def run_episode(
-    agent: ActorCriticTransformer,
+    agent,
     episode,
     state_buffer: StateBuffer,
     trajectory_buffer: TrajectoryBuffer,
     agent_state: AgentState,
     reward_config: RewardConfig,
     model_config: ModelConfig,
+    experiment_type: ExperimentType,
     device: str,
     deterministic: bool = False
 ):
@@ -203,13 +207,14 @@ def run_episode(
     Run one episode and collect trajectories.
 
     Args:
-        agent: PPO agent model
+        agent: PPO agent model (ActorCriticTransformer, ActorCriticFeatures, or ActorCriticCodebook)
         episode: Episode object with samples
         state_buffer: Rolling window state buffer
         trajectory_buffer: Trajectory buffer for PPO updates
         agent_state: Agent trading state
         reward_config: Reward function config
         model_config: Model config
+        experiment_type: Type of experiment (determines which inputs to use)
         device: Device
         deterministic: Use deterministic actions (for validation)
 
@@ -251,51 +256,64 @@ def run_episode(
         # Get current sample
         current_sample = episode.samples[t]
 
-        # Agent selects action
+        # Agent selects action based on experiment type
         with torch.no_grad():
-            action, log_prob, value = agent.act(
-                codebooks, features, timestamps,
-                deterministic=deterministic
-            )
+            if experiment_type == ExperimentType.EXP1_BOTH_ORIGINAL:
+                # Experiment 1: Both codebook + features
+                action, log_prob, value, action_std = agent.act(
+                    codebooks, features, timestamps,
+                    deterministic=deterministic
+                )
+            elif experiment_type == ExperimentType.EXP2_FEATURES_ORIGINAL:
+                # Experiment 2: Features only
+                action, log_prob, value, action_std = agent.act(
+                    features, timestamps,
+                    deterministic=deterministic
+                )
+            else:  # EXP3_CODEBOOK_ORIGINAL
+                # Experiment 3: Codebook only
+                action, log_prob, value, action_std = agent.act(
+                    codebooks, timestamps,
+                    deterministic=deterministic
+                )
 
         action_val = action.item()
+        action_std_val = action_std.item()
         log_prob_val = log_prob.item() if not deterministic else 0.0
         value_val = value.item()
 
-        # Get future returns for reward computation
-        future_returns = torch.tensor([
-            episode.samples[t + h]['target'] for h in range(1, model_config.horizon + 1)
-        ], dtype=torch.float32)
+        # Get immediate target (one-step forward return)
+        target = current_sample['target']
 
-        # Get volatility from features (assume it's in features)
-        volatility = current_sample['features'][1].item()  # Assuming 2nd feature is volatility
-
-        # Compute reward
-        prev_action = agent_state.current_position
-        reward = compute_forward_looking_reward(
-            action_prev=prev_action,
-            action_curr=action_val,
-            future_returns=future_returns,
-            volatility=volatility,
-            spread_bps=reward_config.spread_bps,
-            tc_bps=reward_config.tc_bps,
-            lambda_risk=reward_config.lambda_risk,
-            alpha_penalty=reward_config.alpha_penalty,
-            epsilon=reward_config.epsilon
+        # Compute position using agent's policy distribution (action mean + std)
+        # This allows PPO to learn position sizing directly through confidence (std)
+        # Lower std → higher confidence → larger position
+        # Higher std → lower confidence → smaller position
+        position_curr = compute_policy_based_position(
+            action_val, action_std_val, confidence_weight=1.0
         )
 
-        # Transaction cost
-        tc = compute_transaction_cost(
-            prev_action, action_val,
-            reward_config.spread_bps, reward_config.tc_bps
+        # Get previous position (policy-based from previous timestep)
+        position_prev = agent_state.current_position
+
+        # Compute reward using simple PnL-based formula
+        reward, gross_pnl, tc = compute_simple_reward(
+            position_prev, position_curr, target, taker_fee=0.0005
         )
 
-        # Unrealized PnL
-        unrealized = compute_unrealized_pnl(action_val, future_returns)
+        # Unrealized PnL for next timestep
+        unrealized = compute_unrealized_pnl(position_curr, target)
 
-        # Update agent state
-        log_return = current_sample['target']
-        agent_state.update(action_val, log_return, tc, reward, unrealized)
+        # Get backward return for realized PnL tracking
+        # For first valid step, use 0; otherwise use previous sample's target
+        if t == valid_steps[0]:
+            log_return = 0.0
+        else:
+            log_return = episode.samples[t - 1]['target']
+
+        # Update agent state with policy-based position
+        # Track action_std instead of volatility (agent's learned uncertainty)
+        agent_state.update(position_curr, log_return, tc, reward, unrealized, gross_pnl, action_std_val)
         episode_returns.append(reward)
 
         # Check if episode should end
@@ -335,12 +353,13 @@ def run_episode(
 
 
 def train_epoch(
-    agent: ActorCriticTransformer,
+    agent,
     optimizer: torch.optim.Optimizer,
     episodes: list,
     ppo_config: PPOConfig,
     reward_config: RewardConfig,
     model_config: ModelConfig,
+    experiment_type: ExperimentType,
     device: str
 ):
     """
@@ -359,18 +378,33 @@ def train_epoch(
         'total_reward': 0.0,
         'total_pnl': 0.0,
         'episode_count': 0,
-        'avg_episode_length': 0.0
+        'avg_episode_length': 0.0,
+        'total_policy_loss': 0.0,
+        'total_value_loss': 0.0,
+        'total_entropy': 0.0,
+        'total_uncertainty': 0.0,
+        'n_ppo_updates': 0
     }
 
     episode_returns = []
 
-    # Limit episodes per epoch for manageable training
-    episodes_to_run = episodes[:MAX_EPISODES_PER_EPOCH]
+    # Use ALL training episodes each epoch
+    total_episodes = len(episodes)
 
-    for episode in episodes_to_run:
+    # Group episodes by parent_id for aggregated logging
+    from collections import defaultdict
+    day_metrics = defaultdict(lambda: {
+        'total_reward': 0.0, 'total_pnl': 0.0, 'chunks': 0,
+        'total_trades': 0, 'total_steps': 0,
+        'sum_mean_pos': 0.0, 'max_pos': 0.0,
+        'sum_mean_std': 0.0, 'min_std': float('inf'), 'max_std': float('-inf'),
+        'sum_gross_pnl_per_trade': 0.0, 'sum_tc_per_trade': 0.0
+    })
+
+    for ep_idx, episode in enumerate(episodes, 1):
         metrics = run_episode(
             agent, episode, state_buffer, trajectory_buffer, agent_state,
-            reward_config, model_config, device, deterministic=False
+            reward_config, model_config, experiment_type, device, deterministic=False
         )
 
         if metrics is None:
@@ -382,18 +416,62 @@ def train_epoch(
         epoch_metrics['avg_episode_length'] += metrics['episode_length']
         episode_returns.append(metrics['total_reward'])
 
+        # Aggregate metrics by parent episode (day)
+        parent_id = episode.parent_id if episode.parent_id is not None else ep_idx
+        dm = day_metrics[parent_id]
+        dm['total_reward'] += metrics['total_reward']
+        dm['total_pnl'] += metrics['total_pnl']
+        dm['chunks'] += 1
+        dm['total_trades'] += metrics['trade_count']
+        dm['total_steps'] += metrics['episode_length']
+        dm['sum_mean_pos'] += metrics['mean_abs_position']
+        dm['max_pos'] = max(dm['max_pos'], metrics['max_position'])
+        dm['sum_mean_std'] += metrics['mean_action_std']
+        dm['min_std'] = min(dm['min_std'], metrics['min_action_std'])
+        dm['max_std'] = max(dm['max_std'], metrics['max_action_std'])
+        dm['sum_gross_pnl_per_trade'] += metrics['avg_gross_pnl_per_trade']
+        dm['sum_tc_per_trade'] += metrics['avg_tc_per_trade']
+
+        # Log when completing a parent episode (all chunks done)
+        is_last_chunk = (ep_idx == total_episodes or
+                        (ep_idx < total_episodes and episodes[ep_idx].parent_id != parent_id))
+
+        if is_last_chunk:
+            from src.utils.logging import logger
+            n_chunks = dm['chunks']
+            logger(f'    Day {len([k for k in day_metrics.keys() if day_metrics[k]["chunks"] > 0])}/{len(set(e.parent_id if e.parent_id is not None else i for i, e in enumerate(episodes, 1)))} '
+                   f'({n_chunks} chunks) - '
+                   f'Reward: {dm["total_reward"]:.4f}, '
+                   f'PnL: {dm["total_pnl"]:.4f}, '
+                   f'Trades: {dm["total_trades"]} ({dm["total_trades"]/dm["total_steps"]:.2%}), '
+                   f'Pos[μ={dm["sum_mean_pos"]/n_chunks:.4f}, max={dm["max_pos"]:.4f}], '
+                   f'Std[μ={dm["sum_mean_std"]/n_chunks:.4f}, range=[{dm["min_std"]:.4f},{dm["max_std"]:.4f}]], '
+                   f'Gross PnL/Trade: {dm["sum_gross_pnl_per_trade"]/n_chunks:.6f}, '
+                   f'TC/Trade: {dm["sum_tc_per_trade"]/n_chunks:.6f}, '
+                   f'Steps: {dm["total_steps"]}', "INFO")
+
         # Perform PPO update if buffer is full
         if trajectory_buffer.is_full():
             loss_metrics = ppo_update(
-                agent, trajectory_buffer, optimizer, ppo_config, device
+                agent, trajectory_buffer, optimizer, ppo_config, experiment_type, device
             )
+            epoch_metrics['total_policy_loss'] += loss_metrics['policy_loss']
+            epoch_metrics['total_value_loss'] += loss_metrics['value_loss']
+            epoch_metrics['total_entropy'] += loss_metrics['entropy']
+            epoch_metrics['total_uncertainty'] += loss_metrics['uncertainty']
+            epoch_metrics['n_ppo_updates'] += 1
             trajectory_buffer.clear()
 
     # Final PPO update with remaining trajectories
     if len(trajectory_buffer) > 0:
         loss_metrics = ppo_update(
-            agent, trajectory_buffer, optimizer, ppo_config, device
+            agent, trajectory_buffer, optimizer, ppo_config, experiment_type, device
         )
+        epoch_metrics['total_policy_loss'] += loss_metrics['policy_loss']
+        epoch_metrics['total_value_loss'] += loss_metrics['value_loss']
+        epoch_metrics['total_entropy'] += loss_metrics['entropy']
+        epoch_metrics['total_uncertainty'] += loss_metrics['uncertainty']
+        epoch_metrics['n_ppo_updates'] += 1
         trajectory_buffer.clear()
 
     # Compute averages
@@ -408,14 +486,101 @@ def train_epoch(
         epoch_metrics['avg_episode_length'] = 0.0
         epoch_metrics['sharpe'] = 0.0
 
+    # Compute loss averages
+    if epoch_metrics['n_ppo_updates'] > 0:
+        epoch_metrics['avg_policy_loss'] = epoch_metrics['total_policy_loss'] / epoch_metrics['n_ppo_updates']
+        epoch_metrics['avg_value_loss'] = epoch_metrics['total_value_loss'] / epoch_metrics['n_ppo_updates']
+        epoch_metrics['avg_entropy'] = epoch_metrics['total_entropy'] / epoch_metrics['n_ppo_updates']
+        epoch_metrics['avg_uncertainty'] = epoch_metrics['total_uncertainty'] / epoch_metrics['n_ppo_updates']
+    else:
+        epoch_metrics['avg_policy_loss'] = 0.0
+        epoch_metrics['avg_value_loss'] = 0.0
+        epoch_metrics['avg_entropy'] = 0.0
+        epoch_metrics['avg_uncertainty'] = 0.0
+
     return epoch_metrics
 
 
+def compute_validation_metrics(agent, buffer, ppo_config, experiment_type, device):
+    """
+    Compute model metrics (losses, entropy, uncertainty) on validation data.
+    Similar to ppo_update but without gradient updates.
+    """
+    if len(buffer) == 0:
+        return {
+            'policy_loss': 0.0,
+            'value_loss': 0.0,
+            'entropy': 0.0,
+            'uncertainty': 0.0
+        }
+
+    agent.eval()
+    batch = buffer.get_batch(device)
+
+    codebooks = batch['codebooks']
+    features = batch['features']
+    timestamps = batch['timestamps']
+    actions = batch['actions']
+    old_log_probs = batch['log_probs']
+    rewards = batch['rewards']
+    old_values = batch['values']
+    dones = batch['dones']
+
+    # Compute advantages and returns using GAE
+    from src.ppo.ppo import compute_gae
+    advantages, returns = compute_gae(
+        rewards, old_values, dones,
+        gamma=ppo_config.gamma,
+        gae_lambda=ppo_config.gae_lambda
+    )
+    advantages = (advantages - advantages.mean()) / (advantages.std() + 1e-8)
+
+    # Compute metrics on validation data
+    from src.ppo.config import ExperimentType
+    import torch.nn.functional as F
+
+    with torch.no_grad():
+        if experiment_type == ExperimentType.EXP1_BOTH_ORIGINAL:
+            new_log_probs, new_values, entropy, std = agent.evaluate_actions(
+                codebooks, features, timestamps, actions
+            )
+        elif experiment_type == ExperimentType.EXP2_FEATURES_ORIGINAL:
+            new_log_probs, new_values, entropy, std = agent.evaluate_actions(
+                features, timestamps, actions
+            )
+        else:  # ExperimentType.EXP3_CODEBOOK_ORIGINAL
+            new_log_probs, new_values, entropy, std = agent.evaluate_actions(
+                codebooks, timestamps, actions
+            )
+
+        # Policy loss
+        ratio = torch.exp(new_log_probs - old_log_probs)
+        surr1 = ratio * advantages
+        surr2 = torch.clamp(ratio, 1 - ppo_config.clip_ratio, 1 + ppo_config.clip_ratio) * advantages
+        policy_loss = -torch.min(surr1, surr2).mean()
+
+        # Value loss
+        value_loss = F.mse_loss(new_values, returns)
+
+        # Entropy and uncertainty
+        mean_entropy = entropy.mean()
+        mean_uncertainty = std.mean()
+
+    return {
+        'policy_loss': policy_loss.item(),
+        'value_loss': value_loss.item(),
+        'entropy': mean_entropy.item(),
+        'uncertainty': mean_uncertainty.item()
+    }
+
+
 def validate_epoch(
-    agent: ActorCriticTransformer,
+    agent,
     episodes: list,
     reward_config: RewardConfig,
     model_config: ModelConfig,
+    ppo_config: PPOConfig,
+    experiment_type: ExperimentType,
     device: str
 ):
     """
@@ -427,7 +592,7 @@ def validate_epoch(
     agent.eval()
 
     state_buffer = StateBuffer(model_config.window_size)
-    trajectory_buffer = TrajectoryBuffer(1000)  # Not used, just placeholder
+    trajectory_buffer = TrajectoryBuffer(ppo_config.buffer_capacity)
     agent_state = AgentState()
 
     val_metrics = {
@@ -437,11 +602,22 @@ def validate_epoch(
     }
 
     episode_returns = []
+    total_episodes = len(episodes)
 
-    for episode in episodes:
+    # Group episodes by parent_id for aggregated logging
+    from collections import defaultdict
+    day_metrics = defaultdict(lambda: {
+        'total_reward': 0.0, 'total_pnl': 0.0, 'chunks': 0,
+        'total_trades': 0, 'total_steps': 0,
+        'sum_mean_pos': 0.0, 'max_pos': 0.0,
+        'sum_mean_std': 0.0, 'min_std': float('inf'), 'max_std': float('-inf'),
+        'sum_gross_pnl_per_trade': 0.0, 'sum_tc_per_trade': 0.0
+    })
+
+    for ep_idx, episode in enumerate(episodes, 1):
         metrics = run_episode(
             agent, episode, state_buffer, trajectory_buffer, agent_state,
-            reward_config, model_config, device, deterministic=True
+            reward_config, model_config, experiment_type, device, deterministic=True
         )
 
         if metrics is None:
@@ -452,6 +628,40 @@ def validate_epoch(
         val_metrics['episode_count'] += 1
         episode_returns.append(metrics['total_reward'])
 
+        # Aggregate metrics by parent episode (day)
+        parent_id = episode.parent_id if episode.parent_id is not None else ep_idx
+        dm = day_metrics[parent_id]
+        dm['total_reward'] += metrics['total_reward']
+        dm['total_pnl'] += metrics['total_pnl']
+        dm['chunks'] += 1
+        dm['total_trades'] += metrics['trade_count']
+        dm['total_steps'] += metrics['episode_length']
+        dm['sum_mean_pos'] += metrics['mean_abs_position']
+        dm['max_pos'] = max(dm['max_pos'], metrics['max_position'])
+        dm['sum_mean_std'] += metrics['mean_action_std']
+        dm['min_std'] = min(dm['min_std'], metrics['min_action_std'])
+        dm['max_std'] = max(dm['max_std'], metrics['max_action_std'])
+        dm['sum_gross_pnl_per_trade'] += metrics['avg_gross_pnl_per_trade']
+        dm['sum_tc_per_trade'] += metrics['avg_tc_per_trade']
+
+        # Log when completing a parent episode (all chunks done)
+        is_last_chunk = (ep_idx == total_episodes or
+                        (ep_idx < total_episodes and episodes[ep_idx].parent_id != parent_id))
+
+        if is_last_chunk:
+            from src.utils.logging import logger
+            n_chunks = dm['chunks']
+            logger(f'    Day {len([k for k in day_metrics.keys() if day_metrics[k]["chunks"] > 0])}/{len(set(e.parent_id if e.parent_id is not None else i for i, e in enumerate(episodes, 1)))} '
+                   f'({n_chunks} chunks) - '
+                   f'Reward: {dm["total_reward"]:.4f}, '
+                   f'PnL: {dm["total_pnl"]:.4f}, '
+                   f'Trades: {dm["total_trades"]} ({dm["total_trades"]/dm["total_steps"]:.2%}), '
+                   f'Pos[μ={dm["sum_mean_pos"]/n_chunks:.4f}, max={dm["max_pos"]:.4f}], '
+                   f'Std[μ={dm["sum_mean_std"]/n_chunks:.4f}, range=[{dm["min_std"]:.4f},{dm["max_std"]:.4f}]], '
+                   f'Gross PnL/Trade: {dm["sum_gross_pnl_per_trade"]/n_chunks:.6f}, '
+                   f'TC/Trade: {dm["sum_tc_per_trade"]/n_chunks:.6f}, '
+                   f'Steps: {dm["total_steps"]}', "INFO")
+
     # Compute averages
     if val_metrics['episode_count'] > 0:
         val_metrics['avg_reward'] = val_metrics['total_reward'] / val_metrics['episode_count']
@@ -461,6 +671,15 @@ def validate_epoch(
         val_metrics['avg_reward'] = 0.0
         val_metrics['avg_pnl'] = 0.0
         val_metrics['sharpe'] = 0.0
+
+    # Compute model metrics (losses, entropy, uncertainty) on validation data
+    model_metrics = compute_validation_metrics(
+        agent, trajectory_buffer, ppo_config, experiment_type, device
+    )
+    val_metrics['policy_loss'] = model_metrics['policy_loss']
+    val_metrics['value_loss'] = model_metrics['value_loss']
+    val_metrics['entropy'] = model_metrics['entropy']
+    val_metrics['uncertainty'] = model_metrics['uncertainty']
 
     return val_metrics
 
@@ -479,16 +698,14 @@ def train_split(
     logger('', "INFO")
     logger(f'Training agent on split {split_id}...', "INFO")
 
-    # Initialize episode loader
-    data_config = DataConfig(
-        mongodb_uri=MONGO_URI,
-        database_name=DB_NAME,
-        split_ids=[split_id],
-        role_train='train',
-        role_val='validation'
-    )
+    # Get experiment type from config
+    experiment_type = config.data.experiment_type
 
-    episode_loader = EpisodeLoader(data_config)
+    # Initialize episode loader with experiment type and chunk size
+    data_config = config.data
+    data_config.split_ids = [split_id]
+
+    episode_loader = EpisodeLoader(data_config, episode_chunk_size=EPISODE_CHUNK_SIZE)
 
     # Load episodes
     logger('Loading training episodes...', "INFO")
@@ -496,18 +713,31 @@ def train_split(
     logger(f'  Loaded {len(train_episodes)} training episodes', "INFO")
 
     logger('Loading validation episodes...', "INFO")
-    val_episodes = episode_loader.load_episodes(split_id, role='validation')
+    val_episodes = episode_loader.load_episodes(split_id, role='val')
     logger(f'  Loaded {len(val_episodes)} validation episodes', "INFO")
 
-    # Initialize agent
-    agent = ActorCriticTransformer(config.model).to(device)
+    # Initialize agent based on experiment type
+    logger(f'Initializing agent for Experiment {experiment_type.value}...', "INFO")
+    if experiment_type == ExperimentType.EXP1_BOTH_ORIGINAL:
+        agent = ActorCriticTransformer(config.model).to(device)
+    elif experiment_type == ExperimentType.EXP2_FEATURES_ORIGINAL:
+        agent = ActorCriticFeatures(config.model).to(device)
+    else:  # EXP3_CODEBOOK_ORIGINAL
+        agent = ActorCriticCodebook(config.model).to(device)
+
     optimizer = optim.Adam(
         agent.parameters(),
         lr=config.ppo.learning_rate,
         weight_decay=config.ppo.weight_decay
     )
 
+    # Learning rate scheduler - reduces LR when validation Sharpe plateaus
+    scheduler = optim.lr_scheduler.ReduceLROnPlateau(
+        optimizer, mode='max', factor=0.3, patience=2, min_lr=1e-6
+    )
+
     logger(f'Agent initialized: {agent.count_parameters():,} parameters', "INFO")
+    logger(f'Learning rate scheduler: ReduceLROnPlateau (factor=0.3, patience=2)', "INFO")
 
     # Training loop
     metrics_logger = MetricsLogger(log_dir=str(LOG_DIR))
@@ -523,29 +753,51 @@ def train_split(
         # Training
         train_metrics = train_epoch(
             agent, optimizer, train_episodes,
-            config.ppo, config.reward, config.model, device
+            config.ppo, config.reward, config.model, experiment_type, device
         )
 
         logger(f'  Train - Sharpe: {train_metrics["sharpe"]:.4f}, '
                f'Avg Reward: {train_metrics["avg_reward"]:.4f}, '
                f'Avg PnL: {train_metrics["avg_pnl"]:.4f}', "INFO")
+        logger(f'  Losses - Policy: {train_metrics["avg_policy_loss"]:.4f}, '
+               f'Value: {train_metrics["avg_value_loss"]:.4f}, '
+               f'Entropy: {train_metrics["avg_entropy"]:.4f}, '
+               f'Uncertainty: {train_metrics["avg_uncertainty"]:.4f}', "INFO")
 
         # Validation (every epoch)
         val_metrics = validate_epoch(
-            agent, val_episodes, config.reward, config.model, device
+            agent, val_episodes, config.reward, config.model, config.ppo, experiment_type, device
         )
 
         logger(f'  Val - Sharpe: {val_metrics["sharpe"]:.4f}, '
                f'Avg Reward: {val_metrics["avg_reward"]:.4f}, '
                f'Avg PnL: {val_metrics["avg_pnl"]:.4f}', "INFO")
+        logger(f'  Losses - Policy: {val_metrics["policy_loss"]:.4f}, '
+               f'Value: {val_metrics["value_loss"]:.4f}, '
+               f'Entropy: {val_metrics["entropy"]:.4f}, '
+               f'Uncertainty: {val_metrics["uncertainty"]:.4f}', "INFO")
+
+        # Update learning rate based on validation Sharpe
+        scheduler.step(val_metrics["sharpe"])
+        current_lr = optimizer.param_groups[0]['lr']
+        logger(f'  Learning rate: {current_lr:.6f}', "INFO")
 
         # Log to MLflow
         mlflow.log_metric("train_sharpe", train_metrics["sharpe"], step=epoch)
         mlflow.log_metric("train_avg_reward", train_metrics["avg_reward"], step=epoch)
         mlflow.log_metric("train_avg_pnl", train_metrics["avg_pnl"], step=epoch)
+        mlflow.log_metric("train_policy_loss", train_metrics["avg_policy_loss"], step=epoch)
+        mlflow.log_metric("train_value_loss", train_metrics["avg_value_loss"], step=epoch)
+        mlflow.log_metric("train_entropy", train_metrics["avg_entropy"], step=epoch)
+        mlflow.log_metric("train_uncertainty", train_metrics["avg_uncertainty"], step=epoch)
         mlflow.log_metric("val_sharpe", val_metrics["sharpe"], step=epoch)
         mlflow.log_metric("val_avg_reward", val_metrics["avg_reward"], step=epoch)
         mlflow.log_metric("val_avg_pnl", val_metrics["avg_pnl"], step=epoch)
+        mlflow.log_metric("val_policy_loss", val_metrics["policy_loss"], step=epoch)
+        mlflow.log_metric("val_value_loss", val_metrics["value_loss"], step=epoch)
+        mlflow.log_metric("val_entropy", val_metrics["entropy"], step=epoch)
+        mlflow.log_metric("val_uncertainty", val_metrics["uncertainty"], step=epoch)
+        mlflow.log_metric("learning_rate", current_lr, step=epoch)
 
         # Save checkpoint if best
         if val_metrics["sharpe"] > best_val_sharpe:
@@ -582,9 +834,35 @@ def train_split(
 
 def main():
     """Main execution function."""
-    logger('=' * 100, "INFO")
-    logger('PPO AGENT TRAINING (STAGE 17)', "INFO")
-    logger('=' * 100, "INFO")
+    import argparse
+
+    # Parse command line arguments
+    parser = argparse.ArgumentParser(description='PPO Agent Training with Different Experiments')
+    parser.add_argument('--experiment', type=int, default=None, choices=[1, 2, 3],
+                        help='Experiment type: 1=Both sources (original), 2=Features only (original), '
+                             '3=Codebook only (original). '
+                             'If not specified, runs all 3 experiments sequentially.')
+    parser.add_argument('--splits', type=str, default=None,
+                        help='Comma-separated list of split IDs to train (e.g., "0,1,2"). '
+                             'If not specified, trains on all available splits.')
+    parser.add_argument('--max-splits', type=int, default=None,
+                        help='Maximum number of splits to train on (uses first N splits). '
+                             'Useful for quick testing.')
+    args = parser.parse_args()
+
+    # Determine which experiments to run
+    if args.experiment is not None:
+        experiments_to_run = [args.experiment]
+    else:
+        # Run all 3 experiments by default
+        experiments_to_run = [1, 2, 3]
+
+    # Map experiment number to enum
+    experiment_mapping = {
+        1: ExperimentType.EXP1_BOTH_ORIGINAL,
+        2: ExperimentType.EXP2_FEATURES_ORIGINAL,
+        3: ExperimentType.EXP3_CODEBOOK_ORIGINAL
+    }
 
     # Setup device
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
@@ -605,6 +883,20 @@ def main():
 
     logger(f'Found {len(split_ids)} splits: {split_ids}', "INFO")
 
+    # Filter splits based on command-line arguments
+    if args.splits is not None:
+        # User specified exact splits to run
+        requested_splits = [int(s.strip()) for s in args.splits.split(',')]
+        split_ids = [s for s in split_ids if s in requested_splits]
+        logger(f'Using user-specified splits: {split_ids}', "INFO")
+    elif args.max_splits is not None:
+        # Limit to first N splits
+        split_ids = split_ids[:args.max_splits]
+        logger(f'Limiting to first {args.max_splits} splits: {split_ids}', "INFO")
+
+    if not split_ids:
+        raise ValueError("No splits selected after filtering")
+
     # Ensure indexes
     ensure_indexes(MONGO_URI, DB_NAME, split_ids)
 
@@ -620,62 +912,106 @@ def main():
     CHECKPOINT_DIR.mkdir(parents=True, exist_ok=True)
     LOG_DIR.mkdir(parents=True, exist_ok=True)
 
-    # Create experiment config
-    config = ExperimentConfig(
-        name=f"ppo_training_{datetime.now().strftime('%Y%m%d_%H%M%S')}",
-        model=ModelConfig(window_size=WINDOW_SIZE, horizon=HORIZON),
-        ppo=PPOConfig(),
-        reward=RewardConfig(),
-        training=TrainingConfig(device=str(device)),
-        data=DataConfig(database_name=DB_NAME, split_ids=split_ids)
-    )
+    # Run each experiment
+    for exp_num in experiments_to_run:
+        selected_experiment = experiment_mapping[exp_num]
 
-    # Save config
-    config_path = ARTIFACT_BASE_DIR / "experiment_config.json"
-    config.save(str(config_path))
-    logger(f'Experiment config saved to: {config_path}', "INFO")
-
-    # Main training loop
-    with mlflow.start_run(run_name=config.name):
-        # Log configuration
-        mlflow.log_params(config.to_dict())
-        mlflow.log_artifact(str(config_path))
-
-        # Train on each split
-        all_results = {}
-
-        for split_id in split_ids:
-            logger('', "INFO")
-            logger('=' * 100, "INFO")
-            logger(f'SPLIT {split_id}', "INFO")
-            logger('=' * 100, "INFO")
-
-            with mlflow.start_run(run_name=f"split_{split_id}", nested=True):
-                mlflow.log_param("split_id", split_id)
-
-                results = train_split(split_id, config, device)
-                all_results[split_id] = results
-
-                mlflow.log_metric("best_val_sharpe", results['best_val_sharpe'])
-                mlflow.log_metric("epochs_trained", results['epochs_trained'])
-
-                logger('', "INFO")
-                logger(f'Split {split_id} complete:', "INFO")
-                logger(f'  Best validation Sharpe: {results["best_val_sharpe"]:.4f}', "INFO")
-                logger(f'  Epochs trained: {results["epochs_trained"]}', "INFO")
-
-        # Summary
         logger('', "INFO")
         logger('=' * 100, "INFO")
-        logger('TRAINING COMPLETE', "INFO")
+        logger(f'PPO AGENT TRAINING - EXPERIMENT {exp_num} (STAGE 18)', "INFO")
         logger('=' * 100, "INFO")
+        logger(f'Experiment: {selected_experiment.name}', "INFO")
 
-        avg_sharpe = np.mean([r['best_val_sharpe'] for r in all_results.values()])
-        logger(f'Average validation Sharpe across splits: {avg_sharpe:.4f}', "INFO")
-        logger(f'Checkpoints saved to: {CHECKPOINT_DIR}', "INFO")
-        logger(f'MLflow tracking: {MLFLOW_TRACKING_URI}', "INFO")
+        # Create experiment config with selected experiment type
+        config = ExperimentConfig(
+            name=f"ppo_exp{exp_num}_{datetime.now().strftime('%Y%m%d_%H%M%S')}",
+            model=ModelConfig(window_size=WINDOW_SIZE, horizon=HORIZON),
+            ppo=PPOConfig(),
+            reward=RewardConfig(),
+            training=TrainingConfig(device=str(device)),
+            data=DataConfig(
+                database_name=DB_NAME,
+                split_ids=split_ids,
+                experiment_type=selected_experiment
+            )
+        )
 
-        mlflow.log_metric("avg_val_sharpe_across_splits", avg_sharpe)
+        # Save config
+        exp_artifact_dir = ARTIFACT_BASE_DIR / f"experiment_{exp_num}"
+        exp_artifact_dir.mkdir(parents=True, exist_ok=True)
+        config_path = exp_artifact_dir / "experiment_config.json"
+        config.save(str(config_path))
+        logger(f'Experiment config saved to: {config_path}', "INFO")
+
+        # Log training configuration
+        logger('', "INFO")
+        logger('Training Configuration:', "INFO")
+        logger(f'  Max epochs: {config.training.max_epochs}', "INFO")
+        logger(f'  Episodes per epoch: ALL (no limit)', "INFO")
+        logger(f'  Splits to train: {len(split_ids)}', "INFO")
+        logger(f'  Early stopping patience: {config.training.patience} epochs', "INFO")
+
+        # Estimate training time (assuming ~40 train episodes per split, ~30s per episode)
+        # Each epoch processes ALL training episodes
+        # Early stopping (patience=3) will likely stop around epoch 5-7
+        estimated_episodes_per_split = 40  # typical 80% of ~50 total episodes
+        estimated_time_per_epoch = (estimated_episodes_per_split * 30) / 3600  # hours
+        estimated_time_per_split_max = config.training.max_epochs * estimated_time_per_epoch
+        estimated_time_per_split_typical = 5 * estimated_time_per_epoch  # with early stopping
+        total_estimated_time_max = estimated_time_per_split_max * len(split_ids)
+        total_estimated_time_typical = estimated_time_per_split_typical * len(split_ids)
+        logger(f'  Estimated time per split: ~{estimated_time_per_split_typical:.1f}h (typical) to {estimated_time_per_split_max:.1f}h (max)', "INFO")
+        logger(f'  Total estimated time: ~{total_estimated_time_typical:.1f}h (typical) to {total_estimated_time_max:.1f}h (max)', "INFO")
+
+        # Main training loop for this experiment
+        with mlflow.start_run(run_name=config.name):
+            # Log configuration
+            mlflow.log_params(config.to_dict())
+            mlflow.log_artifact(str(config_path))
+
+            # Train on each split
+            all_results = {}
+
+            for split_id in split_ids:
+                logger('', "INFO")
+                logger('=' * 100, "INFO")
+                logger(f'SPLIT {split_id}', "INFO")
+                logger('=' * 100, "INFO")
+
+                with mlflow.start_run(run_name=f"split_{split_id}", nested=True):
+                    mlflow.log_param("split_id", split_id)
+                    mlflow.log_param("experiment_type", exp_num)
+
+                    results = train_split(split_id, config, device)
+                    all_results[split_id] = results
+
+                    mlflow.log_metric("best_val_sharpe", results['best_val_sharpe'])
+                    mlflow.log_metric("epochs_trained", results['epochs_trained'])
+
+                    logger('', "INFO")
+                    logger(f'Split {split_id} complete:', "INFO")
+                    logger(f'  Best validation Sharpe: {results["best_val_sharpe"]:.4f}', "INFO")
+                    logger(f'  Epochs trained: {results["epochs_trained"]}', "INFO")
+
+            # Summary for this experiment
+            logger('', "INFO")
+            logger('=' * 100, "INFO")
+            logger(f'EXPERIMENT {exp_num} COMPLETE', "INFO")
+            logger('=' * 100, "INFO")
+
+            avg_sharpe = np.mean([r['best_val_sharpe'] for r in all_results.values()])
+            logger(f'Average validation Sharpe across splits: {avg_sharpe:.4f}', "INFO")
+            logger(f'Checkpoints saved to: {CHECKPOINT_DIR}', "INFO")
+
+            mlflow.log_metric("avg_val_sharpe_across_splits", avg_sharpe)
+
+    # Final summary
+    logger('', "INFO")
+    logger('=' * 100, "INFO")
+    logger('ALL EXPERIMENTS COMPLETE', "INFO")
+    logger('=' * 100, "INFO")
+    logger(f'Completed {len(experiments_to_run)} experiment(s)', "INFO")
+    logger(f'MLflow tracking: {MLFLOW_TRACKING_URI}', "INFO")
 
 
 if __name__ == "__main__":

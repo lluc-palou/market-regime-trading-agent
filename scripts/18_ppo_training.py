@@ -90,6 +90,7 @@ from src.ppo import (
     compute_policy_based_position,
     compute_simple_reward,
     compute_unrealized_pnl,
+    compute_ewma_volatility,
     ModelConfig,
     PPOConfig,
     RewardConfig,
@@ -301,13 +302,17 @@ def run_episode(
             position_prev, position_curr, target, taker_fee=0.0005
         )
 
-        # Scale reward by volatility (standardized features, index 6)
-        # Volatility is standardized: mean≈0, std≈1, range≈[-3,3]
-        # Use exp(vol_std) as scaling factor: always positive, increases with volatility
-        import math
-        vol_std = current_sample['features'][6].item()  # Standardized volatility
-        vol_scale = math.exp(vol_std)  # Range: [exp(-3), exp(3)] ≈ [0.05, 20]
-        reward = reward / vol_scale
+        # Scale reward by realized volatility (EWMA of recent returns)
+        # Collect recent targets from past samples (window + current)
+        lookback = min(30, t)  # Use up to 30 recent samples for volatility estimate
+        recent_targets = [episode.samples[t - i]['target'] for i in range(lookback, 0, -1)]
+        recent_targets.append(target)  # Include current target
+
+        # Compute EWMA volatility from recent returns (half-life=20, matches feature engineering)
+        realized_vol = compute_ewma_volatility(recent_targets, half_life=20)
+
+        # Scale reward by volatility (Sharpe-like normalization)
+        reward = reward / realized_vol
 
         # Unrealized PnL for next timestep
         unrealized = compute_unrealized_pnl(position_curr, target)

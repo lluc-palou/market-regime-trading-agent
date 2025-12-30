@@ -69,7 +69,7 @@ class PriorTrainer:
 
         # Loss functions
         self.codebook_criterion = nn.CrossEntropyLoss()
-        self.target_criterion = nn.HuberLoss(delta=1.0)  # Robust to outliers
+        self.target_criterion = nn.HuberLoss(delta=0.01)  # Adjusted for target scale ~1e-3
 
         # Multi-task loss weight (default 0.5 = equal weight)
         self.task_loss_weight = config.get('task_loss_weight', 0.5)

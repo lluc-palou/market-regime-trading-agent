@@ -275,10 +275,21 @@ def main():
 
                         # Log to MLflow
                         mlflow.log_metrics({
+                            # Codebook metrics
                             'exp2_js_divergence': exp2_results['js_divergence_freq'],
                             'exp2_transition_frobenius_correlation': exp2_results['transition_frobenius_correlation'],
                             'exp2_transition_mean_abs_diff': exp2_results['transition_mean_abs_diff'],
-                            'exp2_bigram_overlap': exp2_results['bigram_overlap_ratio']
+                            'exp2_bigram_overlap': exp2_results['bigram_overlap_ratio'],
+                            # Target metrics
+                            'exp2_target_mean_diff': exp2_results['target_mean_diff'],
+                            'exp2_target_std_ratio': exp2_results['target_std_ratio'],
+                            'exp2_target_ks_p_value': exp2_results['target_ks_p_value'],
+                            'exp2_target_js_divergence': exp2_results['target_js_divergence'],
+                            'exp2_target_wasserstein_distance': exp2_results['target_wasserstein_distance'],
+                            'exp2_target_acf_mae': exp2_results['target_acf_mae'],
+                            'exp2_target_acf_correlation': exp2_results['target_acf_correlation'],
+                            'exp2_target_vol_clustering_mae': exp2_results['target_vol_clustering_mae'],
+                            'exp2_target_vol_clustering_correlation': exp2_results['target_vol_clustering_correlation']
                         })
 
                     except Exception as e:
@@ -373,28 +384,72 @@ def main():
             logger('', "INFO")
             logger('Experiment 2: Prior Quality', "INFO")
 
+            # Codebook metrics
             exp2_js = compute_aggregate_statistics(all_results['exp2'], 'js_divergence_freq')
             exp2_trans = compute_aggregate_statistics(all_results['exp2'], 'transition_frobenius_correlation')
             exp2_trans_mad = compute_aggregate_statistics(all_results['exp2'], 'transition_mean_abs_diff')
             exp2_bigram = compute_aggregate_statistics(all_results['exp2'], 'bigram_overlap_ratio')
 
-            logger(f'  JS Divergence: {exp2_js["mean"]:.6f} ± {exp2_js["std"]:.6f} [{exp2_js["min"]:.6f}, {exp2_js["max"]:.6f}]', "INFO")
-            logger(f'  Transition Frobenius Correlation: {exp2_trans["mean"]:.6f} ± {exp2_trans["std"]:.6f} [{exp2_trans["min"]:.6f}, {exp2_trans["max"]:.6f}]', "INFO")
-            logger(f'  Transition Mean Abs Diff: {exp2_trans_mad["mean"]:.6f} ± {exp2_trans_mad["std"]:.6f} [{exp2_trans_mad["min"]:.6f}, {exp2_trans_mad["max"]:.6f}]', "INFO")
-            logger(f'  Bigram Overlap: {exp2_bigram["mean"]:.4f} ± {exp2_bigram["std"]:.4f} [{exp2_bigram["min"]:.4f}, {exp2_bigram["max"]:.4f}]', "INFO")
+            # Target metrics
+            exp2_target_mean_diff = compute_aggregate_statistics(all_results['exp2'], 'target_mean_diff')
+            exp2_target_std_ratio = compute_aggregate_statistics(all_results['exp2'], 'target_std_ratio')
+            exp2_target_ks_p = compute_aggregate_statistics(all_results['exp2'], 'target_ks_p_value')
+            exp2_target_js = compute_aggregate_statistics(all_results['exp2'], 'target_js_divergence')
+            exp2_target_wasserstein = compute_aggregate_statistics(all_results['exp2'], 'target_wasserstein_distance')
+            exp2_target_acf_mae = compute_aggregate_statistics(all_results['exp2'], 'target_acf_mae')
+            exp2_target_acf_corr = compute_aggregate_statistics(all_results['exp2'], 'target_acf_correlation')
+            exp2_target_vol_mae = compute_aggregate_statistics(all_results['exp2'], 'target_vol_clustering_mae')
+            exp2_target_vol_corr = compute_aggregate_statistics(all_results['exp2'], 'target_vol_clustering_correlation')
+
+            logger('  Codebook Sequence Metrics:', "INFO")
+            logger(f'    JS Divergence: {exp2_js["mean"]:.6f} ± {exp2_js["std"]:.6f} [{exp2_js["min"]:.6f}, {exp2_js["max"]:.6f}]', "INFO")
+            logger(f'    Transition Frobenius Correlation: {exp2_trans["mean"]:.6f} ± {exp2_trans["std"]:.6f} [{exp2_trans["min"]:.6f}, {exp2_trans["max"]:.6f}]', "INFO")
+            logger(f'    Transition Mean Abs Diff: {exp2_trans_mad["mean"]:.6f} ± {exp2_trans_mad["std"]:.6f} [{exp2_trans_mad["min"]:.6f}, {exp2_trans_mad["max"]:.6f}]', "INFO")
+            logger(f'    Bigram Overlap: {exp2_bigram["mean"]:.4f} ± {exp2_bigram["std"]:.4f} [{exp2_bigram["min"]:.4f}, {exp2_bigram["max"]:.4f}]', "INFO")
+
+            logger('  Target Field Metrics:', "INFO")
+            logger(f'    Target Mean Diff: {exp2_target_mean_diff["mean"]:.8f} ± {exp2_target_mean_diff["std"]:.8f} [{exp2_target_mean_diff["min"]:.8f}, {exp2_target_mean_diff["max"]:.8f}]', "INFO")
+            logger(f'    Target Std Ratio: {exp2_target_std_ratio["mean"]:.6f} ± {exp2_target_std_ratio["std"]:.6f} [{exp2_target_std_ratio["min"]:.6f}, {exp2_target_std_ratio["max"]:.6f}]', "INFO")
+            logger(f'    Target KS p-value: {exp2_target_ks_p["mean"]:.6f} ± {exp2_target_ks_p["std"]:.6f} [{exp2_target_ks_p["min"]:.6f}, {exp2_target_ks_p["max"]:.6f}]', "INFO")
+            logger(f'    Target JS Divergence: {exp2_target_js["mean"]:.6f} ± {exp2_target_js["std"]:.6f} [{exp2_target_js["min"]:.6f}, {exp2_target_js["max"]:.6f}]', "INFO")
+            logger(f'    Target Wasserstein Distance: {exp2_target_wasserstein["mean"]:.8f} ± {exp2_target_wasserstein["std"]:.8f} [{exp2_target_wasserstein["min"]:.8f}, {exp2_target_wasserstein["max"]:.8f}]', "INFO")
+            logger(f'    Target ACF MAE: {exp2_target_acf_mae["mean"]:.6f} ± {exp2_target_acf_mae["std"]:.6f} [{exp2_target_acf_mae["min"]:.6f}, {exp2_target_acf_mae["max"]:.6f}]', "INFO")
+            logger(f'    Target ACF Correlation: {exp2_target_acf_corr["mean"]:.6f} ± {exp2_target_acf_corr["std"]:.6f} [{exp2_target_acf_corr["min"]:.6f}, {exp2_target_acf_corr["max"]:.6f}]', "INFO")
+            logger(f'    Volatility Clustering MAE: {exp2_target_vol_mae["mean"]:.6f} ± {exp2_target_vol_mae["std"]:.6f} [{exp2_target_vol_mae["min"]:.6f}, {exp2_target_vol_mae["max"]:.6f}]', "INFO")
+            logger(f'    Volatility Clustering Correlation: {exp2_target_vol_corr["mean"]:.6f} ± {exp2_target_vol_corr["std"]:.6f} [{exp2_target_vol_corr["min"]:.6f}, {exp2_target_vol_corr["max"]:.6f}]', "INFO")
 
             aggregate_stats['exp2'] = {
                 'js_divergence': exp2_js,
                 'transition_frobenius_correlation': exp2_trans,
                 'transition_mean_abs_diff': exp2_trans_mad,
-                'bigram_overlap': exp2_bigram
+                'bigram_overlap': exp2_bigram,
+                'target_mean_diff': exp2_target_mean_diff,
+                'target_std_ratio': exp2_target_std_ratio,
+                'target_ks_p_value': exp2_target_ks_p,
+                'target_js_divergence': exp2_target_js,
+                'target_wasserstein_distance': exp2_target_wasserstein,
+                'target_acf_mae': exp2_target_acf_mae,
+                'target_acf_correlation': exp2_target_acf_corr,
+                'target_vol_clustering_mae': exp2_target_vol_mae,
+                'target_vol_clustering_correlation': exp2_target_vol_corr
             }
 
             mlflow.log_metrics({
+                # Codebook metrics
                 'agg_exp2_js_divergence_mean': exp2_js['mean'],
                 'agg_exp2_transition_frobenius_correlation_mean': exp2_trans['mean'],
                 'agg_exp2_transition_mean_abs_diff_mean': exp2_trans_mad['mean'],
-                'agg_exp2_bigram_overlap_mean': exp2_bigram['mean']
+                'agg_exp2_bigram_overlap_mean': exp2_bigram['mean'],
+                # Target metrics
+                'agg_exp2_target_mean_diff_mean': exp2_target_mean_diff['mean'],
+                'agg_exp2_target_std_ratio_mean': exp2_target_std_ratio['mean'],
+                'agg_exp2_target_ks_p_value_mean': exp2_target_ks_p['mean'],
+                'agg_exp2_target_js_divergence_mean': exp2_target_js['mean'],
+                'agg_exp2_target_wasserstein_distance_mean': exp2_target_wasserstein['mean'],
+                'agg_exp2_target_acf_mae_mean': exp2_target_acf_mae['mean'],
+                'agg_exp2_target_acf_correlation_mean': exp2_target_acf_corr['mean'],
+                'agg_exp2_target_vol_clustering_mae_mean': exp2_target_vol_mae['mean'],
+                'agg_exp2_target_vol_clustering_correlation_mean': exp2_target_vol_corr['mean']
             })
 
         # Experiment 3 aggregates

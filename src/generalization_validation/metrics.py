@@ -398,3 +398,184 @@ def compute_cosine_similarity(X: np.ndarray, Y: np.ndarray) -> Dict[str, float]:
         'median_cosine_similarity': float(np.median(per_sample_similarity)),
         'per_sample_similarities': per_sample_similarity
     }
+
+
+# =================================================================================================
+# Target Field Validation Metrics
+# =================================================================================================
+
+def compare_target_distributions(
+    val_targets: np.ndarray,
+    syn_targets: np.ndarray,
+    n_bins: int = 50
+) -> Dict[str, float]:
+    """
+    Compare target value distributions between validation and synthetic data.
+
+    Args:
+        val_targets: (N,) validation target values
+        syn_targets: (M,) synthetic target values
+        n_bins: Number of bins for histogram-based JS divergence
+
+    Returns:
+        Dictionary with distribution comparison metrics
+    """
+    # 1. Basic statistics comparison
+    val_mean = float(np.mean(val_targets))
+    syn_mean = float(np.mean(syn_targets))
+    val_std = float(np.std(val_targets))
+    syn_std = float(np.std(syn_targets))
+    val_min = float(np.min(val_targets))
+    syn_min = float(np.min(syn_targets))
+    val_max = float(np.max(val_targets))
+    syn_max = float(np.max(val_targets))
+
+    mean_diff = float(np.abs(val_mean - syn_mean))
+    std_ratio = float(syn_std / (val_std + 1e-10))
+
+    # 2. Kolmogorov-Smirnov test
+    ks_statistic, ks_p_value = stats.ks_2samp(val_targets, syn_targets)
+
+    # 3. Wasserstein distance (Earth Mover's Distance)
+    wasserstein = float(stats.wasserstein_distance(val_targets, syn_targets))
+
+    # 4. JS divergence (histogram-based)
+    # Determine common bin edges
+    all_targets = np.concatenate([val_targets, syn_targets])
+    bin_edges = np.linspace(all_targets.min(), all_targets.max(), n_bins + 1)
+
+    val_hist, _ = np.histogram(val_targets, bins=bin_edges)
+    syn_hist, _ = np.histogram(syn_targets, bins=bin_edges)
+
+    # Convert to probabilities
+    val_prob = (val_hist + 1e-10) / (val_hist.sum() + n_bins * 1e-10)
+    syn_prob = (syn_hist + 1e-10) / (syn_hist.sum() + n_bins * 1e-10)
+
+    js_div = jensen_shannon_divergence(val_prob, syn_prob)
+
+    return {
+        'val_mean': val_mean,
+        'syn_mean': syn_mean,
+        'val_std': val_std,
+        'syn_std': syn_std,
+        'val_min': val_min,
+        'syn_min': syn_min,
+        'val_max': val_max,
+        'syn_max': syn_max,
+        'mean_abs_diff': mean_diff,
+        'std_ratio': std_ratio,
+        'ks_statistic': float(ks_statistic),
+        'ks_p_value': float(ks_p_value),
+        'wasserstein_distance': wasserstein,
+        'js_divergence': float(js_div)
+    }
+
+
+def compute_autocorrelation(x: np.ndarray, max_lag: int = 20) -> np.ndarray:
+    """
+    Compute autocorrelation function.
+
+    Args:
+        x: (N,) time series
+        max_lag: Maximum lag to compute
+
+    Returns:
+        acf: (max_lag+1,) autocorrelations for lags 0 to max_lag
+    """
+    x = x - np.mean(x)
+    c0 = np.dot(x, x) / len(x)
+
+    acf = np.zeros(max_lag + 1)
+    acf[0] = 1.0
+
+    for k in range(1, max_lag + 1):
+        c_k = np.dot(x[:-k], x[k:]) / len(x)
+        acf[k] = c_k / c0
+
+    return acf
+
+
+def compare_target_autocorrelation(
+    val_targets: np.ndarray,
+    syn_targets: np.ndarray,
+    max_lag: int = 20
+) -> Dict:
+    """
+    Compare autocorrelation structure of target sequences.
+
+    Args:
+        val_targets: (N,) validation targets
+        syn_targets: (M,) synthetic targets
+        max_lag: Maximum lag to analyze
+
+    Returns:
+        Dictionary with ACF comparison metrics
+    """
+    # Compute ACF for both
+    acf_val = compute_autocorrelation(val_targets, max_lag)
+    acf_syn = compute_autocorrelation(syn_targets, max_lag)
+
+    # Mean absolute error
+    acf_mae = float(np.mean(np.abs(acf_val - acf_syn)))
+
+    # Correlation between ACF curves (excluding lag 0 which is always 1)
+    if max_lag > 1:
+        acf_corr = float(np.corrcoef(acf_val[1:], acf_syn[1:])[0, 1])
+        if np.isnan(acf_corr):
+            acf_corr = 0.0
+    else:
+        acf_corr = 0.0
+
+    return {
+        'acf_val': acf_val.tolist(),
+        'acf_syn': acf_syn.tolist(),
+        'acf_mae': acf_mae,
+        'acf_correlation': acf_corr,
+        'max_lag': max_lag
+    }
+
+
+def compare_volatility_clustering(
+    val_targets: np.ndarray,
+    syn_targets: np.ndarray,
+    max_lag: int = 20
+) -> Dict:
+    """
+    Compare volatility clustering (autocorrelation of absolute values).
+
+    This tests whether the model captures GARCH-like effects where
+    large returns tend to be followed by large returns.
+
+    Args:
+        val_targets: (N,) validation targets
+        syn_targets: (M,) synthetic targets
+        max_lag: Maximum lag to analyze
+
+    Returns:
+        Dictionary with volatility clustering metrics
+    """
+    # Compute ACF of absolute values
+    abs_val = np.abs(val_targets)
+    abs_syn = np.abs(syn_targets)
+
+    acf_abs_val = compute_autocorrelation(abs_val, max_lag)
+    acf_abs_syn = compute_autocorrelation(abs_syn, max_lag)
+
+    # Mean absolute error
+    vol_clustering_mae = float(np.mean(np.abs(acf_abs_val - acf_abs_syn)))
+
+    # Correlation between absolute ACF curves
+    if max_lag > 1:
+        vol_clustering_corr = float(np.corrcoef(acf_abs_val[1:], acf_abs_syn[1:])[0, 1])
+        if np.isnan(vol_clustering_corr):
+            vol_clustering_corr = 0.0
+    else:
+        vol_clustering_corr = 0.0
+
+    return {
+        'acf_abs_val': acf_abs_val.tolist(),
+        'acf_abs_syn': acf_abs_syn.tolist(),
+        'vol_clustering_mae': vol_clustering_mae,
+        'vol_clustering_correlation': vol_clustering_corr,
+        'max_lag': max_lag
+    }

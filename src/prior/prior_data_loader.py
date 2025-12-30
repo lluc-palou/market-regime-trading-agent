@@ -19,10 +19,10 @@ def load_latent_codes_for_hours(
     hour_start: datetime,
     hour_end: datetime,
     role: str = None
-) -> List[Tuple[datetime, int]]:
+) -> List[Tuple[datetime, int, float]]:
     """
-    Load latent codes for a time range.
-    
+    Load latent codes and targets for a time range.
+
     Args:
         spark: SparkSession
         db_name: Database name
@@ -30,77 +30,83 @@ def load_latent_codes_for_hours(
         hour_start: Start time
         hour_end: End time
         role: Optional role filter ('train' or 'validation')
-        
+
     Returns:
-        List of (timestamp, codebook_index) tuples
+        List of (timestamp, codebook_index, target) tuples
     """
     df = spark.read \
         .format("mongodb") \
         .option("database", db_name) \
         .option("collection", collection) \
         .load()
-    
+
     # Filter by time range
     df = df.filter(
         (df.timestamp >= hour_start) &
         (df.timestamp < hour_end)
     )
-    
+
     # Filter by role if specified
     if role is not None:
         df = df.filter(df.role == role)
-    
-    # Select only timestamp and codebook_index
-    df = df.select('timestamp', 'codebook_index').orderBy('timestamp')
-    
+
+    # Select timestamp, codebook_index, and target
+    df = df.select('timestamp', 'codebook_index', 'target').orderBy('timestamp')
+
     # Collect to list
     rows = df.collect()
-    
+
     if not rows:
         return []
-    
-    return [(row.timestamp, row.codebook_index) for row in rows]
+
+    return [(row.timestamp, row.codebook_index, row.target) for row in rows]
 
 
 def create_sequences_from_codes(
-    latent_codes: List[Tuple[datetime, int]],
+    latent_codes: List[Tuple[datetime, int, float]],
     seq_len: int = 120
-) -> Tuple[torch.Tensor, List[datetime]]:
+) -> Tuple[torch.Tensor, torch.Tensor, List[datetime]]:
     """
-    Create non-overlapping sequences from latent codes.
-    
+    Create non-overlapping sequences from latent codes and targets.
+
     Args:
-        latent_codes: List of (timestamp, code_index) tuples (sorted by time)
+        latent_codes: List of (timestamp, code_index, target) tuples (sorted by time)
         seq_len: Sequence length
-        
+
     Returns:
-        sequences: (num_sequences, seq_len) tensor of codes
+        code_sequences: (num_sequences, seq_len) tensor of codes
+        target_sequences: (num_sequences, seq_len) tensor of targets
         start_times: List of start timestamps for each sequence
     """
     if len(latent_codes) < seq_len:
-        return None, None
-    
-    # Extract codes (already sorted by timestamp)
-    codes = [code for _, code in latent_codes]
-    timestamps = [ts for ts, _ in latent_codes]
-    
+        return None, None, None
+
+    # Extract codes and targets (already sorted by timestamp)
+    codes = [code for _, code, _ in latent_codes]
+    targets = [target for _, _, target in latent_codes]
+    timestamps = [ts for ts, _, _ in latent_codes]
+
     # Create non-overlapping sequences
-    sequences = []
+    code_sequences = []
+    target_sequences = []
     start_times = []
-    
+
     for i in range(0, len(codes) - seq_len + 1, seq_len):
-        seq = codes[i:i+seq_len]
-        if len(seq) == seq_len:
-            sequences.append(seq)
+        code_seq = codes[i:i+seq_len]
+        target_seq = targets[i:i+seq_len]
+        if len(code_seq) == seq_len:
+            code_sequences.append(code_seq)
+            target_sequences.append(target_seq)
             start_times.append(timestamps[i])
-    
-    if not sequences:
-        return None, None
-    
-    # Convert to tensor
-    sequences_tensor = torch.tensor(sequences, dtype=torch.long)
-    
-    return sequences_tensor, start_times
+
+    if not code_sequences:
+        return None, None, None
+
+    # Convert to tensors
+    code_sequences_tensor = torch.tensor(code_sequences, dtype=torch.long)
+    target_sequences_tensor = torch.tensor(target_sequences, dtype=torch.float32)
+
+    return code_sequences_tensor, target_sequences_tensor, start_times
 
 
 def load_sequences_for_split(
@@ -111,10 +117,10 @@ def load_sequences_for_split(
     role: str,
     seq_len: int = 120,
     hours_per_accumulation: int = 100
-) -> List[torch.Tensor]:
+) -> Tuple[List[torch.Tensor], List[torch.Tensor]]:
     """
     Load sequences for a split using hour accumulation.
-    
+
     Args:
         spark: SparkSession
         db_name: Database name
@@ -123,38 +129,41 @@ def load_sequences_for_split(
         role: 'train' or 'validation'
         seq_len: Sequence length
         hours_per_accumulation: Hours to load at once
-        
+
     Returns:
-        List of sequence tensors (each tensor has multiple sequences)
+        all_code_sequences: List of code sequence tensors
+        all_target_sequences: List of target sequence tensors
     """
-    all_sequences = []
-    
+    all_code_sequences = []
+    all_target_sequences = []
+
     # Process hours in groups
     for hour_idx in range(0, len(all_hours), hours_per_accumulation):
         hour_group = all_hours[hour_idx:min(hour_idx + hours_per_accumulation, len(all_hours))]
-        
+
         if not hour_group:
             continue
-        
-        # Load latent codes for this hour group
+
+        # Load latent codes and targets for this hour group
         hour_start = hour_group[0]
         hour_end = hour_group[-1] + timedelta(hours=1)
-        
+
         latent_codes = load_latent_codes_for_hours(
             spark, db_name, collection,
             hour_start, hour_end, role
         )
-        
+
         if not latent_codes:
             continue
-        
+
         # Create sequences
-        sequences, _ = create_sequences_from_codes(latent_codes, seq_len)
-        
-        if sequences is not None:
-            all_sequences.append(sequences)
-    
-    return all_sequences
+        code_sequences, target_sequences, _ = create_sequences_from_codes(latent_codes, seq_len)
+
+        if code_sequences is not None:
+            all_code_sequences.append(code_sequences)
+            all_target_sequences.append(target_sequences)
+
+    return all_code_sequences, all_target_sequences
 
 
 def get_sequence_dataset_size(

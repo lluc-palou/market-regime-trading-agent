@@ -49,25 +49,30 @@ class PriorTrainer:
         self.device = device
         self.config = config
         
-        # Initialize model
+        # Initialize model (with target prediction enabled)
         self.model = LatentPriorCNN(
             codebook_size=codebook_size,
             embedding_dim=config['embedding_dim'],
             n_layers=config['n_layers'],
             n_channels=config['n_channels'],
             kernel_size=config['kernel_size'],
-            dropout=config['dropout']
+            dropout=config['dropout'],
+            predict_target=True
         ).to(device)
-        
+
         # Initialize optimizer
         self.optimizer = optim.Adam(
             self.model.parameters(),
             lr=config['learning_rate'],
             weight_decay=PRIOR_TRAINING_CONFIG['weight_decay']
         )
-        
-        # Loss function
-        self.criterion = nn.CrossEntropyLoss()
+
+        # Loss functions
+        self.codebook_criterion = nn.CrossEntropyLoss()
+        self.target_criterion = nn.HuberLoss(delta=1.0)  # Robust to outliers
+
+        # Multi-task loss weight (default 0.5 = equal weight)
+        self.task_loss_weight = config.get('task_loss_weight', 0.5)
         
         # Training state
         self.best_val_loss = float('inf')
@@ -179,14 +184,14 @@ class PriorTrainer:
             )
 
             if not latent_codes:
-                return None
+                return None, None
 
-            sequences, _ = create_sequences_from_codes(
+            code_sequences, target_sequences, _ = create_sequences_from_codes(
                 latent_codes,
                 PRIOR_TRAINING_CONFIG['seq_len']
             )
 
-            return sequences
+            return code_sequences, target_sequences
 
         # Create hour groups
         hour_groups = []
@@ -202,7 +207,8 @@ class PriorTrainer:
 
             for i, hour_group in enumerate(hour_groups):
                 # Wait for current batch to finish loading
-                sequences = future.result() if future else None
+                result = future.result() if future else (None, None)
+                code_sequences, target_sequences = result
 
                 # Start loading NEXT batch in background (while GPU processes current)
                 if i + 1 < len(hour_groups):
@@ -210,30 +216,41 @@ class PriorTrainer:
                 else:
                     future = None
 
-                if sequences is None:
+                if code_sequences is None:
                     continue
 
                 # Process on GPU while next batch loads in background
-                num_sequences = sequences.size(0)
+                num_sequences = code_sequences.size(0)
                 batch_size = PRIOR_TRAINING_CONFIG['sequence_batch_size']
 
                 for j in range(0, num_sequences, batch_size):
-                    batch = sequences[j:j+batch_size].to(self.device)
+                    code_batch = code_sequences[j:j+batch_size].to(self.device)
+                    target_batch = target_sequences[j:j+batch_size].to(self.device)
 
-                    # Input: all codes except last
-                    input_seq = batch[:, :-1]
-                    # Target: all codes except first
-                    target_seq = batch[:, 1:]
+                    # Input: all except last timestep
+                    code_input = code_batch[:, :-1]
+                    target_input = target_batch[:, :-1]
+
+                    # Target: all except first timestep (shifted for autoregressive)
+                    code_target = code_batch[:, 1:]
+                    target_target = target_batch[:, 1:]
 
                     # Forward
                     self.optimizer.zero_grad()
-                    logits = self.model(input_seq)  # (batch, seq_len-1, codebook_size)
+                    codebook_logits, target_preds = self.model(code_input, target_input)
 
-                    # Compute loss
-                    loss = self.criterion(
-                        logits.reshape(-1, logits.size(-1)),  # (batch*(seq_len-1), codebook_size)
-                        target_seq.reshape(-1)                 # (batch*(seq_len-1),)
+                    # Multi-task loss
+                    codebook_loss = self.codebook_criterion(
+                        codebook_logits.reshape(-1, codebook_logits.size(-1)),
+                        code_target.reshape(-1)
                     )
+                    target_loss = self.target_criterion(
+                        target_preds.reshape(-1),
+                        target_target.reshape(-1)
+                    )
+
+                    # Weighted combination
+                    loss = self.task_loss_weight * codebook_loss + (1 - self.task_loss_weight) * target_loss
 
                     # Backward
                     loss.backward()
@@ -271,14 +288,14 @@ class PriorTrainer:
             )
 
             if not latent_codes:
-                return None
+                return None, None
 
-            sequences, _ = create_sequences_from_codes(
+            code_sequences, target_sequences, _ = create_sequences_from_codes(
                 latent_codes,
                 PRIOR_TRAINING_CONFIG['seq_len']
             )
 
-            return sequences
+            return code_sequences, target_sequences
 
         # Create hour groups
         hour_groups = []
@@ -295,7 +312,8 @@ class PriorTrainer:
 
                 for i, hour_group in enumerate(hour_groups):
                     # Wait for current batch
-                    sequences = future.result() if future else None
+                    result = future.result() if future else (None, None)
+                    code_sequences, target_sequences = result
 
                     # Start loading next batch
                     if i + 1 < len(hour_groups):
@@ -303,25 +321,36 @@ class PriorTrainer:
                     else:
                         future = None
 
-                    if sequences is None:
+                    if code_sequences is None:
                         continue
 
                     # Process on GPU while next batch loads
-                    num_sequences = sequences.size(0)
+                    num_sequences = code_sequences.size(0)
                     batch_size = PRIOR_TRAINING_CONFIG['sequence_batch_size']
 
                     for j in range(0, num_sequences, batch_size):
-                        batch = sequences[j:j+batch_size].to(self.device)
+                        code_batch = code_sequences[j:j+batch_size].to(self.device)
+                        target_batch = target_sequences[j:j+batch_size].to(self.device)
 
-                        input_seq = batch[:, :-1]
-                        target_seq = batch[:, 1:]
+                        code_input = code_batch[:, :-1]
+                        target_input = target_batch[:, :-1]
 
-                        logits = self.model(input_seq)
+                        code_target = code_batch[:, 1:]
+                        target_target = target_batch[:, 1:]
 
-                        loss = self.criterion(
-                            logits.reshape(-1, logits.size(-1)),
-                            target_seq.reshape(-1)
+                        codebook_logits, target_preds = self.model(code_input, target_input)
+
+                        # Multi-task loss
+                        codebook_loss = self.codebook_criterion(
+                            codebook_logits.reshape(-1, codebook_logits.size(-1)),
+                            code_target.reshape(-1)
                         )
+                        target_loss = self.target_criterion(
+                            target_preds.reshape(-1),
+                            target_target.reshape(-1)
+                        )
+
+                        loss = self.task_loss_weight * codebook_loss + (1 - self.task_loss_weight) * target_loss
 
                         epoch_loss += loss.item()
                         num_batches += 1

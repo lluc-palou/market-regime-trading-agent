@@ -392,3 +392,183 @@ def plot_correlation_matrices(
         plt.close()
     else:
         plt.show()
+
+
+# =================================================================================================
+# Target Field Visualization
+# =================================================================================================
+
+def plot_target_distribution(
+    val_targets: np.ndarray,
+    syn_targets: np.ndarray,
+    save_path: Optional[Path] = None
+):
+    """
+    Plot distribution comparison of target values.
+
+    Args:
+        val_targets: Validation target values
+        syn_targets: Synthetic target values
+        save_path: Path to save figure
+    """
+    fig, axes = plt.subplots(1, 2, figsize=(14, 5))
+
+    # Histogram
+    ax = axes[0]
+
+    # Compute bin edges for each distribution separately
+    val_bin_edges = np.histogram_bin_edges(val_targets, bins=50)
+    syn_bin_edges = np.histogram_bin_edges(syn_targets, bins=50)
+
+    # Compute bin widths
+    val_bin_width = val_bin_edges[1] - val_bin_edges[0]
+    syn_bin_width = syn_bin_edges[1] - syn_bin_edges[0]
+
+    # Use the smaller bin width to create common bins across full data range
+    smaller_bin_width = min(val_bin_width, syn_bin_width)
+    data_min = min(val_targets.min(), syn_targets.min())
+    data_max = max(val_targets.max(), syn_targets.max())
+    n_bins = int(np.ceil((data_max - data_min) / smaller_bin_width))
+    bin_edges = np.linspace(data_min, data_max, n_bins + 1)
+
+    ax.hist(val_targets, bins=bin_edges, alpha=0.5, color=COLORS['non_significant'],
+            label='Validation', density=True, edgecolor='black', linewidth=0.5)
+    ax.hist(syn_targets, bins=bin_edges, alpha=0.5, color=COLORS['significant'],
+            label='Synthetic', density=True, edgecolor='black', linewidth=0.5)
+
+    ax.set_xlabel('Target Value', color='black', fontweight='bold')
+    ax.set_ylabel('Density', color='black', fontweight='bold')
+    ax.set_title('Target Distribution Comparison', color='black', fontweight='bold', pad=15)
+    ax.legend()
+    ax.tick_params(colors='black')
+    for spine in ax.spines.values():
+        spine.set_color('black')
+
+    # Q-Q plot
+    ax = axes[1]
+    from scipy import stats
+    stats.probplot(val_targets, dist="norm", plot=None)
+    stats.probplot(syn_targets, dist="norm", plot=None)
+
+    # Sort both for Q-Q plot
+    val_sorted = np.sort(val_targets)
+    syn_sorted = np.sort(syn_targets)
+
+    # Interpolate to same length for fair comparison
+    if len(val_sorted) != len(syn_sorted):
+        common_quantiles = np.linspace(0, 1, min(len(val_sorted), len(syn_sorted)))
+        val_quantiles = np.quantile(val_targets, common_quantiles)
+        syn_quantiles = np.quantile(syn_targets, common_quantiles)
+    else:
+        val_quantiles = val_sorted
+        syn_quantiles = syn_sorted
+
+    ax.scatter(val_quantiles, syn_quantiles, alpha=0.5, s=10,
+               color=COLORS['non_significant'], edgecolor='none')
+
+    # Reference line
+    lims = [min(val_quantiles.min(), syn_quantiles.min()),
+            max(val_quantiles.max(), syn_quantiles.max())]
+    ax.plot(lims, lims, 'k--', alpha=0.75, zorder=0, label='Perfect match')
+
+    ax.set_xlabel('Validation Quantiles', color='black', fontweight='bold')
+    ax.set_ylabel('Synthetic Quantiles', color='black', fontweight='bold')
+    ax.set_title('Q-Q Plot', color='black', fontweight='bold', pad=15)
+    ax.legend()
+    ax.tick_params(colors='black')
+    for spine in ax.spines.values():
+        spine.set_color('black')
+
+    plt.tight_layout()
+
+    if save_path:
+        plt.savefig(save_path, dpi=300, bbox_inches='tight')
+        plt.close()
+    else:
+        plt.show()
+
+
+def plot_target_autocorrelation(
+    acf_val: np.ndarray,
+    acf_syn: np.ndarray,
+    max_lag: int,
+    save_path: Optional[Path] = None
+):
+    """
+    Plot autocorrelation function comparison.
+
+    Args:
+        acf_val: Validation ACF
+        acf_syn: Synthetic ACF
+        max_lag: Maximum lag
+        save_path: Path to save figure
+    """
+    fig, ax = plt.subplots(1, 1, figsize=(10, 6))
+
+    lags = np.arange(0, max_lag + 1)
+
+    ax.plot(lags, acf_val, 'o-', color=COLORS['non_significant'],
+            linewidth=2, markersize=6, label='Validation', alpha=0.8)
+    ax.plot(lags, acf_syn, 's-', color=COLORS['significant'],
+            linewidth=2, markersize=6, label='Synthetic', alpha=0.8)
+
+    ax.axhline(y=0, color='black', linestyle='-', linewidth=0.5)
+
+    ax.set_xlabel('Lag', color='black', fontweight='bold')
+    ax.set_ylabel('Autocorrelation', color='black', fontweight='bold')
+    ax.set_title('Target Autocorrelation Function', color='black', fontweight='bold', pad=15)
+    ax.legend()
+    ax.tick_params(colors='black')
+    for spine in ax.spines.values():
+        spine.set_color('black')
+
+    plt.tight_layout()
+
+    if save_path:
+        plt.savefig(save_path, dpi=300, bbox_inches='tight')
+        plt.close()
+    else:
+        plt.show()
+
+
+def plot_volatility_clustering(
+    acf_abs_val: np.ndarray,
+    acf_abs_syn: np.ndarray,
+    max_lag: int,
+    save_path: Optional[Path] = None
+):
+    """
+    Plot volatility clustering comparison (ACF of absolute values).
+
+    Args:
+        acf_abs_val: ACF of absolute validation targets
+        acf_abs_syn: ACF of absolute synthetic targets
+        max_lag: Maximum lag
+        save_path: Path to save figure
+    """
+    fig, ax = plt.subplots(1, 1, figsize=(10, 6))
+
+    lags = np.arange(0, max_lag + 1)
+
+    ax.plot(lags, acf_abs_val, 'o-', color=COLORS['non_significant'],
+            linewidth=2, markersize=6, label='Validation', alpha=0.8)
+    ax.plot(lags, acf_abs_syn, 's-', color=COLORS['significant'],
+            linewidth=2, markersize=6, label='Synthetic', alpha=0.8)
+
+    ax.axhline(y=0, color='black', linestyle='-', linewidth=0.5)
+
+    ax.set_xlabel('Lag', color='black', fontweight='bold')
+    ax.set_ylabel('Autocorrelation of |Target|', color='black', fontweight='bold')
+    ax.set_title('Volatility Clustering (GARCH Effect)', color='black', fontweight='bold', pad=15)
+    ax.legend()
+    ax.tick_params(colors='black')
+    for spine in ax.spines.values():
+        spine.set_color('black')
+
+    plt.tight_layout()
+
+    if save_path:
+        plt.savefig(save_path, dpi=300, bbox_inches='tight')
+        plt.close()
+    else:
+        plt.show()

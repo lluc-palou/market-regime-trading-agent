@@ -91,14 +91,14 @@ class SyntheticLOBGenerator:
         for batch_idx in range(0, n_sequences, batch_size):
             batch_n = min(batch_size, n_sequences - batch_idx)
             
-            # Sample latent codes from prior
+            # Sample latent codes and targets from prior
             with torch.no_grad():
-                z_batch = self.prior.sample(
+                z_batch, target_batch = self.prior.sample(
                     n_samples=batch_n,
                     seq_len=seq_len,
                     temperature=temperature,
                     device=self.device
-                )  # (batch_n, seq_len)
+                )  # (batch_n, seq_len), (batch_n, seq_len)
             
             # Decode each sequence
             for seq_idx in range(batch_n):
@@ -112,6 +112,7 @@ class SyntheticLOBGenerator:
                     output_col,
                     lob_sequence,
                     z_batch[seq_idx].cpu().numpy(),
+                    target_batch[seq_idx].cpu().numpy(),
                     split_id,
                     sequence_id
                 )
@@ -156,30 +157,33 @@ class SyntheticLOBGenerator:
         collection,
         lob_sequence: np.ndarray,
         latent_codes: np.ndarray,
+        target_sequence: np.ndarray,
         split_id: int,
         sequence_id: int
     ):
         """
         Save synthetic sequence to MongoDB.
-        
+
         Args:
             collection: MongoDB collection
             lob_sequence: (seq_len, B) LOB vectors
             latent_codes: (seq_len,) discrete codes
+            target_sequence: (seq_len,) target values
             split_id: Split identifier
             sequence_id: Sequence identifier
         """
         seq_len = lob_sequence.shape[0]
-        
+
         # Create synthetic timestamps (arbitrary start)
         base_time = datetime(2024, 1, 1, 0, 0, 0)
-        
+
         documents = []
         for t in range(seq_len):
             doc = {
                 'timestamp': base_time + timedelta(seconds=30 * (sequence_id * seq_len + t)),
                 'codebook_index': int(latent_codes[t]),
                 'bins': lob_sequence[t].tolist(),
+                'target': float(target_sequence[t]),
                 'split_id': split_id,
                 'sequence_id': sequence_id,
                 'position_in_sequence': t,
@@ -227,7 +231,8 @@ def load_models_for_generation(
         n_layers=prior_checkpoint['config']['n_layers'],
         n_channels=prior_checkpoint['config']['n_channels'],
         kernel_size=prior_checkpoint['config']['kernel_size'],
-        dropout=prior_checkpoint['config']['dropout']
+        dropout=prior_checkpoint['config']['dropout'],
+        predict_target=prior_checkpoint['config'].get('predict_target', True)
     ).to(device)
     
     prior_model.load_state_dict(prior_checkpoint['model_state_dict'])

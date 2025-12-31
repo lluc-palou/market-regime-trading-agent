@@ -49,25 +49,30 @@ class PriorTrainer:
         self.device = device
         self.config = config
         
-        # Initialize model
+        # Initialize model (with target prediction enabled)
         self.model = LatentPriorCNN(
             codebook_size=codebook_size,
             embedding_dim=config['embedding_dim'],
             n_layers=config['n_layers'],
             n_channels=config['n_channels'],
             kernel_size=config['kernel_size'],
-            dropout=config['dropout']
+            dropout=config['dropout'],
+            predict_target=True
         ).to(device)
-        
+
         # Initialize optimizer
         self.optimizer = optim.Adam(
             self.model.parameters(),
             lr=config['learning_rate'],
             weight_decay=PRIOR_TRAINING_CONFIG['weight_decay']
         )
-        
-        # Loss function
-        self.criterion = nn.CrossEntropyLoss()
+
+        # Loss functions
+        self.codebook_criterion = nn.CrossEntropyLoss()
+        self.target_criterion = nn.HuberLoss(delta=0.01)  # Adjusted for target scale ~1e-3
+
+        # Multi-task loss weight (default 0.5 = equal weight)
+        self.task_loss_weight = config.get('task_loss_weight', 0.5)
         
         # Training state
         self.best_val_loss = float('inf')
@@ -110,27 +115,34 @@ class PriorTrainer:
         
         for epoch in range(PRIOR_TRAINING_CONFIG['max_epochs']):
             epoch_start = time.time()
-            
+
             # Train
-            train_loss = self._train_epoch(all_hours, epoch)
-            
+            train_loss, train_codebook_loss, train_target_loss = self._train_epoch(all_hours, epoch)
+
             # Validate
-            val_loss = self._validate_epoch(all_hours, epoch)
-            
+            val_loss, val_codebook_loss, val_target_loss = self._validate_epoch(all_hours, epoch)
+
             epoch_duration = time.time() - epoch_start
-            
-            # Log
+
+            # Log with both loss components (8 decimals for better visibility of Huber loss)
             logger(
                 f'Epoch {epoch+1}/{PRIOR_TRAINING_CONFIG["max_epochs"]} '
                 f'[{epoch_duration:.1f}s] - '
-                f'train_loss: {train_loss:.4f}, val_loss: {val_loss:.4f}',
+                f'train_loss: {train_loss:.8f} '
+                f'(codebook: {train_codebook_loss:.8f}, target: {train_target_loss:.8f}), '
+                f'val_loss: {val_loss:.8f} '
+                f'(codebook: {val_codebook_loss:.8f}, target: {val_target_loss:.8f})',
                 "INFO"
             )
-            
+
             train_history.append({
                 'epoch': epoch,
                 'train_loss': train_loss,
-                'val_loss': val_loss
+                'train_codebook_loss': train_codebook_loss,
+                'train_target_loss': train_target_loss,
+                'val_loss': val_loss,
+                'val_codebook_loss': val_codebook_loss,
+                'val_target_loss': val_target_loss
             })
             
             # Check for improvement
@@ -139,14 +151,14 @@ class PriorTrainer:
                 self.best_epoch = epoch
                 # Deep copy model state (clone tensors, not just dict structure)
                 self.best_model_state = {k: v.clone() for k, v in self.model.state_dict().items()}
-                logger(f'  → New best validation loss: {self.best_val_loss:.4f}', "INFO")
+                logger(f'  → New best validation loss: {self.best_val_loss:.8f}', "INFO")
             
             # Early stopping
             if epoch - self.best_epoch >= PRIOR_TRAINING_CONFIG['patience']:
                 logger(f'Early stopping at epoch {epoch+1}', "INFO")
                 break
         
-        logger(f'Training complete. Best epoch: {self.best_epoch+1}, Best val loss: {self.best_val_loss:.4f}', "INFO")
+        logger(f'Training complete. Best epoch: {self.best_epoch+1}, Best val loss: {self.best_val_loss:.8f}', "INFO")
         
         # Load best model
         if self.best_model_state is not None:
@@ -156,14 +168,21 @@ class PriorTrainer:
             'best_val_loss': self.best_val_loss,
             'best_epoch': self.best_epoch,
             'final_train_loss': train_history[self.best_epoch]['train_loss'] if train_history else None,
-            'epochs_trained': len(train_history)
+            'final_train_codebook_loss': train_history[self.best_epoch]['train_codebook_loss'] if train_history else None,
+            'final_train_target_loss': train_history[self.best_epoch]['train_target_loss'] if train_history else None,
+            'final_val_codebook_loss': train_history[self.best_epoch]['val_codebook_loss'] if train_history else None,
+            'final_val_target_loss': train_history[self.best_epoch]['val_target_loss'] if train_history else None,
+            'epochs_trained': len(train_history),
+            'train_history': train_history  # Include full history for detailed analysis
         }
     
-    def _train_epoch(self, all_hours: List[datetime], epoch: int) -> float:
+    def _train_epoch(self, all_hours: List[datetime], epoch: int) -> tuple[float, float, float]:
         """Train for one epoch with hour accumulation and prefetching."""
         self.model.train()
 
         epoch_loss = 0.0
+        epoch_codebook_loss = 0.0
+        epoch_target_loss = 0.0
         num_batches = 0
 
         hours_per_acc = PRIOR_TRAINING_CONFIG['hours_per_accumulation']
@@ -179,14 +198,14 @@ class PriorTrainer:
             )
 
             if not latent_codes:
-                return None
+                return None, None
 
-            sequences, _ = create_sequences_from_codes(
+            code_sequences, target_sequences, _ = create_sequences_from_codes(
                 latent_codes,
                 PRIOR_TRAINING_CONFIG['seq_len']
             )
 
-            return sequences
+            return code_sequences, target_sequences
 
         # Create hour groups
         hour_groups = []
@@ -202,7 +221,8 @@ class PriorTrainer:
 
             for i, hour_group in enumerate(hour_groups):
                 # Wait for current batch to finish loading
-                sequences = future.result() if future else None
+                result = future.result() if future else (None, None)
+                code_sequences, target_sequences = result
 
                 # Start loading NEXT batch in background (while GPU processes current)
                 if i + 1 < len(hour_groups):
@@ -210,30 +230,41 @@ class PriorTrainer:
                 else:
                     future = None
 
-                if sequences is None:
+                if code_sequences is None:
                     continue
 
                 # Process on GPU while next batch loads in background
-                num_sequences = sequences.size(0)
+                num_sequences = code_sequences.size(0)
                 batch_size = PRIOR_TRAINING_CONFIG['sequence_batch_size']
 
                 for j in range(0, num_sequences, batch_size):
-                    batch = sequences[j:j+batch_size].to(self.device)
+                    code_batch = code_sequences[j:j+batch_size].to(self.device)
+                    target_batch = target_sequences[j:j+batch_size].to(self.device)
 
-                    # Input: all codes except last
-                    input_seq = batch[:, :-1]
-                    # Target: all codes except first
-                    target_seq = batch[:, 1:]
+                    # Input: all except last timestep
+                    code_input = code_batch[:, :-1]
+                    target_input = target_batch[:, :-1]
+
+                    # Target: all except first timestep (shifted for autoregressive)
+                    code_target = code_batch[:, 1:]
+                    target_target = target_batch[:, 1:]
 
                     # Forward
                     self.optimizer.zero_grad()
-                    logits = self.model(input_seq)  # (batch, seq_len-1, codebook_size)
+                    codebook_logits, target_preds = self.model(code_input, target_input)
 
-                    # Compute loss
-                    loss = self.criterion(
-                        logits.reshape(-1, logits.size(-1)),  # (batch*(seq_len-1), codebook_size)
-                        target_seq.reshape(-1)                 # (batch*(seq_len-1),)
+                    # Multi-task loss
+                    codebook_loss = self.codebook_criterion(
+                        codebook_logits.reshape(-1, codebook_logits.size(-1)),
+                        code_target.reshape(-1)
                     )
+                    target_loss = self.target_criterion(
+                        target_preds.reshape(-1),
+                        target_target.reshape(-1)
+                    )
+
+                    # Weighted combination
+                    loss = self.task_loss_weight * codebook_loss + (1 - self.task_loss_weight) * target_loss
 
                     # Backward
                     loss.backward()
@@ -247,15 +278,23 @@ class PriorTrainer:
                     self.optimizer.step()
 
                     epoch_loss += loss.item()
+                    epoch_codebook_loss += codebook_loss.item()
+                    epoch_target_loss += target_loss.item()
                     num_batches += 1
 
-        return epoch_loss / max(num_batches, 1)
+        avg_loss = epoch_loss / max(num_batches, 1)
+        avg_codebook_loss = epoch_codebook_loss / max(num_batches, 1)
+        avg_target_loss = epoch_target_loss / max(num_batches, 1)
+
+        return avg_loss, avg_codebook_loss, avg_target_loss
     
-    def _validate_epoch(self, all_hours: List[datetime], epoch: int) -> float:
+    def _validate_epoch(self, all_hours: List[datetime], epoch: int) -> tuple[float, float, float]:
         """Validate for one epoch with prefetching."""
         self.model.eval()
 
         epoch_loss = 0.0
+        epoch_codebook_loss = 0.0
+        epoch_target_loss = 0.0
         num_batches = 0
 
         hours_per_acc = PRIOR_TRAINING_CONFIG['hours_per_accumulation']
@@ -271,14 +310,14 @@ class PriorTrainer:
             )
 
             if not latent_codes:
-                return None
+                return None, None
 
-            sequences, _ = create_sequences_from_codes(
+            code_sequences, target_sequences, _ = create_sequences_from_codes(
                 latent_codes,
                 PRIOR_TRAINING_CONFIG['seq_len']
             )
 
-            return sequences
+            return code_sequences, target_sequences
 
         # Create hour groups
         hour_groups = []
@@ -295,7 +334,8 @@ class PriorTrainer:
 
                 for i, hour_group in enumerate(hour_groups):
                     # Wait for current batch
-                    sequences = future.result() if future else None
+                    result = future.result() if future else (None, None)
+                    code_sequences, target_sequences = result
 
                     # Start loading next batch
                     if i + 1 < len(hour_groups):
@@ -303,27 +343,44 @@ class PriorTrainer:
                     else:
                         future = None
 
-                    if sequences is None:
+                    if code_sequences is None:
                         continue
 
                     # Process on GPU while next batch loads
-                    num_sequences = sequences.size(0)
+                    num_sequences = code_sequences.size(0)
                     batch_size = PRIOR_TRAINING_CONFIG['sequence_batch_size']
 
                     for j in range(0, num_sequences, batch_size):
-                        batch = sequences[j:j+batch_size].to(self.device)
+                        code_batch = code_sequences[j:j+batch_size].to(self.device)
+                        target_batch = target_sequences[j:j+batch_size].to(self.device)
 
-                        input_seq = batch[:, :-1]
-                        target_seq = batch[:, 1:]
+                        code_input = code_batch[:, :-1]
+                        target_input = target_batch[:, :-1]
 
-                        logits = self.model(input_seq)
+                        code_target = code_batch[:, 1:]
+                        target_target = target_batch[:, 1:]
 
-                        loss = self.criterion(
-                            logits.reshape(-1, logits.size(-1)),
-                            target_seq.reshape(-1)
+                        codebook_logits, target_preds = self.model(code_input, target_input)
+
+                        # Multi-task loss
+                        codebook_loss = self.codebook_criterion(
+                            codebook_logits.reshape(-1, codebook_logits.size(-1)),
+                            code_target.reshape(-1)
+                        )
+                        target_loss = self.target_criterion(
+                            target_preds.reshape(-1),
+                            target_target.reshape(-1)
                         )
 
+                        loss = self.task_loss_weight * codebook_loss + (1 - self.task_loss_weight) * target_loss
+
                         epoch_loss += loss.item()
+                        epoch_codebook_loss += codebook_loss.item()
+                        epoch_target_loss += target_loss.item()
                         num_batches += 1
 
-        return epoch_loss / max(num_batches, 1)
+        avg_loss = epoch_loss / max(num_batches, 1)
+        avg_codebook_loss = epoch_codebook_loss / max(num_batches, 1)
+        avg_target_loss = epoch_target_loss / max(num_batches, 1)
+
+        return avg_loss, avg_codebook_loss, avg_target_loss

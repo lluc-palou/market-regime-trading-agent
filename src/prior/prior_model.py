@@ -50,13 +50,14 @@ class ResidualBlock(nn.Module):
 
 class LatentPriorCNN(nn.Module):
     """
-    Causal CNN for modeling prior distribution of latent codes.
+    Causal CNN for joint modeling of latent codes and targets.
 
     Architecture:
     - Embedding layer for discrete codes (embedding_dim=64, matches VQ-VAE)
+    - Target conditioning via concatenation (minimal params)
     - Stacked dilated causal convolutions with repeating dilation pattern
     - Residual connections with gated activations (WaveNet-style)
-    - Output projection to codebook size
+    - Dual output heads: codebook logits + target prediction
 
     Dilation strategy:
     - Repeating pattern [1, 2, 4, 8, 16, 32, 64] to control receptive field
@@ -71,19 +72,22 @@ class LatentPriorCNN(nn.Module):
         n_layers: int = 12,
         n_channels: int = 64,
         kernel_size: int = 2,
-        dropout: float = 0.15
+        dropout: float = 0.15,
+        predict_target: bool = True
     ):
         super().__init__()
-        
+
         self.codebook_size = codebook_size
         self.embedding_dim = embedding_dim
         self.n_layers = n_layers
-        
+        self.predict_target = predict_target
+
         # Embed discrete codes
         self.embedding = nn.Embedding(codebook_size, embedding_dim)
-        
-        # Initial projection to channel dimension
-        self.input_conv = nn.Conv1d(embedding_dim, n_channels, 1)
+
+        # Initial projection to channel dimension (input: embedding + target scalar)
+        input_dim = embedding_dim + 1 if predict_target else embedding_dim
+        self.input_conv = nn.Conv1d(input_dim, n_channels, 1)
 
         # Dilated causal convolutions with repeating pattern for controlled RF
         # Pattern: [1, 2, 4, 8, 16, 32, 64] repeated to reach n_layers
@@ -99,77 +103,129 @@ class LatentPriorCNN(nn.Module):
                 ResidualBlock(n_channels, kernel_size, dilation, dropout)
             )
         
-        # Output projection to codebook logits
-        self.output_conv = nn.Sequential(
+        # Codebook output head
+        self.codebook_output = nn.Sequential(
             nn.ReLU(),
             nn.Conv1d(n_channels, n_channels, 1),
             nn.ReLU(),
             nn.Dropout(dropout),
             nn.Conv1d(n_channels, codebook_size, 1)
         )
+
+        # Target output head (minimal params)
+        if predict_target:
+            self.target_output = nn.Sequential(
+                nn.ReLU(),
+                nn.Conv1d(n_channels, n_channels // 2, 1),
+                nn.ReLU(),
+                nn.Dropout(dropout),
+                nn.Conv1d(n_channels // 2, 1, 1)
+            )
     
-    def forward(self, z_seq):
+    def forward(self, z_seq, target_seq=None):
         """
-        Forward pass.
-        
+        Forward pass with optional target conditioning.
+
         Args:
             z_seq: (batch, seq_len) discrete codes
-            
+            target_seq: (batch, seq_len) target values (required if predict_target=True)
+
         Returns:
-            logits: (batch, seq_len, codebook_size)
+            If predict_target=True:
+                codebook_logits: (batch, seq_len, codebook_size)
+                target_preds: (batch, seq_len)
+            Else:
+                codebook_logits: (batch, seq_len, codebook_size)
         """
         # Embed: (batch, seq_len) -> (batch, seq_len, embedding_dim)
         x = self.embedding(z_seq)
-        
-        # Transpose for conv: (batch, embedding_dim, seq_len)
+
+        # Concatenate target if predicting
+        if self.predict_target:
+            if target_seq is None:
+                raise ValueError("target_seq required when predict_target=True")
+            # Add target as extra feature: (batch, seq_len, 1)
+            target_feat = target_seq.unsqueeze(-1)
+            # Concatenate: (batch, seq_len, embedding_dim + 1)
+            x = torch.cat([x, target_feat], dim=-1)
+
+        # Transpose for conv: (batch, embedding_dim+1, seq_len) or (batch, embedding_dim, seq_len)
         x = x.transpose(1, 2)
-        
+
         # Initial projection
         x = self.input_conv(x)
-        
+
         # Dilated causal convolutions
         for layer in self.layers:
             x = layer(x)
-        
-        # Output projection: (batch, codebook_size, seq_len)
-        x = self.output_conv(x)
-        
-        # Transpose back: (batch, seq_len, codebook_size)
-        return x.transpose(1, 2)
+
+        # Codebook output: (batch, codebook_size, seq_len)
+        codebook_logits = self.codebook_output(x)
+        codebook_logits = codebook_logits.transpose(1, 2)  # (batch, seq_len, codebook_size)
+
+        if self.predict_target:
+            # Target output: (batch, 1, seq_len)
+            target_preds = self.target_output(x)
+            target_preds = target_preds.squeeze(1)  # (batch, seq_len)
+            return codebook_logits, target_preds
+        else:
+            return codebook_logits
     
     @torch.no_grad()
     def sample(self, n_samples: int, seq_len: int, temperature: float = 1.0, device=None):
         """
-        Autoregressively generate latent sequences.
-        
+        Autoregressively generate latent sequences and targets.
+
         Args:
             n_samples: Number of sequences to generate
             seq_len: Length of each sequence
             temperature: Sampling temperature (1.0 = standard)
             device: torch device
-            
+
         Returns:
-            z_seq: (n_samples, seq_len) of discrete codes
+            If predict_target=True:
+                z_seq: (n_samples, seq_len) of discrete codes
+                target_seq: (n_samples, seq_len) of predicted targets
+            Else:
+                z_seq: (n_samples, seq_len) of discrete codes
         """
         if device is None:
             device = next(self.parameters()).device
-        
+
         self.eval()
-        
+
         # Initialize with random start codes
         z_seq = torch.zeros(n_samples, seq_len, dtype=torch.long, device=device)
         z_seq[:, 0] = torch.randint(0, self.codebook_size, (n_samples,), device=device)
-        
-        # Autoregressively generate
-        for t in range(1, seq_len):
-            # Forward pass on history
-            logits = self.forward(z_seq[:, :t])[:, -1, :]  # (n_samples, codebook_size)
-            
-            # Sample with temperature
-            probs = F.softmax(logits / temperature, dim=-1)
-            z_seq[:, t] = torch.multinomial(probs, 1).squeeze(1)
-        
-        return z_seq
+
+        if self.predict_target:
+            # Initialize target sequence with small random values
+            target_seq = torch.zeros(n_samples, seq_len, device=device)
+            target_seq[:, 0] = torch.randn(n_samples, device=device) * 0.0001  # Small init
+
+            # Autoregressively generate both
+            for t in range(1, seq_len):
+                # Forward pass on history
+                codebook_logits, target_preds = self.forward(
+                    z_seq[:, :t], target_seq[:, :t]
+                )
+
+                # Sample codebook index with temperature
+                probs = F.softmax(codebook_logits[:, -1, :] / temperature, dim=-1)
+                z_seq[:, t] = torch.multinomial(probs, 1).squeeze(1)
+
+                # Use predicted target
+                target_seq[:, t] = target_preds[:, -1]
+
+            return z_seq, target_seq
+        else:
+            # Original behavior: only generate codes
+            for t in range(1, seq_len):
+                logits = self.forward(z_seq[:, :t])[:, -1, :]
+                probs = F.softmax(logits / temperature, dim=-1)
+                z_seq[:, t] = torch.multinomial(probs, 1).squeeze(1)
+
+            return z_seq
     
     def compute_receptive_field(self):
         """

@@ -85,8 +85,9 @@ class PPOConfig:
     gae_lambda: float = 0.95             # GAE lambda parameter
     clip_ratio: float = 0.1              # PPO clipping parameter (reduced for stability with high variance)
     value_coef: float = 1.0              # Value loss coefficient (increased for better value estimates)
-    entropy_coef: float = 0.05           # Entropy bonus coefficient (increased to encourage exploration)
-    uncertainty_coef: float = 0.05       # Uncertainty penalty coefficient (reduced to balance with entropy)
+    entropy_coef: float = 0.01           # Fixed entropy coefficient (encourages exploration)
+    uncertainty_coef: float = 0.1        # Uncertainty penalty coefficient (prevents std exploitation)
+    activity_coef: float = 0.001         # Inactivity penalty coefficient (prevents no-trade collapse, reduced pressure)
     max_grad_norm: float = 0.5           # Gradient clipping norm
     n_epochs: int = 2                    # PPO epochs per update (reduced for speed)
     batch_size: int = 256                # Minibatch size (increased 8x to utilize GPU)

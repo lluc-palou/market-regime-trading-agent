@@ -90,6 +90,7 @@ from src.ppo import (
     compute_policy_based_position,
     compute_simple_reward,
     compute_unrealized_pnl,
+    compute_ewma_volatility,
     ModelConfig,
     PPOConfig,
     RewardConfig,
@@ -301,6 +302,18 @@ def run_episode(
             position_prev, position_curr, target, taker_fee=0.0005
         )
 
+        # Scale reward by realized volatility (EWMA of recent returns)
+        # Collect recent targets from past samples (window + current)
+        lookback = min(30, t)  # Use up to 30 recent samples for volatility estimate
+        recent_targets = [episode.samples[t - i]['target'] for i in range(lookback, 0, -1)]
+        recent_targets.append(target)  # Include current target
+
+        # Compute EWMA volatility from recent returns (half-life=20, matches feature engineering)
+        realized_vol = compute_ewma_volatility(recent_targets, half_life=20)
+
+        # Scale reward by volatility (Sharpe-like normalization)
+        reward = reward / realized_vol
+
         # Unrealized PnL for next timestep
         unrealized = compute_unrealized_pnl(position_curr, target)
 
@@ -383,6 +396,7 @@ def train_epoch(
         'total_value_loss': 0.0,
         'total_entropy': 0.0,
         'total_uncertainty': 0.0,
+        'total_activity': 0.0,
         'n_ppo_updates': 0
     }
 
@@ -459,6 +473,7 @@ def train_epoch(
             epoch_metrics['total_value_loss'] += loss_metrics['value_loss']
             epoch_metrics['total_entropy'] += loss_metrics['entropy']
             epoch_metrics['total_uncertainty'] += loss_metrics['uncertainty']
+            epoch_metrics['total_activity'] += loss_metrics['activity']
             epoch_metrics['n_ppo_updates'] += 1
             trajectory_buffer.clear()
 
@@ -471,6 +486,7 @@ def train_epoch(
         epoch_metrics['total_value_loss'] += loss_metrics['value_loss']
         epoch_metrics['total_entropy'] += loss_metrics['entropy']
         epoch_metrics['total_uncertainty'] += loss_metrics['uncertainty']
+        epoch_metrics['total_activity'] += loss_metrics['activity']
         epoch_metrics['n_ppo_updates'] += 1
         trajectory_buffer.clear()
 
@@ -492,11 +508,13 @@ def train_epoch(
         epoch_metrics['avg_value_loss'] = epoch_metrics['total_value_loss'] / epoch_metrics['n_ppo_updates']
         epoch_metrics['avg_entropy'] = epoch_metrics['total_entropy'] / epoch_metrics['n_ppo_updates']
         epoch_metrics['avg_uncertainty'] = epoch_metrics['total_uncertainty'] / epoch_metrics['n_ppo_updates']
+        epoch_metrics['avg_activity'] = epoch_metrics['total_activity'] / epoch_metrics['n_ppo_updates']
     else:
         epoch_metrics['avg_policy_loss'] = 0.0
         epoch_metrics['avg_value_loss'] = 0.0
         epoch_metrics['avg_entropy'] = 0.0
         epoch_metrics['avg_uncertainty'] = 0.0
+        epoch_metrics['avg_activity'] = 0.0
 
     return epoch_metrics
 
@@ -511,7 +529,8 @@ def compute_validation_metrics(agent, buffer, ppo_config, experiment_type, devic
             'policy_loss': 0.0,
             'value_loss': 0.0,
             'entropy': 0.0,
-            'uncertainty': 0.0
+            'uncertainty': 0.0,
+            'activity': 0.0
         }
 
     agent.eval()
@@ -562,15 +581,15 @@ def compute_validation_metrics(agent, buffer, ppo_config, experiment_type, devic
         # Value loss
         value_loss = F.mse_loss(new_values, returns)
 
-        # Entropy and uncertainty
+        # Entropy (no alpha adaptation during validation)
         mean_entropy = entropy.mean()
-        mean_uncertainty = std.mean()
 
     return {
         'policy_loss': policy_loss.item(),
         'value_loss': value_loss.item(),
         'entropy': mean_entropy.item(),
-        'uncertainty': mean_uncertainty.item()
+        'uncertainty': std.mean().item(),
+        'activity': torch.abs(actions).mean().item()
     }
 
 
@@ -672,7 +691,7 @@ def validate_epoch(
         val_metrics['avg_pnl'] = 0.0
         val_metrics['sharpe'] = 0.0
 
-    # Compute model metrics (losses, entropy, uncertainty) on validation data
+    # Compute model metrics (losses, entropy, uncertainty, activity) on validation data
     model_metrics = compute_validation_metrics(
         agent, trajectory_buffer, ppo_config, experiment_type, device
     )
@@ -680,6 +699,7 @@ def validate_epoch(
     val_metrics['value_loss'] = model_metrics['value_loss']
     val_metrics['entropy'] = model_metrics['entropy']
     val_metrics['uncertainty'] = model_metrics['uncertainty']
+    val_metrics['activity'] = model_metrics['activity']
 
     return val_metrics
 
@@ -738,6 +758,7 @@ def train_split(
 
     logger(f'Agent initialized: {agent.count_parameters():,} parameters', "INFO")
     logger(f'Learning rate scheduler: ReduceLROnPlateau (factor=0.3, patience=2)', "INFO")
+    logger(f'Loss coefficients: entropy={config.ppo.entropy_coef}, uncertainty={config.ppo.uncertainty_coef}, activity={config.ppo.activity_coef}', "INFO")
 
     # Training loop
     metrics_logger = MetricsLogger(log_dir=str(LOG_DIR))
@@ -762,7 +783,8 @@ def train_split(
         logger(f'  Losses - Policy: {train_metrics["avg_policy_loss"]:.4f}, '
                f'Value: {train_metrics["avg_value_loss"]:.4f}, '
                f'Entropy: {train_metrics["avg_entropy"]:.4f}, '
-               f'Uncertainty: {train_metrics["avg_uncertainty"]:.4f}', "INFO")
+               f'Uncertainty: {train_metrics["avg_uncertainty"]:.4f}, '
+               f'Activity: {train_metrics["avg_activity"]:.4f}', "INFO")
 
         # Validation (every epoch)
         val_metrics = validate_epoch(
@@ -775,7 +797,8 @@ def train_split(
         logger(f'  Losses - Policy: {val_metrics["policy_loss"]:.4f}, '
                f'Value: {val_metrics["value_loss"]:.4f}, '
                f'Entropy: {val_metrics["entropy"]:.4f}, '
-               f'Uncertainty: {val_metrics["uncertainty"]:.4f}', "INFO")
+               f'Uncertainty: {val_metrics["uncertainty"]:.4f}, '
+               f'Activity: {val_metrics["activity"]:.4f}', "INFO")
 
         # Update learning rate based on validation Sharpe
         scheduler.step(val_metrics["sharpe"])
@@ -790,6 +813,7 @@ def train_split(
         mlflow.log_metric("train_value_loss", train_metrics["avg_value_loss"], step=epoch)
         mlflow.log_metric("train_entropy", train_metrics["avg_entropy"], step=epoch)
         mlflow.log_metric("train_uncertainty", train_metrics["avg_uncertainty"], step=epoch)
+        mlflow.log_metric("train_activity", train_metrics["avg_activity"], step=epoch)
         mlflow.log_metric("val_sharpe", val_metrics["sharpe"], step=epoch)
         mlflow.log_metric("val_avg_reward", val_metrics["avg_reward"], step=epoch)
         mlflow.log_metric("val_avg_pnl", val_metrics["avg_pnl"], step=epoch)
@@ -797,6 +821,7 @@ def train_split(
         mlflow.log_metric("val_value_loss", val_metrics["value_loss"], step=epoch)
         mlflow.log_metric("val_entropy", val_metrics["entropy"], step=epoch)
         mlflow.log_metric("val_uncertainty", val_metrics["uncertainty"], step=epoch)
+        mlflow.log_metric("val_activity", val_metrics["activity"], step=epoch)
         mlflow.log_metric("learning_rate", current_lr, step=epoch)
 
         # Save checkpoint if best

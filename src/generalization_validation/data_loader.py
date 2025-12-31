@@ -13,7 +13,7 @@ def load_validation_samples(
     db_name: str,
     split_id: int,
     collection_suffix: str = "_input"
-) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
     """
     Load validation samples for a split.
 
@@ -27,6 +27,7 @@ def load_validation_samples(
         original_vectors: (N, 1001) array of original LOB vectors
         codebook_indices: (N,) array of VQ-VAE codes
         timestamps: (N,) array of timestamps
+        targets: (N,) array of target values (immediate rewards)
     """
     from pymongo import ASCENDING
 
@@ -48,16 +49,18 @@ def load_validation_samples(
     # Query validation samples (both validation folds)
     cursor = collection.find(
         {'role': 'validation'},
-        {'bins': 1, 'codebook_index': 1, 'timestamp': 1}
+        {'bins': 1, 'codebook_index': 1, 'timestamp': 1, 'target': 1}
     ).sort('timestamp', 1)
 
     original_vectors = []
     codebook_indices = []
     timestamps = []
+    targets = []
 
     for doc in cursor:
         original_vectors.append(doc['bins'])
         codebook_indices.append(doc['codebook_index'])
+        targets.append(doc['target'])
 
         # Handle timestamp
         ts = doc['timestamp']
@@ -73,7 +76,8 @@ def load_validation_samples(
     return (
         np.array(original_vectors, dtype=np.float32),
         np.array(codebook_indices, dtype=np.int64),
-        np.array(timestamps, dtype=np.float64)
+        np.array(timestamps, dtype=np.float64),
+        np.array(targets, dtype=np.float32)
     )
 
 
@@ -106,7 +110,7 @@ def load_synthetic_samples(
     mongo_uri: str,
     db_name: str,
     split_id: int
-) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
     """
     Load pre-generated synthetic samples for a split.
 
@@ -119,6 +123,7 @@ def load_synthetic_samples(
         synthetic_vectors: (N, 1001) array of synthetic LOB vectors (decoded)
         codebook_indices: (N,) array of VQ-VAE codes
         sequence_ids: (N,) array of sequence identifiers
+        targets: (N,) array of target values (immediate rewards)
     """
     from pymongo import ASCENDING
 
@@ -146,17 +151,19 @@ def load_synthetic_samples(
     # Query all synthetic samples sorted by sequence_id and position
     cursor = collection.find(
         {'is_synthetic': True},
-        {'bins': 1, 'codebook_index': 1, 'sequence_id': 1, 'position_in_sequence': 1}
+        {'bins': 1, 'codebook_index': 1, 'sequence_id': 1, 'position_in_sequence': 1, 'target': 1}
     ).sort([('sequence_id', 1), ('position_in_sequence', 1)])
 
     synthetic_vectors = []
     codebook_indices = []
     sequence_ids = []
+    targets = []
 
     for doc in cursor:
         synthetic_vectors.append(doc['bins'])
         codebook_indices.append(doc['codebook_index'])
         sequence_ids.append(doc['sequence_id'])
+        targets.append(doc['target'])
 
     client.close()
 
@@ -165,7 +172,8 @@ def load_synthetic_samples(
     return (
         np.array(synthetic_vectors, dtype=np.float32),
         np.array(codebook_indices, dtype=np.int64),
-        np.array(sequence_ids, dtype=np.int64)
+        np.array(sequence_ids, dtype=np.int64),
+        np.array(targets, dtype=np.float32)
     )
 
 

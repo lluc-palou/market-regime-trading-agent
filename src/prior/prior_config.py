@@ -31,6 +31,8 @@ PRIOR_HYPERPARAM_GRID = {
     # Training parameters
     'learning_rate': [1e-3],             # Adam learning rate
     'dropout': [0.15],                   # Regularization
+    'task_loss_weight': [0.5],           # Multi-task loss weight (alpha for codebook, 1-alpha for target)
+    'predict_target': [True],            # Enable joint codebook-target modeling
 }
 # Total: 1 × 3 × 2 × 1 × 1 × 1 = 6 configurations
 # Receptive field: Max 127 timesteps (fully covers seq_len=120)

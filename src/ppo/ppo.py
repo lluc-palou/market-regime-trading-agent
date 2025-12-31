@@ -68,7 +68,7 @@ def ppo_update(
         optimizer: Optimizer
         config: PPOConfig with hyperparameters
         device: Device for computation
-    
+
     Returns:
         Dictionary with loss metrics
     """
@@ -102,6 +102,7 @@ def ppo_update(
     total_value_loss = 0
     total_entropy = 0
     total_uncertainty = 0
+    total_activity = 0
     n_updates = 0
     
     for epoch in range(config.n_epochs):
@@ -150,30 +151,39 @@ def ppo_update(
             # Uses RAW (unnormalized) returns - value function predicts actual reward scale
             value_loss = F.mse_loss(new_values, mb_returns)
 
-            # Entropy bonus
-            entropy_loss = -entropy.mean()
+            # Fixed entropy bonus (encourages exploration)
+            entropy_bonus = config.entropy_coef * entropy.mean()
 
-            # Uncertainty penalty (discourages extreme std to prevent no-trading exploit)
-            # Penalizes high std values to encourage confident predictions
-            uncertainty_penalty = std.mean()
+            # Uncertainty penalty (prevents std exploitation)
+            uncertainty_penalty = config.uncertainty_coef * std.mean()
 
-            # Total loss
+            # Inactivity penalty (prevents no-trade collapse)
+            # Penalizes low |actions| (close to zero positions)
+            # When |actions| → 0: inactivity → 1 (high penalty)
+            # When |actions| → 1: inactivity → 0 (no penalty)
+            inactivity = (1.0 - torch.abs(mb_actions)).mean()
+            inactivity_penalty = config.activity_coef * inactivity
+
+            # Total loss (policy + value - entropy + inactivity + uncertainty)
+            # Subtract bonuses, add penalties
             loss = (policy_loss +
-                   config.value_coef * value_loss +
-                   config.entropy_coef * entropy_loss +
-                   config.uncertainty_coef * uncertainty_penalty)
-            
+                   config.value_coef * value_loss -
+                   entropy_bonus +
+                   inactivity_penalty +
+                   uncertainty_penalty)
+
             # Optimization step
             optimizer.zero_grad()
             loss.backward()
             torch.nn.utils.clip_grad_norm_(agent.parameters(), max_norm=config.max_grad_norm)
             optimizer.step()
-            
+
             # Track metrics
             total_policy_loss += policy_loss.item()
             total_value_loss += value_loss.item()
             total_entropy += entropy.mean().item()
             total_uncertainty += std.mean().item()
+            total_activity += torch.abs(mb_actions).mean().item()  # Still track activity for interpretability
             n_updates += 1
 
     return {
@@ -181,5 +191,6 @@ def ppo_update(
         'value_loss': total_value_loss / n_updates,
         'entropy': total_entropy / n_updates,
         'uncertainty': total_uncertainty / n_updates,
+        'activity': total_activity / n_updates,  # Average |actions|
         'n_updates': n_updates
     }

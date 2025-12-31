@@ -49,7 +49,7 @@ class EndToEndValidator:
         logger(f'Validating end-to-end quality for split {split_id}...', "INFO")
 
         # Load validation data
-        original_vectors, codebook_indices, _ = load_validation_samples(
+        original_vectors, codebook_indices, _, _ = load_validation_samples(
             self.mongo_uri, self.db_name, split_id
         )
 
@@ -58,7 +58,7 @@ class EndToEndValidator:
 
         # Load pre-generated synthetic data
         logger('  Loading synthetic data...', "INFO")
-        synthetic_vectors, syn_codebook_indices, _ = load_synthetic_samples(
+        synthetic_vectors, syn_codebook_indices, _, _ = load_synthetic_samples(
             self.mongo_uri, self.db_name, split_id
         )
 

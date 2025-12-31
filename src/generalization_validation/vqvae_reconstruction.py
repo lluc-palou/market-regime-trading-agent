@@ -44,7 +44,7 @@ class VQVAEReconstructionValidator:
         logger(f'Validating VQ-VAE reconstruction for split {split_id}...', "INFO")
 
         # Load validation data
-        original_vectors, codebook_indices, _ = load_validation_samples(
+        original_vectors, codebook_indices, _, _ = load_validation_samples(
             self.mongo_uri, self.db_name, split_id
         )
 

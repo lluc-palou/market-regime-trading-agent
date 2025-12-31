@@ -9,7 +9,8 @@ from .reward import (
     compute_volatility_scaled_position,
     compute_simple_reward,
     compute_transaction_cost,
-    compute_unrealized_pnl
+    compute_unrealized_pnl,
+    compute_ewma_volatility
 )
 from .utils import (
     MetricsLogger,
@@ -45,6 +46,7 @@ __all__ = [
     'compute_simple_reward',
     'compute_transaction_cost',
     'compute_unrealized_pnl',
+    'compute_ewma_volatility',
     'MetricsLogger',
     'compute_sharpe_ratio',
     'save_checkpoint',

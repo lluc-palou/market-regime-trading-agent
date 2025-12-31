@@ -1,7 +1,56 @@
 """Reward function computation."""
 
 import torch
+import numpy as np
+import math
 from typing import Optional
+
+
+def compute_ewma_volatility(
+    recent_targets: list,
+    half_life: int = 20,
+    min_samples: int = 5,
+    default_vol: float = 0.002
+) -> float:
+    """
+    Compute EWMA volatility estimate from recent return samples.
+
+    Uses exponentially weighted moving average of squared returns,
+    matching the variance estimation approach from feature engineering (Stage 4).
+
+    Formula: σ²_t = α × r²_t + (1-α) × σ²_{t-1}
+    where α = 1 - exp(ln(0.5) / half_life)
+
+    Args:
+        recent_targets: List of recent target values (immediate forward returns)
+        half_life: EWMA half-life in samples (default: 20, matches feature engineering)
+        min_samples: Minimum samples required for reliable estimate (default: 5)
+        default_vol: Fallback volatility when insufficient data (default: 0.002)
+
+    Returns:
+        EWMA volatility estimate (always positive)
+
+    Example:
+        recent_targets = [-0.001, 0.002, -0.0005, 0.001, 0.0015]
+        vol = compute_ewma_volatility(recent_targets, half_life=20)
+        # vol ≈ 0.0012 (depends on actual variance)
+    """
+    if len(recent_targets) < min_samples:
+        return default_vol
+
+    # EWMA decay factor
+    # α chosen so variance has half-life of `half_life` samples
+    alpha = 1 - math.exp(math.log(0.5) / half_life)
+
+    # Initialize with sample variance of recent returns
+    variance = float(np.var(recent_targets))
+
+    # Apply EWMA on squared returns (most recent first gives more weight to recent)
+    for ret in reversed(recent_targets):
+        variance = alpha * (ret ** 2) + (1 - alpha) * variance
+
+    # Return volatility (sqrt of variance), with floor to prevent division issues
+    return max(math.sqrt(variance), 1e-5)
 
 
 def compute_policy_based_position(

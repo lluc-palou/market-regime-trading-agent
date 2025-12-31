@@ -11,13 +11,19 @@ from .metrics import (
     compute_transition_matrix,
     extract_ngrams,
     compare_ngrams,
-    jensen_shannon_divergence
+    jensen_shannon_divergence,
+    compare_target_distributions,
+    compare_target_autocorrelation,
+    compare_volatility_clustering
 )
 from .visualization import (
     plot_code_frequency,
     plot_transition_matrix,
     plot_ngram_comparison,
-    plot_umap_comparison
+    plot_umap_comparison,
+    plot_target_distribution,
+    plot_target_autocorrelation,
+    plot_volatility_clustering
 )
 
 
@@ -55,8 +61,8 @@ class PriorQualityValidator:
         logger('', "INFO")
         logger(f'Validating Prior model for split {split_id}...', "INFO")
 
-        # Load validation codes
-        _, val_codebook_indices, _ = load_validation_samples(
+        # Load validation codes and targets
+        _, val_codebook_indices, _, val_targets = load_validation_samples(
             self.mongo_uri, self.db_name, split_id
         )
 
@@ -70,8 +76,8 @@ class PriorQualityValidator:
         n_val_sequences = len(val_sequences)
         logger(f'  Validation sequences: {n_val_sequences}', "INFO")
 
-        # Load pre-generated synthetic data
-        _, syn_codebook_indices, syn_sequence_ids = load_synthetic_samples(
+        # Load pre-generated synthetic data and targets
+        _, syn_codebook_indices, syn_sequence_ids, syn_targets = load_synthetic_samples(
             self.mongo_uri, self.db_name, split_id
         )
 
@@ -199,6 +205,52 @@ class PriorQualityValidator:
             method='umap'
         )
 
+        # ========== TARGET FIELD VALIDATION ==========
+        logger('  Analyzing target distributions...', "INFO")
+
+        # Target distribution comparison
+        target_dist_metrics = compare_target_distributions(val_targets, syn_targets, n_bins=50)
+        logger(f'  Target mean diff: {target_dist_metrics["mean_diff"]:.8f}', "INFO")
+        logger(f'  Target std ratio: {target_dist_metrics["std_ratio"]:.6f}', "INFO")
+        logger(f'  Target KS test p-value: {target_dist_metrics["ks_p_value"]:.6f}', "INFO")
+        logger(f'  Target JS divergence: {target_dist_metrics["js_divergence"]:.6f}', "INFO")
+        logger(f'  Target Wasserstein distance: {target_dist_metrics["wasserstein_distance"]:.8f}', "INFO")
+
+        # Target autocorrelation comparison
+        logger('  Analyzing target autocorrelation...', "INFO")
+        target_acf_metrics = compare_target_autocorrelation(val_targets, syn_targets, max_lag=20)
+        logger(f'  Target ACF MAE: {target_acf_metrics["acf_mae"]:.6f}', "INFO")
+        logger(f'  Target ACF correlation: {target_acf_metrics["acf_correlation"]:.6f}', "INFO")
+
+        # Volatility clustering comparison
+        logger('  Analyzing volatility clustering...', "INFO")
+        vol_metrics = compare_volatility_clustering(val_targets, syn_targets, max_lag=20)
+        logger(f'  Volatility clustering MAE: {vol_metrics["vol_clustering_mae"]:.6f}', "INFO")
+        logger(f'  Volatility clustering correlation: {vol_metrics["vol_clustering_correlation"]:.6f}', "INFO")
+
+        # Target visualizations
+        logger('  Plotting target distribution...', "INFO")
+        plot_target_distribution(
+            val_targets, syn_targets,
+            save_path=split_output_dir / f"target_distribution_split_{split_id}.png"
+        )
+
+        logger('  Plotting target autocorrelation...', "INFO")
+        plot_target_autocorrelation(
+            target_acf_metrics['acf_val'],
+            target_acf_metrics['acf_syn'],
+            max_lag=20,
+            save_path=split_output_dir / f"target_autocorrelation_split_{split_id}.png"
+        )
+
+        logger('  Plotting volatility clustering...', "INFO")
+        plot_volatility_clustering(
+            vol_metrics['acf_abs_val'],
+            vol_metrics['acf_abs_syn'],
+            max_lag=20,
+            save_path=split_output_dir / f"volatility_clustering_split_{split_id}.png"
+        )
+
         # Compile results
         results = {
             'split_id': split_id,
@@ -206,6 +258,7 @@ class PriorQualityValidator:
             'n_syn_sequences': n_syn_sequences,
             'seq_len': self.seq_len,
             'vocab_size': vocab_size,
+            # Codebook metrics
             'js_divergence_freq': float(js_div),
             'frequency_correlation': float(freq_corr),
             'transition_frobenius_correlation': float(trans_frobenius_corr),
@@ -213,7 +266,18 @@ class PriorQualityValidator:
             'bigram_overlap_ratio': float(bigram_comparison['overlap_ratio']),
             'bigram_freq_correlation': float(bigram_comparison['frequency_correlation']),
             'trigram_overlap_ratio': float(trigram_comparison['overlap_ratio']),
-            'trigram_freq_correlation': float(trigram_comparison['frequency_correlation'])
+            'trigram_freq_correlation': float(trigram_comparison['frequency_correlation']),
+            # Target metrics
+            'target_mean_diff': float(target_dist_metrics['mean_diff']),
+            'target_std_ratio': float(target_dist_metrics['std_ratio']),
+            'target_ks_statistic': float(target_dist_metrics['ks_statistic']),
+            'target_ks_p_value': float(target_dist_metrics['ks_p_value']),
+            'target_js_divergence': float(target_dist_metrics['js_divergence']),
+            'target_wasserstein_distance': float(target_dist_metrics['wasserstein_distance']),
+            'target_acf_mae': float(target_acf_metrics['acf_mae']),
+            'target_acf_correlation': float(target_acf_metrics['acf_correlation']),
+            'target_vol_clustering_mae': float(vol_metrics['vol_clustering_mae']),
+            'target_vol_clustering_correlation': float(vol_metrics['vol_clustering_correlation'])
         }
 
         logger(f'  ✓ Split {split_id} validation complete', "INFO")

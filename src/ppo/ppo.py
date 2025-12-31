@@ -104,6 +104,7 @@ def ppo_update(
     total_value_loss = 0
     total_entropy = 0
     total_alpha = 0
+    total_uncertainty = 0
     n_updates = 0
     
     for epoch in range(config.n_epochs):
@@ -173,22 +174,27 @@ def ppo_update(
                 entropy_loss = -0.05 * entropy.mean()
                 alpha = torch.tensor(0.05)
 
-            # Total loss (removed uncertainty penalty)
+            # Uncertainty penalty (prevents std exploitation)
+            uncertainty_penalty = config.uncertainty_coef * std.mean()
+
+            # Total loss (policy + value + entropy + uncertainty)
             loss = (policy_loss +
                    config.value_coef * value_loss +
-                   entropy_loss)
-            
+                   entropy_loss +
+                   uncertainty_penalty)
+
             # Optimization step
             optimizer.zero_grad()
             loss.backward()
             torch.nn.utils.clip_grad_norm_(agent.parameters(), max_norm=config.max_grad_norm)
             optimizer.step()
-            
+
             # Track metrics
             total_policy_loss += policy_loss.item()
             total_value_loss += value_loss.item()
             total_entropy += entropy.mean().item()
             total_alpha += alpha.item()
+            total_uncertainty += std.mean().item()
             n_updates += 1
 
     return {
@@ -196,5 +202,6 @@ def ppo_update(
         'value_loss': total_value_loss / n_updates,
         'entropy': total_entropy / n_updates,
         'alpha': total_alpha / n_updates,
+        'uncertainty': total_uncertainty / n_updates,
         'n_updates': n_updates
     }

@@ -87,6 +87,7 @@ class PPOConfig:
     value_coef: float = 1.0              # Value loss coefficient (increased for better value estimates)
     target_entropy: float = -1.0         # Target entropy for adaptive temperature (SAC-style)
     alpha_lr: float = 3e-4               # Learning rate for entropy temperature parameter
+    uncertainty_coef: float = 0.1        # Uncertainty penalty coefficient (prevents std exploitation)
     max_grad_norm: float = 0.5           # Gradient clipping norm
     n_epochs: int = 2                    # PPO epochs per update (reduced for speed)
     batch_size: int = 256                # Minibatch size (increased 8x to utilize GPU)

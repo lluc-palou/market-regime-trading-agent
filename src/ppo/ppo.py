@@ -56,9 +56,7 @@ def ppo_update(
     optimizer: torch.optim.Optimizer,
     config,
     experiment_type,
-    device: str = 'cuda',
-    log_alpha: torch.Tensor = None,
-    alpha_optimizer: torch.optim.Optimizer = None
+    device: str = 'cuda'
 ) -> Dict[str, float]:
     """
     Perform PPO update using trajectories in buffer.
@@ -70,7 +68,7 @@ def ppo_update(
         optimizer: Optimizer
         config: PPOConfig with hyperparameters
         device: Device for computation
-    
+
     Returns:
         Dictionary with loss metrics
     """
@@ -103,8 +101,8 @@ def ppo_update(
     total_policy_loss = 0
     total_value_loss = 0
     total_entropy = 0
-    total_alpha = 0
     total_uncertainty = 0
+    total_activity = 0
     n_updates = 0
     
     for epoch in range(config.n_epochs):
@@ -153,34 +151,22 @@ def ppo_update(
             # Uses RAW (unnormalized) returns - value function predicts actual reward scale
             value_loss = F.mse_loss(new_values, mb_returns)
 
-            # Adaptive entropy (SAC-style)
-            # Compute current alpha (temperature parameter)
-            if log_alpha is not None:
-                alpha = log_alpha.exp()
-
-                # Entropy target loss (updates alpha to maintain target entropy)
-                mean_entropy = entropy.mean()
-                alpha_loss = (alpha * (mean_entropy - config.target_entropy).detach()).mean()
-
-                # Update alpha
-                alpha_optimizer.zero_grad()
-                alpha_loss.backward()
-                alpha_optimizer.step()
-
-                # Use adaptive alpha in loss (detach to prevent gradient flow to alpha)
-                entropy_loss = -alpha.detach() * mean_entropy
-            else:
-                # Fallback to fixed entropy coefficient (for validation)
-                entropy_loss = -0.05 * entropy.mean()
-                alpha = torch.tensor(0.05)
+            # Fixed entropy bonus (encourages exploration)
+            entropy_bonus = config.entropy_coef * entropy.mean()
 
             # Uncertainty penalty (prevents std exploitation)
             uncertainty_penalty = config.uncertainty_coef * std.mean()
 
-            # Total loss (policy + value + entropy + uncertainty)
+            # Activity bonus (prevents no-trade collapse)
+            # Encourages non-zero positions by rewarding high |actions|
+            activity_bonus = config.activity_coef * torch.abs(mb_actions).mean()
+
+            # Total loss (policy + value - entropy - activity + uncertainty)
+            # Subtract bonuses, add penalties
             loss = (policy_loss +
-                   config.value_coef * value_loss +
-                   entropy_loss +
+                   config.value_coef * value_loss -
+                   entropy_bonus -
+                   activity_bonus +
                    uncertainty_penalty)
 
             # Optimization step
@@ -193,15 +179,15 @@ def ppo_update(
             total_policy_loss += policy_loss.item()
             total_value_loss += value_loss.item()
             total_entropy += entropy.mean().item()
-            total_alpha += alpha.item()
             total_uncertainty += std.mean().item()
+            total_activity += torch.abs(mb_actions).mean().item()
             n_updates += 1
 
     return {
         'policy_loss': total_policy_loss / n_updates,
         'value_loss': total_value_loss / n_updates,
         'entropy': total_entropy / n_updates,
-        'alpha': total_alpha / n_updates,
         'uncertainty': total_uncertainty / n_updates,
+        'activity': total_activity / n_updates,
         'n_updates': n_updates
     }

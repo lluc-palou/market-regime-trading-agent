@@ -206,10 +206,10 @@ class AgentState:
         net_pnl = self.cumulative_realized_pnl - self.cumulative_tc
         total_pnl = net_pnl + self.unrealized_pnl
 
-        # New metrics for gross PnL and costs
-        avg_gross_pnl_per_trade = self.cumulative_gross_pnl / max(self.trade_count, 1)
+        # Gross PnL metrics (realized PnL before TC)
+        avg_gross_pnl_per_trade = self.cumulative_realized_pnl / max(self.trade_count, 1)
         avg_tc_per_trade = self.cumulative_tc / max(self.trade_count, 1)
-        pnl_to_cost_ratio = self.cumulative_gross_pnl / self.cumulative_tc if self.cumulative_tc > 1e-8 else 0.0
+        pnl_to_cost_ratio = self.cumulative_realized_pnl / self.cumulative_tc if self.cumulative_tc > 1e-8 else 0.0
 
         # Position metrics
         mean_abs_position = self.sum_abs_position / max(self.step_count, 1)

@@ -690,14 +690,15 @@ def validate_epoch(
         val_metrics['avg_pnl'] = 0.0
         val_metrics['sharpe'] = 0.0
 
-    # Compute model metrics (losses, entropy, alpha) on validation data
+    # Compute model metrics (losses, entropy, uncertainty, activity) on validation data
     model_metrics = compute_validation_metrics(
         agent, trajectory_buffer, ppo_config, experiment_type, device
     )
     val_metrics['policy_loss'] = model_metrics['policy_loss']
     val_metrics['value_loss'] = model_metrics['value_loss']
     val_metrics['entropy'] = model_metrics['entropy']
-    val_metrics['alpha'] = model_metrics['alpha']
+    val_metrics['uncertainty'] = model_metrics['uncertainty']
+    val_metrics['activity'] = model_metrics['activity']
 
     return val_metrics
 

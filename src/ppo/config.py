@@ -37,7 +37,7 @@ class ModelConfig:
     n_layers: int = 4                    # Number of transformer layers (increased from 2)
     dropout: float = 0.2                 # Dropout rate (increased for regularization)
     window_size: int = 10                # Observation window (W samples) - reduced from 50
-    horizon: int = 1                     # Reward horizon - immediate next return (not lookahead)
+    horizon: int = 10                    # Reward horizon - cumulative forward returns over H steps
     min_log_std: float = -20.0           # Minimum log std for policy
     max_log_std: float = 2.0             # Maximum log std for policy
     ffn_expansion: int = 4               # FFN dimension = d_model × ffn_expansion
@@ -85,9 +85,9 @@ class PPOConfig:
     gae_lambda: float = 0.95             # GAE lambda parameter
     clip_ratio: float = 0.1              # PPO clipping parameter (reduced for stability with high variance)
     value_coef: float = 1.0              # Value loss coefficient (increased for better value estimates)
-    entropy_coef: float = 0.01           # Fixed entropy coefficient (encourages exploration)
+    entropy_coef: float = 0.03           # Fixed entropy coefficient (encourages exploration, increased for moderate exploration)
     uncertainty_coef: float = 0.1        # Uncertainty penalty coefficient (prevents std exploitation)
-    activity_coef: float = 0.001         # Inactivity penalty coefficient (prevents no-trade collapse, reduced pressure)
+    activity_coef: float = 0.0005        # Inactivity penalty coefficient (reduced to learn quality over quantity)
     max_grad_norm: float = 0.5           # Gradient clipping norm
     n_epochs: int = 2                    # PPO epochs per update (reduced for speed)
     batch_size: int = 256                # Minibatch size (increased 8x to utilize GPU)

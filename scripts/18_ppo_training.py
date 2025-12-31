@@ -72,6 +72,7 @@ import torch
 import torch.optim as optim
 import mlflow
 import numpy as np
+import math
 from datetime import datetime
 from pymongo import MongoClient, ASCENDING
 
@@ -283,8 +284,15 @@ def run_episode(
         log_prob_val = log_prob.item() if not deterministic else 0.0
         value_val = value.item()
 
-        # Get immediate target (one-step forward return)
-        target = current_sample['target']
+        # Get multi-step cumulative target (H-step forward returns)
+        H = model_config.horizon  # 10
+        multistep_target = 0.0
+
+        # Sum next H forward returns (or remaining if episode ends sooner)
+        for i in range(1, min(H + 1, len(episode.samples) - t)):
+            multistep_target += episode.samples[t + i]['target']
+
+        target = multistep_target
 
         # Compute position using agent's policy distribution (action mean + std)
         # This allows PPO to learn position sizing directly through confidence (std)
@@ -303,15 +311,19 @@ def run_episode(
         )
 
         # Scale reward by realized volatility (EWMA of recent returns)
-        # Collect recent targets from past samples (window + current)
+        # Collect recent 1-step targets from past samples for volatility estimate
         lookback = min(30, t)  # Use up to 30 recent samples for volatility estimate
         recent_targets = [episode.samples[t - i]['target'] for i in range(lookback, 0, -1)]
-        recent_targets.append(target)  # Include current target
+        recent_targets.append(episode.samples[t]['target'])  # Include current 1-step target
 
-        # Compute EWMA volatility from recent returns (half-life=20, matches feature engineering)
-        realized_vol = compute_ewma_volatility(recent_targets, half_life=20)
+        # Compute EWMA volatility from recent 1-step returns (half-life=20, matches feature engineering)
+        step1_vol = compute_ewma_volatility(recent_targets, half_life=20)
 
-        # Scale reward by volatility (Sharpe-like normalization)
+        # Scale to H-step volatility using sqrt(H) rule (standard financial theory)
+        # Multi-step volatility = single-step volatility × sqrt(H)
+        realized_vol = step1_vol * math.sqrt(model_config.horizon)
+
+        # Scale reward by multi-step volatility (Sharpe-like normalization)
         reward = reward / realized_vol
 
         # Unrealized PnL for next timestep

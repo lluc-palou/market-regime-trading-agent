@@ -226,7 +226,7 @@ def compute_unrealized_pnl(
 def compute_directional_bonus(
     position: float,
     target: float,
-    bonus_weight: float = 0.00001
+    bonus_weight: float = 0.000002
 ) -> float:
     """
     Compute directional accuracy bonus for reward shaping.
@@ -243,18 +243,18 @@ def compute_directional_bonus(
     Args:
         position: Current position (in [-1, 1])
         target: Multi-step forward return
-        bonus_weight: Bonus magnitude per unit position (default: 0.00001)
+        bonus_weight: Bonus magnitude per unit position (default: 0.000002, ~25% of H=10 gross PnL)
 
     Returns:
         Directional bonus/penalty
 
     Example:
-        position=0.7, target=0.0001 (correct) → bonus = +0.000007
-        position=0.7, target=-0.0001 (wrong) → bonus = -0.000007
+        position=0.7, target=0.0001 (correct) → bonus = +0.0000014
+        position=0.7, target=-0.0001 (wrong) → bonus = -0.0000014
         position=0.0, target=0.0001 (no position) → bonus = 0
 
     Notes:
-        - Bonus is calibrated to be comparable to gross PnL magnitude
+        - Bonus calibrated to be smaller than gross PnL (avoids dominating signal)
         - Does NOT affect logged gross_pnl metrics (only reward signal)
         - Helps agent learn direction even when return magnitude is small
     """

@@ -314,7 +314,8 @@ def run_episode(
         # Compute directional accuracy bonus (for reward shaping, not logged PnL)
         # Provides additional signal when agent predicts direction correctly
         # This bonus affects ONLY the reward signal for learning, not the logged gross_pnl metric
-        directional_bonus = compute_directional_bonus(position_curr, target, bonus_weight=0.00001)
+        # Uses default bonus_weight=0.000002 (~25% of H=10 gross PnL, avoiding signal dominance)
+        directional_bonus = compute_directional_bonus(position_curr, target)
 
         # Add directional bonus to reward (before volatility scaling)
         # Note: gross_pnl remains unchanged for accurate performance tracking

@@ -36,8 +36,8 @@ class ModelConfig:
     n_heads: int = 8                     # Number of attention heads (increased from 4)
     n_layers: int = 4                    # Number of transformer layers (increased from 2)
     dropout: float = 0.2                 # Dropout rate (increased for regularization)
-    window_size: int = 20                # Observation window (W samples) - matches horizon for temporal context
-    horizon: int = 20                    # Reward horizon - cumulative forward returns over H steps
+    window_size: int = 10                # Observation window (W samples) - matches horizon for temporal context
+    horizon: int = 10                    # Reward horizon - cumulative forward returns over H steps
     min_log_std: float = -20.0           # Minimum log std for policy
     max_log_std: float = 2.0             # Maximum log std for policy
     ffn_expansion: int = 4               # FFN dimension = d_model × ffn_expansion
@@ -108,7 +108,7 @@ class RewardConfig:
 class TrainingConfig:
     """Training procedure configuration."""
     max_epochs: int = 50                 # Maximum training epochs (increased from 10)
-    patience: int = 7                    # Early stopping patience (increased from 3)
+    patience: int = 10                   # Early stopping patience (increased to utilize 50 epochs better)
     min_delta: float = 0.01              # Minimum improvement for early stopping
     validate_every: int = 1              # Validate every N epochs
     log_every: int = 10                  # Log every N episodes

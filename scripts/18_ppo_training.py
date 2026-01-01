@@ -469,8 +469,6 @@ def train_epoch(
         dm['max_std'] = max(dm['max_std'], metrics['max_action_std'])
         dm['sum_gross_pnl_per_trade'] += metrics['avg_gross_pnl_per_trade']
         dm['sum_tc_per_trade'] += metrics['avg_tc_per_trade']
-        # Accumulate for maker fee analysis
-        dm['total_gross_pnl'] = dm.get('total_gross_pnl', 0.0) + metrics['total_gross_pnl']
 
         # Log when completing a parent episode (all chunks done)
         is_last_chunk = (ep_idx == total_episodes or
@@ -726,8 +724,6 @@ def validate_epoch(
         dm['max_std'] = max(dm['max_std'], metrics['max_action_std'])
         dm['sum_gross_pnl_per_trade'] += metrics['avg_gross_pnl_per_trade']
         dm['sum_tc_per_trade'] += metrics['avg_tc_per_trade']
-        # Accumulate for maker fee analysis
-        dm['total_gross_pnl'] = dm.get('total_gross_pnl', 0.0) + metrics['total_gross_pnl']
 
         # Log when completing a parent episode (all chunks done)
         is_last_chunk = (ep_idx == total_episodes or

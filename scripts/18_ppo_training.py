@@ -73,6 +73,7 @@ import torch.optim as optim
 import mlflow
 import numpy as np
 import math
+import csv
 from datetime import datetime
 from pymongo import MongoClient, ASCENDING
 
@@ -783,6 +784,24 @@ def train_split(
     logger(f'Learning rate scheduler: ReduceLROnPlateau (factor=0.3, patience=2)', "INFO")
     logger(f'Loss coefficients: entropy={config.ppo.entropy_coef}, uncertainty={config.ppo.uncertainty_coef}, activity={config.ppo.activity_coef}', "INFO")
 
+    # Setup CSV logging for epoch results
+    results_csv_path = LOG_DIR / f"split_{split_id}_epoch_results.csv"
+    csv_header = [
+        'epoch', 'train_sharpe', 'train_avg_reward', 'train_avg_pnl',
+        'train_policy_loss', 'train_value_loss', 'train_entropy',
+        'train_uncertainty', 'train_activity',
+        'val_sharpe', 'val_avg_reward', 'val_avg_pnl',
+        'val_policy_loss', 'val_value_loss', 'val_entropy',
+        'val_uncertainty', 'val_activity', 'learning_rate'
+    ]
+
+    # Create CSV file with header
+    with open(results_csv_path, 'w', newline='') as f:
+        writer = csv.writer(f)
+        writer.writerow(csv_header)
+
+    logger(f'Epoch results will be logged to: {results_csv_path}', "INFO")
+
     # Training loop
     metrics_logger = MetricsLogger(log_dir=str(LOG_DIR))
     best_val_sharpe = float('-inf')
@@ -846,6 +865,30 @@ def train_split(
         mlflow.log_metric("val_uncertainty", val_metrics["uncertainty"], step=epoch)
         mlflow.log_metric("val_activity", val_metrics["activity"], step=epoch)
         mlflow.log_metric("learning_rate", current_lr, step=epoch)
+
+        # Log epoch results to CSV file
+        with open(results_csv_path, 'a', newline='') as f:
+            writer = csv.writer(f)
+            writer.writerow([
+                epoch + 1,  # Epoch number (1-indexed)
+                train_metrics["sharpe"],
+                train_metrics["avg_reward"],
+                train_metrics["avg_pnl"],
+                train_metrics["avg_policy_loss"],
+                train_metrics["avg_value_loss"],
+                train_metrics["avg_entropy"],
+                train_metrics["avg_uncertainty"],
+                train_metrics["avg_activity"],
+                val_metrics["sharpe"],
+                val_metrics["avg_reward"],
+                val_metrics["avg_pnl"],
+                val_metrics["policy_loss"],
+                val_metrics["value_loss"],
+                val_metrics["entropy"],
+                val_metrics["uncertainty"],
+                val_metrics["activity"],
+                current_lr
+            ])
 
         # Save checkpoint if best
         if val_metrics["sharpe"] > best_val_sharpe:

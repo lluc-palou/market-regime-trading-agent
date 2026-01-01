@@ -828,19 +828,26 @@ def train_split(
                f'Uncertainty: {train_metrics["avg_uncertainty"]:.4f}, '
                f'Activity: {train_metrics["avg_activity"]:.4f}', "INFO")
 
-        # Validation (every epoch)
-        val_metrics = validate_epoch(
-            agent, val_episodes, config.reward, config.model, config.ppo, experiment_type, device
-        )
+        # Validation (every validate_every epochs, or last epoch)
+        should_validate = ((epoch + 1) % config.training.validate_every == 0 or
+                          epoch == config.training.max_epochs - 1)
 
-        logger(f'  Val - Sharpe: {val_metrics["sharpe"]:.4f}, '
-               f'Avg Reward: {val_metrics["avg_reward"]:.4f}, '
-               f'Avg PnL: {val_metrics["avg_pnl"]:.4f}', "INFO")
-        logger(f'  Losses - Policy: {val_metrics["policy_loss"]:.4f}, '
-               f'Value: {val_metrics["value_loss"]:.4f}, '
-               f'Entropy: {val_metrics["entropy"]:.4f}, '
-               f'Uncertainty: {val_metrics["uncertainty"]:.4f}, '
-               f'Activity: {val_metrics["activity"]:.4f}', "INFO")
+        if should_validate:
+            val_metrics = validate_epoch(
+                agent, val_episodes, config.reward, config.model, config.ppo, experiment_type, device
+            )
+
+            logger(f'  Val - Sharpe: {val_metrics["sharpe"]:.4f}, '
+                   f'Avg Reward: {val_metrics["avg_reward"]:.4f}, '
+                   f'Avg PnL: {val_metrics["avg_pnl"]:.4f}', "INFO")
+            logger(f'  Losses - Policy: {val_metrics["policy_loss"]:.4f}, '
+                   f'Value: {val_metrics["value_loss"]:.4f}, '
+                   f'Entropy: {val_metrics["entropy"]:.4f}, '
+                   f'Uncertainty: {val_metrics["uncertainty"]:.4f}, '
+                   f'Activity: {val_metrics["activity"]:.4f}', "INFO")
+        else:
+            # Skip validation, reuse last metrics
+            logger(f'  Val - Skipped (using cached metrics from epoch {epoch - (epoch % config.training.validate_every)})', "INFO")
 
         # Update learning rate based on validation Sharpe
         scheduler.step(val_metrics["sharpe"])

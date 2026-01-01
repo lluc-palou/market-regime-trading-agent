@@ -89,8 +89,8 @@ class PPOConfig:
     uncertainty_coef: float = 0.1        # Uncertainty penalty coefficient (prevents std exploitation)
     activity_coef: float = 0.0005        # Inactivity penalty coefficient (reduced to learn quality over quantity)
     max_grad_norm: float = 0.5           # Gradient clipping norm
-    n_epochs: int = 2                    # PPO epochs per update (reduced for speed)
-    batch_size: int = 256                # Minibatch size (increased 8x to utilize GPU)
+    n_epochs: int = 1                    # PPO epochs per update (reduced for speed - still effective)
+    batch_size: int = 512                # Minibatch size (increased for better GPU utilization)
     buffer_capacity: int = 2048          # Trajectory buffer size (increased 4x)
     
 
@@ -110,7 +110,7 @@ class TrainingConfig:
     max_epochs: int = 100                # Maximum training epochs (increased for RL exploration needs)
     patience: int = 15                   # Early stopping patience (increased to allow more exploration)
     min_delta: float = 0.01              # Minimum improvement for early stopping
-    validate_every: int = 1              # Validate every N epochs
+    validate_every: int = 2              # Validate every 2 epochs (reduce validation overhead)
     log_every: int = 10                  # Log every N episodes
     checkpoint_dir: str = "checkpoints"  # Directory for model checkpoints
     log_dir: str = "logs"                # Directory for logs

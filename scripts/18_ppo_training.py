@@ -318,10 +318,6 @@ def run_episode(
         # Uses default bonus_weight=0.000002 (~25% of H=10 gross PnL, avoiding signal dominance)
         directional_bonus = compute_directional_bonus(position_curr, target)
 
-        # Add directional bonus to reward (before volatility scaling)
-        # Note: gross_pnl remains unchanged for accurate performance tracking
-        reward = reward + directional_bonus
-
         # Scale reward by realized volatility (EWMA of recent returns)
         # Collect recent 1-step targets from past samples for volatility estimate
         lookback = min(30, t)  # Use up to 30 recent samples for volatility estimate
@@ -335,8 +331,12 @@ def run_episode(
         # Multi-step volatility = single-step volatility × sqrt(H)
         realized_vol = step1_vol * math.sqrt(model_config.horizon)
 
-        # Scale reward by multi-step volatility (Sharpe-like normalization)
-        reward = reward / realized_vol
+        # Compute trading return (actual performance metric, excludes directional bonus)
+        trading_return = reward / realized_vol
+
+        # Add directional bonus to reward for learning signal
+        # Note: trading_return excludes bonus for accurate Sharpe calculation
+        reward = (reward + directional_bonus) / realized_vol
 
         # Unrealized PnL for next timestep
         unrealized = compute_unrealized_pnl(position_curr, target)
@@ -350,8 +350,9 @@ def run_episode(
 
         # Update agent state with policy-based position
         # Track action_std instead of volatility (agent's learned uncertainty)
-        agent_state.update(position_curr, log_return, tc, reward, unrealized, gross_pnl, action_std_val)
-        episode_returns.append(reward)
+        # Pass both reward (learning signal) and trading_return (performance metric)
+        agent_state.update(position_curr, log_return, tc, reward, unrealized, gross_pnl, action_std_val, trading_return)
+        episode_returns.append(trading_return)  # Use trading_return for Sharpe (excludes directional bonus)
 
         # Check if episode should end
         done = (t >= valid_steps[-1])
@@ -452,7 +453,7 @@ def train_epoch(
         epoch_metrics['total_pnl'] += metrics['total_pnl']
         epoch_metrics['episode_count'] += 1
         epoch_metrics['avg_episode_length'] += metrics['episode_length']
-        episode_returns.append(metrics['total_reward'])
+        episode_returns.append(metrics['total_trading_return'])  # Use trading_return for Sharpe (excludes directional bonus)
 
         # Aggregate metrics by parent episode (day)
         parent_id = episode.parent_id if episode.parent_id is not None else ep_idx
@@ -707,7 +708,7 @@ def validate_epoch(
         val_metrics['total_reward'] += metrics['total_reward']
         val_metrics['total_pnl'] += metrics['total_pnl']
         val_metrics['episode_count'] += 1
-        episode_returns.append(metrics['total_reward'])
+        episode_returns.append(metrics['total_trading_return'])  # Use trading_return for Sharpe (excludes directional bonus)
 
         # Aggregate metrics by parent episode (day)
         parent_id = episode.parent_id if episode.parent_id is not None else ep_idx

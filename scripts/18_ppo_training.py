@@ -469,6 +469,8 @@ def train_epoch(
         dm['max_std'] = max(dm['max_std'], metrics['max_action_std'])
         dm['sum_gross_pnl_per_trade'] += metrics['avg_gross_pnl_per_trade']
         dm['sum_tc_per_trade'] += metrics['avg_tc_per_trade']
+        # Accumulate for maker fee analysis
+        dm['total_gross_pnl'] = dm.get('total_gross_pnl', 0.0) + metrics['total_gross_pnl']
 
         # Log when completing a parent episode (all chunks done)
         is_last_chunk = (ep_idx == total_episodes or
@@ -477,16 +479,54 @@ def train_epoch(
         if is_last_chunk:
             from src.utils.logging import logger
             n_chunks = dm['chunks']
-            logger(f'    Day {len([k for k in day_metrics.keys() if day_metrics[k]["chunks"] > 0])}/{len(set(e.parent_id if e.parent_id is not None else i for i, e in enumerate(episodes, 1)))} '
-                   f'({n_chunks} chunks) - '
-                   f'Reward: {dm["total_reward"]:.4f}, '
-                   f'PnL: {dm["total_pnl"]:.4f}, '
-                   f'Trades: {dm["total_trades"]} ({dm["total_trades"]/dm["total_steps"]:.2%}), '
-                   f'Pos[μ={dm["sum_mean_pos"]/n_chunks:.4f}, max={dm["max_pos"]:.4f}], '
-                   f'Std[μ={dm["sum_mean_std"]/n_chunks:.4f}, range=[{dm["min_std"]:.4f},{dm["max_std"]:.4f}]], '
-                   f'Gross PnL/Trade: {dm["sum_gross_pnl_per_trade"]/n_chunks:.6f}, '
-                   f'TC/Trade: {dm["sum_tc_per_trade"]/n_chunks:.6f}, '
-                   f'Steps: {dm["total_steps"]}', "INFO")
+
+            # Calculate aggregated metrics
+            avg_position = dm['sum_mean_pos'] / n_chunks
+            avg_uncertainty = dm['sum_mean_std'] / n_chunks
+            avg_gross_pnl = dm['sum_gross_pnl_per_trade'] / n_chunks
+            avg_tc_taker = dm['sum_tc_per_trade'] / n_chunks
+            trade_frequency = dm['total_trades'] / dm['total_steps']
+
+            # Market orders (taker fee: 5 bps)
+            net_pnl_taker = avg_gross_pnl - avg_tc_taker
+
+            # Limit orders (maker fee: 0 bps or -2.5 bps rebate)
+            maker_fee_neutral = 0.0  # 0 bps
+            maker_fee_rebate = -0.00025  # -2.5 bps rebate
+
+            # Calculate maker TC assuming same position changes
+            avg_position_change = avg_tc_taker / 0.0005  # Reverse engineer position change
+            avg_tc_maker_neutral = maker_fee_neutral * avg_position_change
+            avg_tc_maker_rebate = maker_fee_rebate * avg_position_change
+
+            net_pnl_maker_neutral = avg_gross_pnl - avg_tc_maker_neutral
+            net_pnl_maker_rebate = avg_gross_pnl - avg_tc_maker_rebate
+
+            day_num = len([k for k in day_metrics.keys() if day_metrics[k]["chunks"] > 0])
+            total_days = len(set(e.parent_id if e.parent_id is not None else i for i, e in enumerate(episodes, 1)))
+
+            logger(f'    ┌─ Day {day_num}/{total_days} ({n_chunks} chunks, {dm["total_steps"]} steps)', "INFO")
+            logger(f'    │  Trading Activity: {dm["total_trades"]} trades ({trade_frequency:.1%} frequency)', "INFO")
+            logger(f'    │  Position Sizing: Mean={avg_position:.3f}, Max={dm["max_pos"]:.3f}', "INFO")
+            logger(f'    │  Action Uncertainty (σ): Mean={avg_uncertainty:.3f}, Range=[{dm["min_std"]:.3f}, {dm["max_std"]:.3f}]', "INFO")
+            logger(f'    │', "INFO")
+            logger(f'    │  Performance (Market Orders - Taker Fee 5 bps):', "INFO")
+            logger(f'    │    Gross PnL/Trade: {avg_gross_pnl:.8f}', "INFO")
+            logger(f'    │    TC/Trade:        {avg_tc_taker:.8f}', "INFO")
+            logger(f'    │    Net PnL/Trade:   {net_pnl_taker:.8f} ({"PROFIT" if net_pnl_taker > 0 else "LOSS"})', "INFO")
+            logger(f'    │', "INFO")
+            logger(f'    │  Alternative: Limit Orders (Maker Fee 0 bps):', "INFO")
+            logger(f'    │    Gross PnL/Trade: {avg_gross_pnl:.8f}', "INFO")
+            logger(f'    │    TC/Trade:        {avg_tc_maker_neutral:.8f}', "INFO")
+            logger(f'    │    Net PnL/Trade:   {net_pnl_maker_neutral:.8f} ({"PROFIT" if net_pnl_maker_neutral > 0 else "LOSS"})', "INFO")
+            logger(f'    │    Improvement:     {(net_pnl_maker_neutral - net_pnl_taker):.8f}', "INFO")
+            logger(f'    │', "INFO")
+            logger(f'    │  Alternative: Limit Orders (Maker Rebate -2.5 bps):', "INFO")
+            logger(f'    │    Gross PnL/Trade: {avg_gross_pnl:.8f}', "INFO")
+            logger(f'    │    TC/Trade:        {avg_tc_maker_rebate:.8f} (rebate)', "INFO")
+            logger(f'    │    Net PnL/Trade:   {net_pnl_maker_rebate:.8f} ({"PROFIT" if net_pnl_maker_rebate > 0 else "LOSS"})', "INFO")
+            logger(f'    │    Improvement:     {(net_pnl_maker_rebate - net_pnl_taker):.8f}', "INFO")
+            logger(f'    └─', "INFO")
 
         # Perform PPO update if buffer is full
         if trajectory_buffer.is_full():
@@ -686,6 +726,8 @@ def validate_epoch(
         dm['max_std'] = max(dm['max_std'], metrics['max_action_std'])
         dm['sum_gross_pnl_per_trade'] += metrics['avg_gross_pnl_per_trade']
         dm['sum_tc_per_trade'] += metrics['avg_tc_per_trade']
+        # Accumulate for maker fee analysis
+        dm['total_gross_pnl'] = dm.get('total_gross_pnl', 0.0) + metrics['total_gross_pnl']
 
         # Log when completing a parent episode (all chunks done)
         is_last_chunk = (ep_idx == total_episodes or
@@ -694,16 +736,54 @@ def validate_epoch(
         if is_last_chunk:
             from src.utils.logging import logger
             n_chunks = dm['chunks']
-            logger(f'    Day {len([k for k in day_metrics.keys() if day_metrics[k]["chunks"] > 0])}/{len(set(e.parent_id if e.parent_id is not None else i for i, e in enumerate(episodes, 1)))} '
-                   f'({n_chunks} chunks) - '
-                   f'Reward: {dm["total_reward"]:.4f}, '
-                   f'PnL: {dm["total_pnl"]:.4f}, '
-                   f'Trades: {dm["total_trades"]} ({dm["total_trades"]/dm["total_steps"]:.2%}), '
-                   f'Pos[μ={dm["sum_mean_pos"]/n_chunks:.4f}, max={dm["max_pos"]:.4f}], '
-                   f'Std[μ={dm["sum_mean_std"]/n_chunks:.4f}, range=[{dm["min_std"]:.4f},{dm["max_std"]:.4f}]], '
-                   f'Gross PnL/Trade: {dm["sum_gross_pnl_per_trade"]/n_chunks:.6f}, '
-                   f'TC/Trade: {dm["sum_tc_per_trade"]/n_chunks:.6f}, '
-                   f'Steps: {dm["total_steps"]}', "INFO")
+
+            # Calculate aggregated metrics
+            avg_position = dm['sum_mean_pos'] / n_chunks
+            avg_uncertainty = dm['sum_mean_std'] / n_chunks
+            avg_gross_pnl = dm['sum_gross_pnl_per_trade'] / n_chunks
+            avg_tc_taker = dm['sum_tc_per_trade'] / n_chunks
+            trade_frequency = dm['total_trades'] / dm['total_steps']
+
+            # Market orders (taker fee: 5 bps)
+            net_pnl_taker = avg_gross_pnl - avg_tc_taker
+
+            # Limit orders (maker fee: 0 bps or -2.5 bps rebate)
+            maker_fee_neutral = 0.0  # 0 bps
+            maker_fee_rebate = -0.00025  # -2.5 bps rebate
+
+            # Calculate maker TC assuming same position changes
+            avg_position_change = avg_tc_taker / 0.0005  # Reverse engineer position change
+            avg_tc_maker_neutral = maker_fee_neutral * avg_position_change
+            avg_tc_maker_rebate = maker_fee_rebate * avg_position_change
+
+            net_pnl_maker_neutral = avg_gross_pnl - avg_tc_maker_neutral
+            net_pnl_maker_rebate = avg_gross_pnl - avg_tc_maker_rebate
+
+            day_num = len([k for k in day_metrics.keys() if day_metrics[k]["chunks"] > 0])
+            total_days = len(set(e.parent_id if e.parent_id is not None else i for i, e in enumerate(episodes, 1)))
+
+            logger(f'    ┌─ Day {day_num}/{total_days} ({n_chunks} chunks, {dm["total_steps"]} steps)', "INFO")
+            logger(f'    │  Trading Activity: {dm["total_trades"]} trades ({trade_frequency:.1%} frequency)', "INFO")
+            logger(f'    │  Position Sizing: Mean={avg_position:.3f}, Max={dm["max_pos"]:.3f}', "INFO")
+            logger(f'    │  Action Uncertainty (σ): Mean={avg_uncertainty:.3f}, Range=[{dm["min_std"]:.3f}, {dm["max_std"]:.3f}]', "INFO")
+            logger(f'    │', "INFO")
+            logger(f'    │  Performance (Market Orders - Taker Fee 5 bps):', "INFO")
+            logger(f'    │    Gross PnL/Trade: {avg_gross_pnl:.8f}', "INFO")
+            logger(f'    │    TC/Trade:        {avg_tc_taker:.8f}', "INFO")
+            logger(f'    │    Net PnL/Trade:   {net_pnl_taker:.8f} ({"PROFIT" if net_pnl_taker > 0 else "LOSS"})', "INFO")
+            logger(f'    │', "INFO")
+            logger(f'    │  Alternative: Limit Orders (Maker Fee 0 bps):', "INFO")
+            logger(f'    │    Gross PnL/Trade: {avg_gross_pnl:.8f}', "INFO")
+            logger(f'    │    TC/Trade:        {avg_tc_maker_neutral:.8f}', "INFO")
+            logger(f'    │    Net PnL/Trade:   {net_pnl_maker_neutral:.8f} ({"PROFIT" if net_pnl_maker_neutral > 0 else "LOSS"})', "INFO")
+            logger(f'    │    Improvement:     {(net_pnl_maker_neutral - net_pnl_taker):.8f}', "INFO")
+            logger(f'    │', "INFO")
+            logger(f'    │  Alternative: Limit Orders (Maker Rebate -2.5 bps):', "INFO")
+            logger(f'    │    Gross PnL/Trade: {avg_gross_pnl:.8f}', "INFO")
+            logger(f'    │    TC/Trade:        {avg_tc_maker_rebate:.8f} (rebate)', "INFO")
+            logger(f'    │    Net PnL/Trade:   {net_pnl_maker_rebate:.8f} ({"PROFIT" if net_pnl_maker_rebate > 0 else "LOSS"})', "INFO")
+            logger(f'    │    Improvement:     {(net_pnl_maker_rebate - net_pnl_taker):.8f}', "INFO")
+            logger(f'    └─', "INFO")
 
     # Compute averages
     if val_metrics['episode_count'] > 0:

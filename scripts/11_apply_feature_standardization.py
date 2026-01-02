@@ -44,7 +44,11 @@ OUTPUT_COLLECTION_PREFIX = "split_"
 OUTPUT_COLLECTION_SUFFIX = "_output"  # Write for next stage (cyclic pattern)
 
 # Path to half-life selection results (relative to repository root)
-HALFLIFE_RESULTS_PATH = Path(REPO_ROOT) / "artifacts" / "ewma_halflife_selection" / "aggregation" / "final_halflifes.json"
+# Support both JSON (legacy) and CSV formats
+HALFLIFE_RESULTS_JSON = Path(REPO_ROOT) / "artifacts" / "ewma_halflife_selection" / "aggregation" / "final_halflifes.json"
+HALFLIFE_RESULTS_CSV = Path(REPO_ROOT) / "artifacts" / "ewma_halflife_selection" / "aggregation" / "halflife_frequency.csv"
+# Alternative CSV location
+HALFLIFE_RESULTS_CSV_ALT = Path(REPO_ROOT) / "artifacts" / "feature_scale" / "halflife_frequency.csv"
 
 CLIP_STD = 3.0
 
@@ -104,14 +108,53 @@ def main():
         requested_splits = None
     
     # Load half-life results from Stage 10
-    if not HALFLIFE_RESULTS_PATH.exists():
-        logger(f'ERROR: Half-life results not found at {HALFLIFE_RESULTS_PATH}', "ERROR")
-        logger('Please run Stage 10 (10_select_ewma_halflife.py) first', "ERROR")
+    # Try CSV first, then JSON
+    halflife_path = None
+    if HALFLIFE_RESULTS_CSV.exists():
+        halflife_path = HALFLIFE_RESULTS_CSV
+        logger(f'Loading half-lives from CSV: {halflife_path}', "INFO")
+    elif HALFLIFE_RESULTS_CSV_ALT.exists():
+        halflife_path = HALFLIFE_RESULTS_CSV_ALT
+        logger(f'Loading half-lives from CSV: {halflife_path}', "INFO")
+    elif HALFLIFE_RESULTS_JSON.exists():
+        halflife_path = HALFLIFE_RESULTS_JSON
+        logger(f'Loading half-lives from JSON: {halflife_path}', "INFO")
+    else:
+        logger(f'ERROR: Half-life results not found!', "ERROR")
+        logger(f'Checked locations:', "ERROR")
+        logger(f'  - {HALFLIFE_RESULTS_CSV}', "ERROR")
+        logger(f'  - {HALFLIFE_RESULTS_CSV_ALT}', "ERROR")
+        logger(f'  - {HALFLIFE_RESULTS_JSON}', "ERROR")
+        logger('Please run Stage 10 (10_feature_scale.py) first', "ERROR")
         return
-    
-    with open(HALFLIFE_RESULTS_PATH, 'r') as f:
-        final_halflifes = json.load(f)
-    
+
+    # Load based on file format
+    if halflife_path.suffix == '.csv':
+        import pandas as pd
+        df = pd.read_csv(halflife_path)
+
+        # Detect column names
+        if 'feature' in df.columns and 'half_life' in df.columns:
+            feature_col, halflife_col = 'feature', 'half_life'
+        elif 'feature' in df.columns and 'halflife' in df.columns:
+            feature_col, halflife_col = 'feature', 'halflife'
+        elif 'feature_name' in df.columns and 'half_life' in df.columns:
+            feature_col, halflife_col = 'feature_name', 'half_life'
+        else:
+            # Assume first two columns
+            feature_col, halflife_col = df.columns[0], df.columns[1]
+            logger(f'Using columns: {feature_col} (feature), {halflife_col} (half_life)', "INFO")
+
+        # Convert to dictionary
+        final_halflifes = {}
+        for _, row in df.iterrows():
+            feature = row[feature_col]
+            halflife = int(row[halflife_col])  # Convert to int
+            final_halflifes[feature] = halflife
+    else:  # JSON
+        with open(halflife_path, 'r') as f:
+            final_halflifes = json.load(f)
+
     logger(f'Loaded half-lives for {len(final_halflifes)} features', "INFO")
     
     # Show sample half-lives

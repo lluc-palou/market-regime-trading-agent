@@ -923,12 +923,18 @@ def train_split(
     # Setup CSV logging for epoch results
     results_csv_path = LOG_DIR / f"split_{split_id}_epoch_results.csv"
     csv_header = [
-        'epoch', 'train_sharpe', 'train_avg_reward', 'train_avg_pnl',
+        'epoch',
+        # Training metrics - all Sharpe scenarios
+        'train_sharpe_buyhold', 'train_sharpe_taker', 'train_sharpe_maker_neutral', 'train_sharpe_maker_rebate',
+        'train_avg_reward', 'train_avg_pnl',
         'train_policy_loss', 'train_value_loss', 'train_entropy',
         'train_uncertainty', 'train_activity',
-        'val_sharpe', 'val_avg_reward', 'val_avg_pnl',
+        # Validation metrics - all Sharpe scenarios
+        'val_sharpe_buyhold', 'val_sharpe_taker', 'val_sharpe_maker_neutral', 'val_sharpe_maker_rebate',
+        'val_avg_reward', 'val_avg_pnl',
         'val_policy_loss', 'val_value_loss', 'val_entropy',
-        'val_uncertainty', 'val_activity', 'learning_rate'
+        'val_uncertainty', 'val_activity',
+        'learning_rate'
     ]
 
     # Create CSV file with header
@@ -1010,7 +1016,11 @@ def train_split(
             writer = csv.writer(f)
             writer.writerow([
                 epoch + 1,  # Epoch number (1-indexed)
-                train_metrics["sharpe"],
+                # Training - all Sharpe scenarios
+                train_metrics["sharpe_raw"],
+                train_metrics["sharpe_taker"],
+                train_metrics["sharpe_maker_neutral"],
+                train_metrics["sharpe_maker_rebate"],
                 train_metrics["avg_reward"],
                 train_metrics["avg_pnl"],
                 train_metrics["avg_policy_loss"],
@@ -1018,7 +1028,11 @@ def train_split(
                 train_metrics["avg_entropy"],
                 train_metrics["avg_uncertainty"],
                 train_metrics["avg_activity"],
-                val_metrics["sharpe"],
+                # Validation - all Sharpe scenarios
+                val_metrics["sharpe_raw"],
+                val_metrics["sharpe_taker"],
+                val_metrics["sharpe_maker_neutral"],
+                val_metrics["sharpe_maker_rebate"],
                 val_metrics["avg_reward"],
                 val_metrics["avg_pnl"],
                 val_metrics["policy_loss"],

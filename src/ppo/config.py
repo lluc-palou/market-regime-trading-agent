@@ -11,6 +11,7 @@ class ExperimentType(Enum):
     EXP1_BOTH_ORIGINAL = 1      # Both codebook + features, train/val on original
     EXP2_FEATURES_ORIGINAL = 2  # Features only, train/val on original
     EXP3_CODEBOOK_ORIGINAL = 3  # Codebook only, train/val on original
+    EXP4_SYNTHETIC_BINS = 4     # Synthetic data with codebook bins (array of 1001) instead of indices
 
 
 @dataclass
@@ -107,8 +108,8 @@ class RewardConfig:
 @dataclass
 class TrainingConfig:
     """Training procedure configuration."""
-    max_epochs: int = 100                # Maximum training epochs (increased for RL exploration needs)
-    patience: int = 15                   # Early stopping patience (increased to allow more exploration)
+    max_epochs: int = 50                 # Maximum training epochs (adjusted for resource efficiency)
+    patience: int = 12                   # Early stopping patience (balanced exploration vs efficiency)
     min_delta: float = 0.01              # Minimum improvement for early stopping
     validate_every: int = 1              # Validate every epoch
     log_every: int = 10                  # Log every N episodes

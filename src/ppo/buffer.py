@@ -20,24 +20,33 @@ class Transition:
 
 
 class StateBuffer:
-    """Rolling window buffer for state construction."""
-    
-    def __init__(self, window_size: int):
+    """Rolling window buffer for state construction with tensor caching."""
+
+    def __init__(self, window_size: int, use_pinned_memory: bool = True):
         self.window_size = window_size
+        self.use_pinned_memory = use_pinned_memory
+
+        # Store as lists for fast append
         self.codebooks = deque(maxlen=window_size)
         self.features = deque(maxlen=window_size)
         self.timestamps = deque(maxlen=window_size)
-    
+
+        # Cache for avoiding tensor recreation
+        self._cached_state = None
+        self._cache_valid = False
+
     def add(self, codebook: int, features: torch.Tensor, timestamp: float):
         """Add new sample to buffer."""
         self.codebooks.append(codebook)
         self.features.append(features)
         self.timestamps.append(timestamp)
-    
+        # Invalidate cache when new data added
+        self._cache_valid = False
+
     def get_state(self) -> Optional[Dict[str, torch.Tensor]]:
         """
-        Return current state as tensors.
-        
+        Return current state as tensors with caching.
+
         Returns:
             None if buffer not full, otherwise dict with:
                 - codebooks: (window_size,)
@@ -46,22 +55,45 @@ class StateBuffer:
         """
         if len(self.codebooks) < self.window_size:
             return None
-        
-        return {
-            'codebooks': torch.tensor(list(self.codebooks), dtype=torch.long),
-            'features': torch.stack(list(self.features)),
-            'timestamps': torch.tensor(list(self.timestamps), dtype=torch.float32)
+
+        # Return cached state if valid
+        if self._cache_valid and self._cached_state is not None:
+            return self._cached_state
+
+        # Create new tensors with optional pinned memory
+        if self.use_pinned_memory:
+            codebooks_tensor = torch.tensor(
+                list(self.codebooks), dtype=torch.long
+            ).pin_memory()
+            features_tensor = torch.stack(list(self.features)).pin_memory()
+            timestamps_tensor = torch.tensor(
+                list(self.timestamps), dtype=torch.float32
+            ).pin_memory()
+        else:
+            codebooks_tensor = torch.tensor(list(self.codebooks), dtype=torch.long)
+            features_tensor = torch.stack(list(self.features))
+            timestamps_tensor = torch.tensor(list(self.timestamps), dtype=torch.float32)
+
+        self._cached_state = {
+            'codebooks': codebooks_tensor,
+            'features': features_tensor,
+            'timestamps': timestamps_tensor
         }
+        self._cache_valid = True
+
+        return self._cached_state
     
     def is_ready(self) -> bool:
         """Check if buffer has enough samples."""
         return len(self.codebooks) >= self.window_size
     
     def reset(self):
-        """Clear buffer."""
+        """Clear buffer and cache."""
         self.codebooks.clear()
         self.features.clear()
         self.timestamps.clear()
+        self._cached_state = None
+        self._cache_valid = False
 
 
 class TrajectoryBuffer:
@@ -93,15 +125,16 @@ class TrajectoryBuffer:
         if len(self.transitions) == 0:
             raise ValueError("Buffer is empty")
         
+        # Use non-blocking transfers for better performance (works with pinned memory)
         return {
-            'codebooks': torch.stack([t.codebooks for t in self.transitions]).to(device),
-            'features': torch.stack([t.features for t in self.transitions]).to(device),
-            'timestamps': torch.stack([t.timestamps for t in self.transitions]).to(device),
-            'actions': torch.tensor([t.action for t in self.transitions], dtype=torch.float32).to(device),
-            'log_probs': torch.tensor([t.log_prob for t in self.transitions], dtype=torch.float32).to(device),
-            'rewards': torch.tensor([t.reward for t in self.transitions], dtype=torch.float32).to(device),
-            'values': torch.tensor([t.value for t in self.transitions], dtype=torch.float32).to(device),
-            'dones': torch.tensor([t.done for t in self.transitions], dtype=torch.float32).to(device)
+            'codebooks': torch.stack([t.codebooks for t in self.transitions]).to(device, non_blocking=True),
+            'features': torch.stack([t.features for t in self.transitions]).to(device, non_blocking=True),
+            'timestamps': torch.stack([t.timestamps for t in self.transitions]).to(device, non_blocking=True),
+            'actions': torch.tensor([t.action for t in self.transitions], dtype=torch.float32).to(device, non_blocking=True),
+            'log_probs': torch.tensor([t.log_prob for t in self.transitions], dtype=torch.float32).to(device, non_blocking=True),
+            'rewards': torch.tensor([t.reward for t in self.transitions], dtype=torch.float32).to(device, non_blocking=True),
+            'values': torch.tensor([t.value for t in self.transitions], dtype=torch.float32).to(device, non_blocking=True),
+            'dones': torch.tensor([t.done for t in self.transitions], dtype=torch.float32).to(device, non_blocking=True)
         }
     
     def clear(self):

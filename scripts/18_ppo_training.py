@@ -253,9 +253,10 @@ def run_episode(
         if state is None:
             continue
 
-        codebooks = state['codebooks'].to(device)
-        features = state['features'].to(device)
-        timestamps = state['timestamps'].to(device)
+        # Use non-blocking transfers with pinned memory for better performance
+        codebooks = state['codebooks'].to(device, non_blocking=True)
+        features = state['features'].to(device, non_blocking=True)
+        timestamps = state['timestamps'].to(device, non_blocking=True)
 
         # Get current sample
         current_sample = episode.samples[t]

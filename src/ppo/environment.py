@@ -29,14 +29,16 @@ class Episode:
 
 
 class EpisodeLoader:
-    """Loads and manages episodes from MongoDB."""
+    """Loads and manages episodes from MongoDB with optional pre-tensorization."""
 
-    def __init__(self, config, episode_chunk_size: int = 120):
+    def __init__(self, config, episode_chunk_size: int = 120, pre_tensorize: bool = True, use_pinned_memory: bool = True):
         self.config = config
         self.client = MongoClient(config.mongodb_uri, serverSelectionTimeoutMS=5000)
         self.db = self.client[config.database_name]
         self.experiment_type = config.experiment_type
         self.episode_chunk_size = episode_chunk_size  # Split episodes into chunks of this size (e.g., 120 for 1 hour)
+        self.pre_tensorize = pre_tensorize  # Convert all data to tensors during loading
+        self.use_pinned_memory = use_pinned_memory  # Use pinned memory for faster GPU transfer
         self._ensure_indexes()
     
     def load_episodes(
@@ -107,15 +109,15 @@ class EpisodeLoader:
                 # Unix timestamp
                 date = datetime.fromtimestamp(timestamp).date()
             
-            # Prepare sample
+            # Prepare sample (defer tensorization until later for efficiency)
             sample = {
                 'codebook': doc['codebook_index'],  # Field name is 'codebook_index' in database
-                'features': torch.tensor(doc['features'], dtype=torch.float32),
+                'features': doc['features'],  # Keep as list for now
                 'timestamp': timestamp.timestamp() if isinstance(timestamp, datetime) else timestamp,
                 'target': doc['target'],
                 'fold_id': doc['fold_id']
             }
-            
+
             episodes_by_date[date].append(sample)
         
         # Create Episode objects (day-level first)
@@ -171,6 +173,29 @@ class EpisodeLoader:
                     episodes.append(chunk_episode)
                 parent_id += 1
 
+        # Tensorize all episode samples if enabled (batch operation for efficiency)
+        if self.pre_tensorize:
+            episodes = self._tensorize_episodes(episodes)
+
+        return episodes
+
+    def _tensorize_episodes(self, episodes: List[Episode]) -> List[Episode]:
+        """
+        Convert all episode sample data to tensors with optional pinned memory.
+        This is done in batch after loading for better performance.
+        """
+        logger(f"  Pre-tensorizing {len(episodes)} episodes...", "INFO")
+
+        for episode in episodes:
+            for sample in episode.samples:
+                # Convert features to tensor
+                if not isinstance(sample['features'], torch.Tensor):
+                    features_tensor = torch.tensor(sample['features'], dtype=torch.float32)
+                    if self.use_pinned_memory:
+                        features_tensor = features_tensor.pin_memory()
+                    sample['features'] = features_tensor
+
+        logger(f"  ✓ Episodes tensorized", "INFO")
         return episodes
 
     def _load_synthetic_episodes(
@@ -208,10 +233,10 @@ class EpisodeLoader:
         for doc in cursor:
             sequence_id = doc['sequence_id']
 
-            # Prepare sample (note: field name is 'codebook_ind' not 'codebook_index')
+            # Prepare sample (defer tensorization until later for efficiency)
             sample = {
                 'codebook': doc['codebook_ind'],  # Synthetic uses 'codebook_ind'
-                'features': torch.tensor(doc['features'], dtype=torch.float32),
+                'features': doc['features'],  # Keep as list for now
                 'timestamp': doc.get('timestamp', 0),  # Synthetic may not have real timestamps
                 'target': doc['target'],
                 'sequence_id': sequence_id,
@@ -237,6 +262,10 @@ class EpisodeLoader:
 
             episode = Episode(split_id, synthetic_date, samples, parent_id=sequence_id, chunk_id=0)
             episodes.append(episode)
+
+        # Tensorize all episode samples if enabled (batch operation for efficiency)
+        if self.pre_tensorize:
+            episodes = self._tensorize_episodes(episodes)
 
         return episodes
 

@@ -118,7 +118,7 @@ def load_multiple_hours_pymongo(
     db_name: str,
     split_collection: str,
     hours: List[datetime],
-    role: str
+    role: str = None
 ) -> Optional[torch.Tensor]:
     """
     Load multiple hours at once using $in query (even faster).
@@ -131,7 +131,7 @@ def load_multiple_hours_pymongo(
         db_name: Database name
         split_collection: Split collection name
         hours: List of hour start times to load
-        role: Filter by role
+        role: Filter by role (default: None = load all roles)
 
     Returns:
         torch.Tensor of LOB vectors or None if empty
@@ -156,9 +156,12 @@ def load_multiple_hours_pymongo(
 
     # Single query for all hours
     query = {
-        "$or": time_ranges,
-        "role": role
+        "$or": time_ranges
     }
+
+    # Only filter by role if specified
+    if role is not None:
+        query["role"] = role
 
     # Project only bins, sort by timestamp
     cursor = collection.find(

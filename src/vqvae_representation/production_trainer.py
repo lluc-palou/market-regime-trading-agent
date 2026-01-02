@@ -37,20 +37,30 @@ def run_production_training(
     production_dir: Path,
     mongo_uri: str = "mongodb://127.0.0.1:27017/",
     use_pymongo: bool = True,
-    split_ids_filter: List[int] = None
+    split_ids_filter: List[int] = None,
+    test_mode: bool = False,
+    test_collection: str = 'test_data'
 ) -> Dict:
     """
     Run complete production training pipeline.
 
-    Process:
+    TRAIN MODE Process:
     1. Discover available splits
     2. For each split:
-        - Train production model from scratch with early stopping
+        - Train production model from scratch on role='train' with early stopping
         - Save model artifacts
-        - Generate latent codes for all samples
+        - Generate latent codes for all samples (train+val)
         - Write to split_X_output collection
     3. Rename collections: split_X_output -> split_X_input
     4. Log summary to MLflow
+
+    TEST MODE Process:
+    1. For specified split(s):
+        - Train model on full split (all roles combined, no train/val distinction)
+        - Save model artifacts with '_full' suffix
+        - Generate latent codes for test_collection
+        - Write to test_data_latent collection (no renaming)
+    2. Log summary to MLflow
 
     Args:
         spark: SparkSession instance
@@ -64,14 +74,21 @@ def run_production_training(
         mongo_uri: MongoDB connection URI (default: "mongodb://127.0.0.1:27017/")
         use_pymongo: Use PyMongo for 10-50× faster data loading (default: True)
         split_ids_filter: Optional list of specific split IDs to process (default: None = all splits)
+        test_mode: Enable test mode (train on full split, encode test_data) (default: False)
+        test_collection: Collection name for test data (default: 'test_data')
 
     Returns:
         Dictionary with production training results
     """
     logger('=' * 100, "INFO")
-    logger('VQ-VAE PRODUCTION TRAINING', "INFO")
+    if test_mode:
+        logger('VQ-VAE PRODUCTION TRAINING - TEST MODE', "INFO")
+        logger('Training on full splits (all roles), encoding test_data', "INFO")
+    else:
+        logger('VQ-VAE PRODUCTION TRAINING - TRAIN MODE', "INFO")
+        logger('Training on role=train, encoding splits', "INFO")
     logger('=' * 100, "INFO")
-    
+
     # Discover available splits
     split_ids = discover_splits(spark, db_name, collection_prefix, collection_suffix)
 
@@ -150,8 +167,11 @@ def run_production_training(
                 nested=True
             ):
                 logger('', "INFO")
-                logger(f'Training production model for split {split_id}...', "INFO")
-                
+                if test_mode:
+                    logger(f'Training production model for split {split_id} (full split - all roles)...', "INFO")
+                else:
+                    logger(f'Training production model for split {split_id}...', "INFO")
+
                 # Train model
                 model, training_results = train_production_model(
                     spark=spark,
@@ -161,7 +181,9 @@ def run_production_training(
                     config=best_config,
                     all_hours=all_hours,
                     mongo_uri=mongo_uri,
-                    use_pymongo=use_pymongo
+                    use_pymongo=use_pymongo,
+                    train_role=None if test_mode else 'train',
+                    val_role=None if test_mode else 'validation'
                 )
                 
                 # Log training results to MLflow
@@ -174,38 +196,54 @@ def run_production_training(
                 mlflow.log_metric("val_codebook_usage", training_results['final_val_losses']['codebook_usage'])
                 
                 # Save model artifacts
-                model_path = production_dir / f"split_{split_id}_model.pth"
+                if test_mode:
+                    model_path = production_dir / f"split_{split_id}_full_model.pth"
+                else:
+                    model_path = production_dir / f"split_{split_id}_model.pth"
+
                 torch.save({
                     'model_state_dict': model.state_dict(),
                     'config': best_config,
                     'split_id': split_id,
-                    'training_results': training_results
+                    'training_results': training_results,
+                    'test_mode': test_mode
                 }, model_path)
-                
+
                 logger(f'Model saved to: {model_path}', "INFO")
                 mlflow.log_artifact(str(model_path))
-                
+
                 # Generate latent representations
                 logger('', "INFO")
-                logger(f'Generating latent representations for split {split_id}...', "INFO")
-                
+                if test_mode:
+                    logger(f'Generating latent representations for {test_collection}...', "INFO")
+                    # Get hours from test_collection
+                    test_hours = get_all_hours(spark, db_name, test_collection)
+                    encode_collection = test_collection
+                    encode_output = f"{test_collection}_latent"
+                    encode_hours = test_hours
+                else:
+                    logger(f'Generating latent representations for split {split_id}...', "INFO")
+                    encode_collection = split_collection
+                    encode_output = output_collection
+                    encode_hours = all_hours
+
                 # Clear output collection if exists
-                if output_collection in db.list_collection_names():
-                    db[output_collection].drop()
-                    logger(f'Cleared existing collection: {output_collection}', "INFO")
-                
+                if encode_output in db.list_collection_names():
+                    db[encode_output].drop()
+                    logger(f'Cleared existing collection: {encode_output}', "INFO")
+
                 # Generate and write latents
                 latent_gen = LatentGenerator(
                     spark=spark,
                     db_name=db_name,
-                    split_collection=split_collection,
-                    output_collection=output_collection,
+                    split_collection=encode_collection,
+                    output_collection=encode_output,
                     model=model,
                     device=device
                 )
-                
+
                 latent_stats = latent_gen.generate_and_write_latents(
-                    all_hours=all_hours,
+                    all_hours=encode_hours,
                     split_id=split_id
                 )
                 
@@ -236,25 +274,30 @@ def run_production_training(
                 logger(f'  Best validation loss: {training_results["best_val_loss"]:.4f}', "INFO")
                 logger(f'  Latent codes generated: {latent_stats["total_samples"]:,}', "INFO")
         
-        # Rename collections: split_X_output -> split_X_input
-        logger('', "INFO")
-        logger('=' * 100, "INFO")
-        logger('RENAMING OUTPUT COLLECTIONS', "INFO")
-        logger('=' * 100, "INFO")
-        
-        for split_id in split_ids:
-            input_collection = f"{collection_prefix}{split_id}{collection_suffix}"
-            output_collection = f"{collection_prefix}{split_id}_output"
-            
-            if output_collection in db.list_collection_names():
-                # Drop old input collection
-                if input_collection in db.list_collection_names():
-                    db[input_collection].drop()
-                    logger(f'Dropped old collection: {input_collection}', "INFO")
-                
-                # Rename output to input
-                db[output_collection].rename(input_collection)
-                logger(f'Renamed: {output_collection} -> {input_collection}', "INFO")
+        # Rename collections: split_X_output -> split_X_input (train mode only)
+        if not test_mode:
+            logger('', "INFO")
+            logger('=' * 100, "INFO")
+            logger('RENAMING OUTPUT COLLECTIONS', "INFO")
+            logger('=' * 100, "INFO")
+
+            for split_id in split_ids:
+                input_collection = f"{collection_prefix}{split_id}{collection_suffix}"
+                output_collection = f"{collection_prefix}{split_id}_output"
+
+                if output_collection in db.list_collection_names():
+                    # Drop old input collection
+                    if input_collection in db.list_collection_names():
+                        db[input_collection].drop()
+                        logger(f'Dropped old collection: {input_collection}', "INFO")
+
+                    # Rename output to input
+                    db[output_collection].rename(input_collection)
+                    logger(f'Renamed: {output_collection} -> {input_collection}', "INFO")
+        else:
+            logger('', "INFO")
+            logger('Test mode: Skipping collection renaming', "INFO")
+            logger(f'Latent codes saved to: test_data_latent (collection unchanged)', "INFO")
         
         # Save production summary
         summary_path = production_dir / 'production_summary.json'
@@ -309,13 +352,15 @@ def train_production_model(
     config: Dict,
     all_hours: List[datetime],
     mongo_uri: str = "mongodb://127.0.0.1:27017/",
-    use_pymongo: bool = True
+    use_pymongo: bool = True,
+    train_role: str = 'train',
+    val_role: str = 'validation'
 ) -> tuple:
     """
     Train a single production model for one split.
-    
+
     Uses the VQVAETrainer from Phase 1 but for production deployment.
-    
+
     Args:
         spark: SparkSession instance
         db_name: Database name
@@ -325,6 +370,8 @@ def train_production_model(
         all_hours: List of hourly time windows
         mongo_uri: MongoDB connection URI
         use_pymongo: Use PyMongo for fast data loading
+        train_role: Role to use for training (default: 'train', None for all roles)
+        val_role: Role to use for validation (default: 'validation', None for all roles)
 
     Returns:
         model: Trained VQVAEModel
@@ -338,7 +385,9 @@ def train_production_model(
         device=device,
         config=config,
         mongo_uri=mongo_uri,
-        use_pymongo=use_pymongo
+        use_pymongo=use_pymongo,
+        train_role=train_role,
+        val_role=val_role
     )
     
     # Train with early stopping

@@ -163,7 +163,7 @@ def load_hourly_batch(
     split_collection: str,
     hour_start: datetime,
     hour_end: datetime,
-    role: str
+    role: str = None
 ) -> Optional[torch.Tensor]:
     """
     Load one hour batch from split collection with TEMPORAL ORDERING.
@@ -176,7 +176,7 @@ def load_hourly_batch(
         split_collection: Split collection name
         hour_start: Start of hour window
         hour_end: End of hour window
-        role: Filter by role ('train', 'train_warmup', or 'validation')
+        role: Filter by role ('train', 'train_warmup', or 'validation'), or None for all roles
 
     Returns:
         torch.Tensor of LOB vectors (batch_size, B) or None if empty
@@ -187,15 +187,21 @@ def load_hourly_batch(
     start_str = hour_start.isoformat() + 'Z'
     end_str = hour_end.isoformat() + 'Z'
 
+    # Build match filter
+    match_filter = {
+        "timestamp": {
+            "$gte": {"$date": start_str},
+            "$lt": {"$date": end_str}
+        }
+    }
+
+    # Only filter by role if specified
+    if role is not None:
+        match_filter["role"] = role
+
     # MongoDB aggregation pipeline with temporal ordering
     pipeline = [
-        {"$match": {
-            "timestamp": {
-                "$gte": {"$date": start_str},
-                "$lt": {"$date": end_str}
-            },
-            "role": role
-        }},
+        {"$match": match_filter},
         {"$sort": {"timestamp": 1}},  # CRITICAL: Temporal ordering
         {"$project": {"bins": 1}}
     ]

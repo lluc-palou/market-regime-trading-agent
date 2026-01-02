@@ -51,7 +51,7 @@ class EpisodeLoader:
 
         Args:
             split_id: Split identifier
-            role: 'train' or 'val'
+            role: 'train', 'val', or None (None loads all roles)
 
         Returns:
             List of Episode objects
@@ -74,19 +74,25 @@ class EpisodeLoader:
 
         Args:
             split_id: Split identifier
-            role: 'train' or 'val'
+            role: 'train', 'val', or None (None loads all roles)
 
         Returns:
             List of Episode objects
         """
-        # Map 'val' to 'validation' for database query (DB uses 'validation', not 'val')
-        db_role = 'validation' if role == 'val' else role
-
         collection = self.db[f'split_{split_id}_input']  # Match VQVAE output naming convention
+
+        # Build query filter
+        if role is None:
+            # Load all roles
+            query_filter = {}
+        else:
+            # Map 'val' to 'validation' for database query (DB uses 'validation', not 'val')
+            db_role = 'validation' if role == 'val' else role
+            query_filter = {'role': db_role}
 
         # Query samples with role filter, sorted by timestamp
         cursor = collection.find(
-            {'role': db_role},
+            query_filter,
             sort=[('timestamp', 1)]
         )
         
@@ -211,19 +217,25 @@ class EpisodeLoader:
 
         Args:
             split_id: Split identifier
-            role: 'train' or 'val'
+            role: 'train', 'val', or None (None loads all roles)
 
         Returns:
             List of Episode objects (one per sequence)
         """
-        # Map 'val' to 'validation' for database query
-        db_role = 'validation' if role == 'val' else role
-
         collection = self.db[f'split_{split_id}_synthetic']  # Synthetic data collection
+
+        # Build query filter
+        if role is None:
+            # Load all roles
+            query_filter = {}
+        else:
+            # Map 'val' to 'validation' for database query
+            db_role = 'validation' if role == 'val' else role
+            query_filter = {'role': db_role}
 
         # Query synthetic samples with role filter, sorted by sequence and position
         cursor = collection.find(
-            {'role': db_role},
+            query_filter,
             sort=[('sequence_id', 1), ('position_in_sequence', 1)]
         )
 
@@ -267,6 +279,92 @@ class EpisodeLoader:
         if self.pre_tensorize:
             episodes = self._tensorize_episodes(episodes)
 
+        return episodes
+
+    def load_test_episodes(self, collection_name: str = 'test_data') -> List[Episode]:
+        """
+        Load episodes from test_data collection for final evaluation.
+
+        This method loads ALL episodes from the test collection (no role filter)
+        for final model evaluation.
+
+        Args:
+            collection_name: Name of test collection (default: 'test_data')
+
+        Returns:
+            List of Episode objects from test data
+        """
+        logger(f'Loading test episodes from {collection_name}...', "INFO")
+
+        collection = self.db[collection_name]
+
+        # Query all samples (no role filter for test data), sorted by timestamp
+        cursor = collection.find(
+            {},
+            sort=[('timestamp', 1)]
+        )
+
+        # Group samples by calendar day
+        episodes_by_date = defaultdict(list)
+
+        for doc in cursor:
+            # Extract date
+            timestamp = doc['timestamp']
+            if isinstance(timestamp, datetime):
+                date = timestamp.date()
+            else:
+                # Unix timestamp
+                date = datetime.fromtimestamp(timestamp).date()
+
+            # Prepare sample (defer tensorization until later for efficiency)
+            sample = {
+                'codebook': doc['codebook_index'],  # Field name is 'codebook_index' in database
+                'features': doc['features'],  # Keep as list for now
+                'timestamp': timestamp.timestamp() if isinstance(timestamp, datetime) else timestamp,
+                'target': doc['target'],
+                'fold_id': doc.get('fold_id', 0)  # Test data may not have fold_id
+            }
+
+            episodes_by_date[date].append(sample)
+
+        # Create Episode objects (day-level first)
+        # Use split_id=-1 for test data (no specific split)
+        test_split_id = -1
+        day_episodes = []
+
+        for date in sorted(episodes_by_date.keys()):
+            samples = episodes_by_date[date]
+            day_episodes.append(Episode(test_split_id, date, samples))
+
+        # Split each day episode into hourly chunks
+        episodes = []
+        parent_id = 0
+        for day_episode in day_episodes:
+            if len(day_episode) <= self.episode_chunk_size:
+                # Episode short enough, use as-is
+                episodes.append(day_episode)
+                parent_id += 1
+            else:
+                # Split into chunks
+                num_chunks = (len(day_episode) + self.episode_chunk_size - 1) // self.episode_chunk_size
+                for chunk_idx in range(num_chunks):
+                    start_idx = chunk_idx * self.episode_chunk_size
+                    end_idx = min(start_idx + self.episode_chunk_size, len(day_episode))
+                    chunk_samples = day_episode.samples[start_idx:end_idx]
+
+                    # Create chunk episode with parent tracking
+                    chunk_episode = Episode(
+                        test_split_id, day_episode.date, chunk_samples,
+                        parent_id=parent_id, chunk_id=chunk_idx
+                    )
+                    episodes.append(chunk_episode)
+                parent_id += 1
+
+        # Tensorize all episode samples if enabled (batch operation for efficiency)
+        if self.pre_tensorize:
+            episodes = self._tensorize_episodes(episodes)
+
+        logger(f'  Loaded {len(episodes)} test episodes', "INFO")
         return episodes
 
     def _ensure_indexes(self):

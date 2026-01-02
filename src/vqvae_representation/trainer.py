@@ -42,7 +42,9 @@ class VQVAETrainer:
         device: torch.device,
         config: Dict,
         mongo_uri: str = None,
-        use_pymongo: bool = True
+        use_pymongo: bool = True,
+        train_role: str = 'train',
+        val_role: str = 'validation'
     ):
         """
         Initialize VQ-VAE trainer.
@@ -55,6 +57,8 @@ class VQVAETrainer:
             config: Hyperparameter configuration
             mongo_uri: MongoDB connection URI (required if use_pymongo=True)
             use_pymongo: Use direct PyMongo for 10-50× faster data loading (default: True)
+            train_role: Role to use for training (default: 'train', None for all roles)
+            val_role: Role to use for validation (default: 'validation', None for all roles)
         """
         self.spark = spark
         self.db_name = db_name
@@ -63,6 +67,8 @@ class VQVAETrainer:
         self.config = config
         self.mongo_uri = mongo_uri
         self.use_pymongo = use_pymongo
+        self.train_role = train_role
+        self.val_role = val_role
         
         # Initialize model
         self.model = VQVAEModel(config).to(device)
@@ -276,7 +282,7 @@ class VQVAETrainer:
                     self.db_name,
                     self.split_collection,
                     hour_group,
-                    role='train'
+                    role=self.train_role
                 )
             else:
                 accumulated_samples = []
@@ -288,7 +294,7 @@ class VQVAETrainer:
                         self.split_collection,
                         hour,
                         hour_end,
-                        role='train'
+                        role=self.train_role
                     )
                     if batch is not None:
                         accumulated_samples.append(batch)
@@ -406,7 +412,7 @@ class VQVAETrainer:
                     self.db_name,
                     self.split_collection,
                     hour_group,
-                    role='validation'
+                    role=self.val_role
                 )
             else:
                 accumulated_samples = []
@@ -418,7 +424,7 @@ class VQVAETrainer:
                         self.split_collection,
                         hour,
                         hour_end,
-                        role='validation'
+                        role=self.val_role
                     )
                     if batch is not None:
                         accumulated_samples.append(batch)
@@ -527,7 +533,7 @@ class VQVAETrainer:
                     self.db_name,
                     self.split_collection,
                     hour_group,
-                    role='validation'
+                    role=self.val_role
                 )
             else:
                 accumulated_samples = []
@@ -539,7 +545,7 @@ class VQVAETrainer:
                         self.split_collection,
                         hour,
                         hour_end,
-                        role='validation'
+                        role=self.val_role
                     )
                     if batch is not None:
                         accumulated_samples.append(batch)

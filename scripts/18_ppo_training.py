@@ -310,6 +310,7 @@ def run_episode(
         # Compute reward using simple PnL-based formula
         # TRAINING SCENARIO: Maker neutral (0 bps transaction cost)
         # Agent learns to trade profitably with minimal friction
+        # reward = gross_pnl - 0.0 (no TC applied)
         reward, gross_pnl, tc = compute_simple_reward(
             position_prev, position_curr, target, taker_fee=0.0
         )
@@ -335,27 +336,31 @@ def run_episode(
 
         # Compute trading returns for all fee scenarios (all exclude directional bonus)
         # These are used for performance metrics (Sharpe ratio calculation)
+        # All scenarios computed from gross_pnl with their respective transaction costs
         position_change = abs(position_curr - position_prev)
 
         # 1. Baseline: Buy-and-hold (raw returns, no position sizing, no fees)
         # Equivalent to constant position of +1.0 (always long)
         trading_return_raw = target / realized_vol
 
-        # 2. Maker neutral (0 bps) - agent's position sizing with no transaction cost [TRAINING SCENARIO]
-        trading_return_maker_neutral = reward / realized_vol  # reward already has 0 bps TC
+        # 2. Maker neutral (0 bps) - agent's position sizing, no TC [TRAINING SCENARIO]
+        tc_maker_neutral = 0.0  # No transaction cost
+        reward_maker_neutral = gross_pnl - tc_maker_neutral
+        trading_return_maker_neutral = reward_maker_neutral / realized_vol
 
         # 3. Taker fee (5 bps) - market orders with agent's position sizing
-        tc_taker = 0.0005 * position_change
+        tc_taker = 0.0005 * position_change  # 5 basis points
         reward_taker = gross_pnl - tc_taker
         trading_return_taker = reward_taker / realized_vol
 
-        # 4. Maker fee rebate (-2.5 bps) - limit orders with agent's position sizing, with rebate
-        tc_maker_rebate = -0.00025 * position_change
+        # 4. Maker rebate (-2.5 bps) - limit orders with rebate
+        tc_maker_rebate = -0.00025 * position_change  # -2.5 basis points (rebate)
         reward_maker_rebate = gross_pnl - tc_maker_rebate
         trading_return_maker_rebate = reward_maker_rebate / realized_vol
 
         # Add directional bonus to reward for learning signal (PPO optimization)
         # Note: All trading_return_* exclude bonus for accurate performance metrics
+        # reward here is already maker_neutral (0 TC), so just add bonus and scale
         reward = (reward + directional_bonus) / realized_vol
 
         # Unrealized PnL for next timestep
@@ -375,7 +380,7 @@ def run_episode(
             position_curr, log_return, tc, reward, unrealized, gross_pnl, action_std_val,
             trading_return_raw, trading_return_taker, trading_return_maker_neutral, trading_return_maker_rebate
         )
-        episode_returns.append(trading_return_taker)  # Use taker for Sharpe (agent training scenario)
+        episode_returns.append(trading_return_maker_neutral)  # Maker neutral (0 bps) is training scenario
 
         # Check if episode should end
         done = (t >= valid_steps[-1])

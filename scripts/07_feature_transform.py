@@ -43,27 +43,8 @@ if sys.platform == 'win32':
         except:
             pass
 
-try:
-    from mlflow.tracking._tracking_service import client as mlflow_client
-    
-    _original_log_url = mlflow_client.TrackingServiceClient._log_url
-    
-    def _patched_log_url(self, run_id):
-        try:
-            run = self.get_run(run_id)
-            run_name = run.info.run_name or run_id
-            run_url = self._get_run_url(run.info.experiment_id, run_id)
-            sys.stdout.write(f"[RUN] View run {run_name} at: {run_url}\n")
-            sys.stdout.flush()
-        except:
-            pass
-    
-    mlflow_client.TrackingServiceClient._log_url = _patched_log_url
-except:
-    pass
+# MLflow removed - not needed for this pipeline
 # =================================================================================================
-
-import mlflow
 
 from src.utils.logging import logger, log_section
 from src.utils.spark import create_spark_session
@@ -73,10 +54,6 @@ from src.feature_transformation import (
     select_final_transforms,
     identify_feature_names_from_collection  # FIXED: Use aggregation-based function
 )
-from src.feature_transformation.mlflow_logger import (
-    log_split_results,
-    log_aggregated_results
-)
 
 # =================================================================================================
 # Configuration
@@ -85,9 +62,6 @@ from src.feature_transformation.mlflow_logger import (
 DB_NAME = "raw"
 INPUT_COLLECTION_PREFIX = "split_"
 INPUT_COLLECTION_SUFFIX = "_input"  # Split collections are named split_X_input
-
-MLFLOW_TRACKING_URI = "http://127.0.0.1:5000"
-MLFLOW_EXPERIMENT_NAME = "Feature_Transformation"
 
 TRAIN_SAMPLE_RATE = 0.1
 
@@ -153,15 +127,6 @@ def main(mode='train', test_split=0):
     if mode == 'test':
         logger(f'Test split: {test_split}', "INFO")
     logger('', "INFO")
-
-    # Setup MLflow
-    logger('Setting up MLflow...', "INFO")
-    try:
-        mlflow.set_tracking_uri(MLFLOW_TRACKING_URI)
-        mlflow.set_experiment(MLFLOW_EXPERIMENT_NAME)
-        logger(f'MLflow experiment: {MLFLOW_EXPERIMENT_NAME}', "INFO")
-    except Exception as e:
-        logger(f'MLflow setup failed (non-critical): {e}', "WARNING")
 
     # Create Spark session (uses default 8GB driver memory and jar path)
     logger('', "INFO")
@@ -316,10 +281,7 @@ def main(mode='train', test_split=0):
                 all_feature_names=all_feature_names  # Full list for array validation
             )
             all_split_results[split_id] = split_results
-            
-            # Log to MLflow
-            log_split_results(split_id, split_results, TRAIN_SAMPLE_RATE)
-        
+
         # Aggregate results across splits
         logger('', "INFO")
         log_section('AGGREGATING RESULTS ACROSS SPLITS')
@@ -329,10 +291,7 @@ def main(mode='train', test_split=0):
         logger('', "INFO")
         logger('Selecting final transformations...', "INFO")
         final_transforms = select_final_transforms(aggregated)
-        
-        # Log aggregated results
-        log_aggregated_results(aggregated, final_transforms)
-        
+
         # Save results
         results_dir = Path(REPO_ROOT) / 'artifacts' / 'feature_transformation'
         results_dir.mkdir(parents=True, exist_ok=True)

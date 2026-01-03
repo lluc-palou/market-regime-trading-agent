@@ -923,7 +923,7 @@ def train_split(
 
     logger(f'Agent initialized: {agent.count_parameters():,} parameters', "INFO")
     logger(f'Learning rate scheduler: ReduceLROnPlateau (factor=0.3, patience=2)', "INFO")
-    logger(f'Loss coefficients: entropy={config.ppo.entropy_coef}, uncertainty={config.ppo.uncertainty_coef}, activity={config.ppo.activity_coef}', "INFO")
+    logger(f'Loss coefficients: entropy={config.ppo.entropy_coef}, uncertainty={config.ppo.uncertainty_coef}, turnover={config.ppo.turnover_coef}', "INFO")
 
     # Setup CSV logging for epoch results
     results_csv_path = LOG_DIR / f"split_{split_id}_epoch_results.csv"
@@ -1142,7 +1142,7 @@ def train_test_mode(
 
     logger(f'Agent initialized: {agent.count_parameters():,} parameters', "INFO")
     logger(f'Learning rate scheduler: ReduceLROnPlateau (factor=0.3, patience=2)', "INFO")
-    logger(f'Loss coefficients: entropy={config.ppo.entropy_coef}, uncertainty={config.ppo.uncertainty_coef}, activity={config.ppo.activity_coef}', "INFO")
+    logger(f'Loss coefficients: entropy={config.ppo.entropy_coef}, uncertainty={config.ppo.uncertainty_coef}, turnover={config.ppo.turnover_coef}', "INFO")
 
     # Setup CSV logging for epoch results
     results_csv_path = LOG_DIR / f"test_split_{test_split}_epoch_results.csv"

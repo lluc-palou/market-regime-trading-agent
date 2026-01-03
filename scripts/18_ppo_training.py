@@ -348,8 +348,8 @@ def run_episode(
         reward_maker_neutral = gross_pnl - tc_maker_neutral
         trading_return_maker_neutral = reward_maker_neutral / realized_vol
 
-        # 3. Taker fee (5 bps) - market orders with agent's position sizing [TRAINING SCENARIO]
-        tc_taker = 0.0005 * position_change  # 5 basis points
+        # 3. Taker fee (10 bps) - market orders with agent's position sizing [TRAINING SCENARIO]
+        tc_taker = 0.001 * position_change  # 10 basis points (matches training reward)
         reward_taker = gross_pnl - tc_taker
         trading_return_taker = reward_taker / realized_vol
 

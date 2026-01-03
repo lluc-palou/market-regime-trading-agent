@@ -411,65 +411,26 @@ def main():
             logger('', "INFO")
 
             # ==============================================================================
-            # STEP 1: FIT SCALERS on split_0 (if not already fitted) and SAVE
+            # LOAD FITTED SCALERS and APPLY to test_data
             # ==============================================================================
-
-            # Check if scaler states already exist
-            scaler_states_exist = TEST_MODE_SCALER_STATES.exists()
-
-            if scaler_states_exist:
-                logger('=' * 80, "INFO")
-                logger('SCALER STATES ALREADY EXIST', "INFO")
-                logger('=' * 80, "INFO")
-                logger(f'Found: {TEST_MODE_SCALER_STATES}', "INFO")
-                logger('Skipping fitting phase - will use existing fitted parameters', "INFO")
-                logger('(To refit, delete the file and re-run)', "INFO")
-                logger('', "INFO")
-            else:
-                logger('=' * 80, "INFO")
-                logger(f'STEP 1: Fitting scalers on split_{test_split} (train+val)', "INFO")
-                logger('=' * 80, "INFO")
-                logger(f'Input: split_{test_split}_input', "INFO")
-                logger(f'Output: split_{test_split}_output', "INFO")
-                logger('Scalers will be fitted on role=train data incrementally', "INFO")
-                logger('', "INFO")
-
-                # Initialize applicator for fitting
-                applicator_fit = EWMAStandardizationApplicator(
-                    spark=spark,
-                    db_name=DB_NAME,
-                    final_halflifes=final_halflifes,
-                    clip_std=CLIP_STD
-                )
-
-                # Process split to fit scalers
-                applicator_fit.apply_to_split(
-                    split_id=test_split,
-                    feature_names=all_feature_names,
-                    input_collection_prefix="split_",
-                    input_collection_suffix="_input",
-                    output_collection_prefix="split_",
-                    output_collection_suffix="_output"
-                )
-
-                logger('', "INFO")
-                logger(f'✓ Fitted scalers on split_{test_split} training data', "INFO")
-                logger(f'✓ Created split_{test_split}_output', "INFO")
-
-                # Save scaler states to file
-                logger('', "INFO")
-                logger('Saving fitted scaler states...', "INFO")
-                save_scaler_states(applicator_fit, TEST_MODE_SCALER_STATES)
-                logger('', "INFO")
-
-            # ==============================================================================
-            # STEP 2: LOAD FITTED SCALERS and APPLY to test_data
-            # ==============================================================================
+            # NOTE: Scaler states must be fitted by Stage 10 (test mode) first!
             logger('=' * 80, "INFO")
-            logger('STEP 2: Applying fitted scalers to test_data', "INFO")
+            logger('APPLYING FITTED SCALERS TO TEST_DATA', "INFO")
             logger('=' * 80, "INFO")
-            logger('Input: test_data', "INFO")
-            logger('Output: test_data_standardized', "INFO")
+
+            # Check if scaler states exist (fitted by Stage 10)
+            if not TEST_MODE_SCALER_STATES.exists():
+                logger('', "ERROR")
+                logger('ERROR: Scaler states not found!', "ERROR")
+                logger(f'Expected: {TEST_MODE_SCALER_STATES}', "ERROR")
+                logger('', "ERROR")
+                logger('You must run Stage 10 in test mode FIRST to fit scalers:', "ERROR")
+                logger('  python scripts/10_ewma_halflife_selection.py --mode test', "ERROR")
+                logger('', "ERROR")
+                raise FileNotFoundError(f"Scaler states not found: {TEST_MODE_SCALER_STATES}")
+
+            logger(f'Input: test_data', "INFO")
+            logger(f'Output: test_data_standardized', "INFO")
             logger(f'Loading scaler states from: {TEST_MODE_SCALER_STATES}', "INFO")
             logger('', "INFO")
 

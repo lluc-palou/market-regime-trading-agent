@@ -3,6 +3,9 @@ Feature Transformation Selection Script (Stage 07)
 
 Selects optimal normalization transformations for LOB features using CPCV splits.
 
+TRAIN MODE: Processes all splits, selects best transforms across splits
+TEST MODE: Processes split_0 only, saves test_mode artifacts
+
 Input: split_X collections with 18 features
 Processes: 16 features (excludes volatility and fwd_logret_1)
 Output: Transformation selections for 16 features
@@ -12,11 +15,13 @@ Exclusions from transformation:
 - fwd_logret_1: Target variable, keep original scale
 
 Usage:
-    python scripts/07_feature_transform.py
+    TRAIN: python scripts/07_feature_transform.py --mode train
+    TEST:  python scripts/07_feature_transform.py --mode test --test-split 0
 """
 
 import os
 import sys
+import argparse
 from pathlib import Path
 
 # Setup paths

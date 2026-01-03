@@ -157,13 +157,6 @@ class ActorCriticTransformer(nn.Module):
         log_std = self.actor_logstd(last_hidden)
         log_std = torch.clamp(log_std, self.config.min_log_std, self.config.max_log_std)
 
-        # Enforce std bounds to balance exploration and confidence
-        # Min 0.3: Prevents entropy collapse (entropy >= 0.22)
-        # Max 2.0: Prevents extreme uncertainty that leads to random actions
-        std = torch.exp(log_std)
-        std = torch.clamp(std, min=0.3, max=2.0)
-        log_std = torch.log(std)
-
         # Critic: state value
         value = self.critic(last_hidden)
 
@@ -367,13 +360,6 @@ class ActorCriticFeatures(nn.Module):
         log_std = self.actor_logstd(last_hidden)
         log_std = torch.clamp(log_std, self.config.min_log_std, self.config.max_log_std)
 
-        # Enforce std bounds to balance exploration and confidence
-        # Min 0.3: Prevents entropy collapse (entropy >= 0.22)
-        # Max 2.0: Prevents extreme uncertainty that leads to random actions
-        std = torch.exp(log_std)
-        std = torch.clamp(std, min=0.3, max=2.0)
-        log_std = torch.log(std)
-
         # Critic: state value
         value = self.critic(last_hidden)
 
@@ -566,13 +552,6 @@ class ActorCriticCodebook(nn.Module):
         mean = self.actor_mean(last_hidden)
         log_std = self.actor_logstd(last_hidden)
         log_std = torch.clamp(log_std, self.config.min_log_std, self.config.max_log_std)
-
-        # Enforce std bounds to balance exploration and confidence
-        # Min 0.3: Prevents entropy collapse (entropy >= 0.22)
-        # Max 2.0: Prevents extreme uncertainty that leads to random actions
-        std = torch.exp(log_std)
-        std = torch.clamp(std, min=0.3, max=2.0)
-        log_std = torch.log(std)
 
         # Critic: state value
         value = self.critic(last_hidden)

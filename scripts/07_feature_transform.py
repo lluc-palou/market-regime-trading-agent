@@ -149,22 +149,30 @@ def main(mode='train', test_split=0):
     """Main execution function."""
     log_section(f'FEATURE TRANSFORMATION SELECTION (STAGE 07) - {mode.upper()} MODE')
 
-    # Setup MLflow
-    mlflow.set_tracking_uri(MLFLOW_TRACKING_URI)
-    mlflow.set_experiment(MLFLOW_EXPERIMENT_NAME)
-    logger(f'MLflow experiment: {MLFLOW_EXPERIMENT_NAME}', "INFO")
     logger(f'Mode: {mode}', "INFO")
     if mode == 'test':
         logger(f'Test split: {test_split}', "INFO")
-    
+    logger('', "INFO")
+
+    # Setup MLflow
+    logger('Setting up MLflow...', "INFO")
+    try:
+        mlflow.set_tracking_uri(MLFLOW_TRACKING_URI)
+        mlflow.set_experiment(MLFLOW_EXPERIMENT_NAME)
+        logger(f'MLflow experiment: {MLFLOW_EXPERIMENT_NAME}', "INFO")
+    except Exception as e:
+        logger(f'MLflow setup failed (non-critical): {e}', "WARNING")
+
     # Create Spark session (uses default 8GB driver memory and jar path)
     logger('', "INFO")
-    logger('Initializing Spark...', "INFO")
+    logger('Initializing Spark session...', "INFO")
+    logger('This may take 10-30 seconds on first run...', "INFO")
     spark = create_spark_session(
         app_name="FeatureTransformSelection",
         db_name=DB_NAME,
         mongo_uri=MONGO_URI
     )
+    logger('Spark session created successfully', "INFO")
     
     try:
         # Get feature names from first split using aggregation

@@ -84,14 +84,14 @@ class PPOConfig:
     weight_decay: float = 1e-3           # L2 regularization
     gamma: float = 0.95                  # Discount factor
     gae_lambda: float = 0.95             # GAE lambda parameter
-    clip_ratio: float = 0.1              # PPO clipping parameter (reduced for stability with high variance)
-    value_coef: float = 1.0              # Value loss coefficient (increased for better value estimates)
-    entropy_coef: float = 0.05           # Entropy coefficient (conservative increase to prevent deterministic collapse)
-    uncertainty_coef: float = 0.1        # Uncertainty penalty coefficient (prevents std exploitation)
+    clip_ratio: float = 0.2              # PPO clipping parameter (increased from 0.1 for better policy updates)
+    value_coef: float = 0.5              # Value loss coefficient (reduced to balance with policy loss)
+    entropy_coef: float = 0.01           # Entropy coefficient (encourages exploration)
+    uncertainty_coef: float = 0.05       # Uncertainty penalty coefficient (prevents std exploitation)
     activity_coef: float = 0.0005        # Inactivity penalty coefficient (reduced to learn quality over quantity)
     max_grad_norm: float = 0.5           # Gradient clipping norm
-    n_epochs: int = 1                    # PPO epochs per update (reduced for speed - still effective)
-    batch_size: int = 2048               # Minibatch size (maximized for GPU - processes entire buffer in one batch)
+    n_epochs: int = 4                    # PPO epochs per update (INCREASED from 1 - critical for learning)
+    batch_size: int = 512                # Minibatch size (reduced for multiple gradient updates per epoch)
     buffer_capacity: int = 2048          # Trajectory buffer size (increased 4x)
     
 

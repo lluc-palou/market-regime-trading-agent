@@ -94,8 +94,15 @@ def ppo_update(
     )
 
     # Normalize advantages for policy gradient (stabilizes training)
-    # NOTE: returns are NOT normalized - value function learns raw reward scale
-    advantages = (advantages - advantages.mean()) / (advantages.std() + 1e-8)
+    advantages_mean = advantages.mean()
+    advantages_std = advantages.std()
+    advantages = (advantages - advantages_mean) / (advantages_std + 1e-8)
+
+    # Normalize returns for value loss (stabilizes learning with non-stationary reward scale)
+    # CRITICAL FIX: Value function struggles with raw returns when reward scale changes
+    returns_mean = returns.mean()
+    returns_std = returns.std()
+    returns_normalized = (returns - returns_mean) / (returns_std + 1e-8)
     
     # PPO epochs
     total_policy_loss = 0
@@ -103,6 +110,8 @@ def ppo_update(
     total_entropy = 0
     total_uncertainty = 0
     total_activity = 0
+    total_clip_fraction = 0  # Track how often clipping activates
+    total_approx_kl = 0      # Track KL divergence
     n_updates = 0
     
     for epoch in range(config.n_epochs):
@@ -119,7 +128,7 @@ def ppo_update(
             mb_actions = actions[start:end]
             mb_old_log_probs = old_log_probs[start:end]
             mb_advantages = advantages[start:end]
-            mb_returns = returns[start:end]
+            mb_returns = returns_normalized[start:end]  # Use normalized returns
 
             # Forward pass - call evaluate_actions with correct arguments based on experiment
             from src.ppo.config import ExperimentType
@@ -147,8 +156,14 @@ def ppo_update(
             surr2 = torch.clamp(ratio, 1 - config.clip_ratio, 1 + config.clip_ratio) * mb_advantages
             policy_loss = -torch.min(surr1, surr2).mean()
 
+            # Diagnostic: Track clipping fraction (how often ratio is clipped)
+            clip_fraction = torch.mean((torch.abs(ratio - 1.0) > config.clip_ratio).float()).item()
+
+            # Diagnostic: Approximate KL divergence (for early stopping)
+            approx_kl = ((ratio - 1.0) - torch.log(ratio)).mean().item()
+
             # Value loss (MSE)
-            # Uses RAW (unnormalized) returns - value function predicts actual reward scale
+            # FIXED: Now uses NORMALIZED returns for stable learning with non-stationary reward scale
             value_loss = F.mse_loss(new_values, mb_returns)
 
             # Fixed entropy bonus (encourages exploration)
@@ -184,6 +199,8 @@ def ppo_update(
             total_entropy += entropy.mean().item()
             total_uncertainty += std.mean().item()
             total_activity += torch.abs(mb_actions).mean().item()  # Still track activity for interpretability
+            total_clip_fraction += clip_fraction
+            total_approx_kl += approx_kl
             n_updates += 1
 
     return {
@@ -192,5 +209,11 @@ def ppo_update(
         'entropy': total_entropy / n_updates,
         'uncertainty': total_uncertainty / n_updates,
         'activity': total_activity / n_updates,  # Average |actions|
+        'clip_fraction': total_clip_fraction / n_updates,  # How often clipping occurs
+        'approx_kl': total_approx_kl / n_updates,  # Approximate KL divergence
+        'advantages_mean': advantages_mean.item(),  # Raw advantage statistics
+        'advantages_std': advantages_std.item(),
+        'returns_mean': returns_mean.item(),  # Raw return statistics
+        'returns_std': returns_std.item(),
         'n_updates': n_updates
     }

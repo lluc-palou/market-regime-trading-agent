@@ -156,10 +156,16 @@ class ActorCriticTransformer(nn.Module):
         mean = self.actor_mean(last_hidden)
         log_std = self.actor_logstd(last_hidden)
         log_std = torch.clamp(log_std, self.config.min_log_std, self.config.max_log_std)
-        
+
+        # Enforce minimum std to prevent entropy collapse (std >= 0.3)
+        # This ensures entropy >= 1.4189 + log(0.3) ≈ 0.22 (always positive)
+        std = torch.exp(log_std)
+        std = torch.clamp(std, min=0.3, max=10.0)
+        log_std = torch.log(std)
+
         # Critic: state value
         value = self.critic(last_hidden)
-        
+
         return mean, log_std, value
     
     def act(
@@ -360,6 +366,12 @@ class ActorCriticFeatures(nn.Module):
         log_std = self.actor_logstd(last_hidden)
         log_std = torch.clamp(log_std, self.config.min_log_std, self.config.max_log_std)
 
+        # Enforce minimum std to prevent entropy collapse (std >= 0.3)
+        # This ensures entropy >= 1.4189 + log(0.3) ≈ 0.22 (always positive)
+        std = torch.exp(log_std)
+        std = torch.clamp(std, min=0.3, max=10.0)
+        log_std = torch.log(std)
+
         # Critic: state value
         value = self.critic(last_hidden)
 
@@ -552,6 +564,12 @@ class ActorCriticCodebook(nn.Module):
         mean = self.actor_mean(last_hidden)
         log_std = self.actor_logstd(last_hidden)
         log_std = torch.clamp(log_std, self.config.min_log_std, self.config.max_log_std)
+
+        # Enforce minimum std to prevent entropy collapse (std >= 0.3)
+        # This ensures entropy >= 1.4189 + log(0.3) ≈ 0.22 (always positive)
+        std = torch.exp(log_std)
+        std = torch.clamp(std, min=0.3, max=10.0)
+        log_std = torch.log(std)
 
         # Critic: state value
         value = self.critic(last_hidden)

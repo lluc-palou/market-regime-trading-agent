@@ -50,6 +50,10 @@ HALFLIFE_RESULTS_CSV = Path(REPO_ROOT) / "artifacts" / "ewma_halflife_selection"
 # Alternative CSV location
 HALFLIFE_RESULTS_CSV_ALT = Path(REPO_ROOT) / "artifacts" / "feature_scale" / "halflife_frequency.csv"
 
+# Scaler state artifacts (fitted parameters)
+SCALER_STATES_DIR = Path(REPO_ROOT) / "artifacts" / "ewma_standardization" / "scaler_states"
+TEST_MODE_SCALER_STATES = SCALER_STATES_DIR / "test_mode_scaler_states.json"
+
 CLIP_STD = 3.0
 
 MONGO_URI = "mongodb://127.0.0.1:27017/"
@@ -59,6 +63,55 @@ DRIVER_MEMORY = "4g"
 # =================================================================================================
 # Main Execution
 # =================================================================================================
+
+def save_scaler_states(applicator: EWMAStandardizationApplicator, filepath: Path):
+    """
+    Save fitted scaler states to JSON file.
+
+    Args:
+        applicator: EWMAStandardizationApplicator with fitted scalers
+        filepath: Path to save scaler states
+    """
+    scaler_states = applicator.get_scaler_states()
+
+    # Ensure directory exists
+    filepath.parent.mkdir(parents=True, exist_ok=True)
+
+    # Save to JSON
+    with open(filepath, 'w') as f:
+        json.dump(scaler_states, f, indent=2)
+
+    logger(f'Saved scaler states to: {filepath}', "INFO")
+    logger(f'  Features: {len(scaler_states)}', "INFO")
+
+
+def load_scaler_states(applicator: EWMAStandardizationApplicator, filepath: Path):
+    """
+    Load fitted scaler states from JSON file and update applicator scalers.
+
+    Args:
+        applicator: EWMAStandardizationApplicator to update
+        filepath: Path to load scaler states from
+    """
+    if not filepath.exists():
+        raise FileNotFoundError(f"Scaler states file not found: {filepath}")
+
+    # Load from JSON
+    with open(filepath, 'r') as f:
+        scaler_states = json.load(f)
+
+    # Update each scaler with loaded state
+    for feat_name, state in scaler_states.items():
+        if feat_name in applicator.scalers:
+            scaler = applicator.scalers[feat_name]
+            scaler.ewma_mean = state['ewma_mean']
+            scaler.ewma_var = state['ewma_var']
+            scaler.initialized = True
+            scaler.n_samples = state['n_samples']
+
+    logger(f'Loaded scaler states from: {filepath}', "INFO")
+    logger(f'  Features: {len(scaler_states)}', "INFO")
+
 
 def parse_args():
     """Parse command line arguments."""
@@ -357,25 +410,27 @@ def main():
             logger('Timestamp index created/verified', "INFO")
             logger('', "INFO")
 
-            # Initialize applicator
-            applicator = EWMAStandardizationApplicator(
+            # ==============================================================================
+            # STEP 1: FIT SCALERS on split_0 (train+val combined) and SAVE
+            # ==============================================================================
+            logger('=' * 80, "INFO")
+            logger(f'STEP 1: Fitting scalers on split_{test_split} (train+val)', "INFO")
+            logger('=' * 80, "INFO")
+            logger(f'Input: split_{test_split}_input', "INFO")
+            logger(f'Output: split_{test_split}_output', "INFO")
+            logger('Scalers will be fitted on role=train data incrementally', "INFO")
+            logger('', "INFO")
+
+            # Initialize applicator for fitting
+            applicator_fit = EWMAStandardizationApplicator(
                 spark=spark,
                 db_name=DB_NAME,
                 final_halflifes=final_halflifes,
                 clip_std=CLIP_STD
             )
 
-            # STEP 1: Process test_split to fit scalers and create split_X_output
-            # This also initializes scalers on training data (role='train')
-            logger('=' * 80, "INFO")
-            logger(f'STEP 1: Processing split_{test_split} to fit scalers', "INFO")
-            logger('=' * 80, "INFO")
-            logger(f'Input: split_{test_split}_input', "INFO")
-            logger(f'Output: split_{test_split}_output', "INFO")
-            logger('Scalers will be fitted on role=train data during processing', "INFO")
-            logger('', "INFO")
-
-            applicator.apply_to_split(
+            # Process split to fit scalers
+            applicator_fit.apply_to_split(
                 split_id=test_split,
                 feature_names=all_feature_names,
                 input_collection_prefix="split_",
@@ -385,20 +440,40 @@ def main():
             )
 
             logger('', "INFO")
-            logger(f'✓ Scalers fitted on split_{test_split} training data', "INFO")
+            logger(f'✓ Fitted scalers on split_{test_split} training data', "INFO")
             logger(f'✓ Created split_{test_split}_output', "INFO")
+
+            # Save scaler states to file
+            logger('', "INFO")
+            logger('Saving fitted scaler states...', "INFO")
+            save_scaler_states(applicator_fit, TEST_MODE_SCALER_STATES)
             logger('', "INFO")
 
-            # STEP 2: Apply fitted scalers to test_data
+            # ==============================================================================
+            # STEP 2: LOAD FITTED SCALERS and APPLY to test_data
+            # ==============================================================================
             logger('=' * 80, "INFO")
             logger('STEP 2: Applying fitted scalers to test_data', "INFO")
             logger('=' * 80, "INFO")
             logger('Input: test_data', "INFO")
             logger('Output: test_data_standardized', "INFO")
-            logger('Using scalers fitted in STEP 1 (transform only, no updates)', "INFO")
+            logger(f'Loading scaler states from: {TEST_MODE_SCALER_STATES}', "INFO")
             logger('', "INFO")
 
-            total_processed = applicator.apply_to_collection(
+            # Initialize fresh applicator for test_data
+            applicator_test = EWMAStandardizationApplicator(
+                spark=spark,
+                db_name=DB_NAME,
+                final_halflifes=final_halflifes,
+                clip_std=CLIP_STD
+            )
+
+            # Load fitted scaler states
+            load_scaler_states(applicator_test, TEST_MODE_SCALER_STATES)
+            logger('', "INFO")
+
+            # Apply to test_data (transform only, no fitting)
+            total_processed = applicator_test.apply_to_collection(
                 input_collection='test_data',
                 output_collection='test_data_standardized',
                 feature_names=all_feature_names

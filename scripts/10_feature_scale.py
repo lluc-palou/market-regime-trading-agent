@@ -331,8 +331,7 @@ def main(mode='train', test_split=0):
         # Save results
         results_dir = Path(REPO_ROOT) / 'artifacts' / 'ewma_halflife_selection'
         results_dir.mkdir(parents=True, exist_ok=True)
-        
-        import json
+
         results_file = results_dir / 'standardization_selection.json'
         with open(results_file, 'w') as f:
             json.dump({

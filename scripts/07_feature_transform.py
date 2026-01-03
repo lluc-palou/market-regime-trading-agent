@@ -54,6 +54,7 @@ from src.feature_transformation import (
     select_final_transforms,
     identify_feature_names_from_collection  # FIXED: Use aggregation-based function
 )
+from src.feature_transformation.transformation_application import fit_selected_transforms_on_full_data
 
 # =================================================================================================
 # Configuration
@@ -178,73 +179,64 @@ def main(mode='train', test_split=0):
             raise ValueError(f'No split collections found matching pattern: {INPUT_COLLECTION_PREFIX}X{INPUT_COLLECTION_SUFFIX}')
 
         # ============================================================================
-        # TEST MODE: Process split_0 only, save artifacts
+        # TEST MODE: Fit selected transforms on split_0 (ONE PASS)
         # ============================================================================
         if mode == 'test':
             logger(f'Found {len(split_ids)} split collections', "INFO")
-            logger(f'TEST MODE: Processing only split_{test_split}', "INFO")
-            logger(f'Processing {len(feature_names)} transformable features', "INFO")
+            logger(f'TEST MODE: Fitting selected transforms on split_{test_split}', "INFO")
             logger('', "INFO")
+
+            # Load selected transformations from train mode artifacts
+            import json
+            aggregation_dir = Path(REPO_ROOT) / 'artifacts' / 'feature_transformation' / 'aggregation'
+            final_transforms_path = aggregation_dir / 'final_transforms.json'
+
+            if not final_transforms_path.exists():
+                raise FileNotFoundError(
+                    f"Train mode transformations not found at {final_transforms_path}\n"
+                    f"Please run Stage 7 in train mode first: python scripts/07_feature_transform.py --mode train"
+                )
+
+            with open(final_transforms_path, 'r') as f:
+                final_transforms = json.load(f)
+
+            logger(f'Loaded {len(final_transforms)} selected transforms from train mode', "INFO")
+            logger(f'From: {final_transforms_path}', "INFO")
+            logger('', "INFO")
+
+            # Filter to only transformable features present in data
+            final_transforms_filtered = {
+                feat: transform for feat, transform in final_transforms.items()
+                if feat in feature_names
+            }
+
+            logger(f'Will fit {len(final_transforms_filtered)} transforms on split_{test_split}', "INFO")
             logger('=' * 80, "INFO")
-            logger('STARTING TRANSFORMATION FITTING - This may take several minutes', "INFO")
-            logger('The processor will fit transformations on training data hour-by-hour', "INFO")
+            logger('FITTING SELECTED TRANSFORMATIONS (ONE PASS)', "INFO")
+            logger('This fits only the best transforms from train mode on 100% of split_0 data', "INFO")
             logger('=' * 80, "INFO")
             logger('', "INFO")
 
-            # Initialize processor
-            processor = FeatureTransformProcessor(
+            # Fit selected transforms on full split_0 data (one pass)
+            collection_name = f"{INPUT_COLLECTION_PREFIX}{test_split}{INPUT_COLLECTION_SUFFIX}"
+            fitted_params = fit_selected_transforms_on_full_data(
                 spark=spark,
                 db_name=DB_NAME,
-                input_collection_prefix=INPUT_COLLECTION_PREFIX,
-                input_collection_suffix=INPUT_COLLECTION_SUFFIX,
-                train_sample_rate=TRAIN_SAMPLE_RATE
+                collection=collection_name,
+                feature_names=all_feature_names,
+                final_transforms=final_transforms_filtered
             )
-
-            # Process test split
-            logger(f'Calling processor.process_split() for split_{test_split}...', "INFO")
-            logger('This will:', "INFO")
-            logger('  1. Discover all hours in the split', "INFO")
-            logger('  2. Pass 1: Fit transformations on training data (may take time)', "INFO")
-            logger('  3. Pass 2: Evaluate on validation data', "INFO")
-            logger('', "INFO")
-
-            split_results = processor.process_split(
-                split_id=test_split,
-                feature_names=feature_names,
-                all_feature_names=all_feature_names
-            )
-
-            # Select best transformations from test split results
-            logger('', "INFO")
-            logger('Selecting optimal transformations from test split...', "INFO")
-            import json
-            final_transforms = {}
-            fitted_params = {}
-
-            for feat, results in split_results.items():
-                # Skip if no scores (insufficient data or errors)
-                if 'scores' not in results or not results['scores']:
-                    logger(f"Skipping {feat}: no transformation scores available", "WARNING")
-                    continue
-
-                # Select transformation with best score
-                best_transform = max(results['scores'].items(), key=lambda x: x[1])[0]
-                final_transforms[feat] = best_transform
-
-                # Store fitted parameters for this feature
-                if 'fitted_params' in results:
-                    fitted_params[feat] = results['fitted_params'].get(best_transform, {})
 
             # Save test mode artifacts
             test_mode_dir = Path(REPO_ROOT) / 'artifacts' / 'feature_transformation' / 'test_mode'
             test_mode_dir.mkdir(parents=True, exist_ok=True)
 
-            # Save final transforms
+            # Save final transforms (copy from train mode for Stage 9)
             transforms_file = test_mode_dir / 'final_transforms.json'
             with open(transforms_file, 'w') as f:
-                json.dump(final_transforms, f, indent=2)
+                json.dump(final_transforms_filtered, f, indent=2)
 
-            # Save fitted parameters
+            # Save fitted parameters (fitted on split_0)
             params_file = test_mode_dir / 'fitted_params.json'
             with open(params_file, 'w') as f:
                 json.dump(fitted_params, f, indent=2)
@@ -252,9 +244,10 @@ def main(mode='train', test_split=0):
             logger('', "INFO")
             logger(f'Saved test mode transforms to: {transforms_file}', "INFO")
             logger(f'Saved test mode fitted params to: {params_file}', "INFO")
-            logger(f'Features: {len(final_transforms)}', "INFO")
+            logger(f'Features fitted: {len(fitted_params)}', "INFO")
 
-            log_section('TEST MODE COMPLETED')
+            log_section('TEST MODE COMPLETED (ONE PASS)')
+            logger(f'Loaded selections from train mode, fitted on split_{test_split}', "INFO")
             logger(f'Transforms: {transforms_file}', "INFO")
             logger(f'Fitted params: {params_file}', "INFO")
 

@@ -365,8 +365,37 @@ def main():
                 clip_std=CLIP_STD
             )
 
-            # Apply standardization to test_data (treating it like a split)
-            logger('Applying EWMA standardization to test_data...', "INFO")
+            # STEP 1: Process test_split to fit scalers and create split_X_output
+            # This also initializes scalers on training data (role='train')
+            logger('=' * 80, "INFO")
+            logger(f'STEP 1: Processing split_{test_split} to fit scalers', "INFO")
+            logger('=' * 80, "INFO")
+            logger(f'Input: split_{test_split}_input', "INFO")
+            logger(f'Output: split_{test_split}_output', "INFO")
+            logger('Scalers will be fitted on role=train data during processing', "INFO")
+            logger('', "INFO")
+
+            applicator.apply_to_split(
+                split_id=test_split,
+                feature_names=all_feature_names,
+                input_collection_prefix="split_",
+                input_collection_suffix="_input",
+                output_collection_prefix="split_",
+                output_collection_suffix="_output"
+            )
+
+            logger('', "INFO")
+            logger(f'✓ Scalers fitted on split_{test_split} training data', "INFO")
+            logger(f'✓ Created split_{test_split}_output', "INFO")
+            logger('', "INFO")
+
+            # STEP 2: Apply fitted scalers to test_data
+            logger('=' * 80, "INFO")
+            logger('STEP 2: Applying fitted scalers to test_data', "INFO")
+            logger('=' * 80, "INFO")
+            logger('Input: test_data', "INFO")
+            logger('Output: test_data_standardized', "INFO")
+            logger('Using scalers fitted in STEP 1 (transform only, no updates)', "INFO")
             logger('', "INFO")
 
             total_processed = applicator.apply_to_collection(

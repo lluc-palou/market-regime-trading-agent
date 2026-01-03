@@ -157,10 +157,11 @@ class ActorCriticTransformer(nn.Module):
         log_std = self.actor_logstd(last_hidden)
         log_std = torch.clamp(log_std, self.config.min_log_std, self.config.max_log_std)
 
-        # Enforce minimum std to prevent entropy collapse (std >= 0.3)
-        # This ensures entropy >= 1.4189 + log(0.3) ≈ 0.22 (always positive)
+        # Enforce std bounds to balance exploration and confidence
+        # Min 0.3: Prevents entropy collapse (entropy >= 0.22)
+        # Max 2.0: Prevents extreme uncertainty that leads to random actions
         std = torch.exp(log_std)
-        std = torch.clamp(std, min=0.3, max=10.0)
+        std = torch.clamp(std, min=0.3, max=2.0)
         log_std = torch.log(std)
 
         # Critic: state value
@@ -366,10 +367,11 @@ class ActorCriticFeatures(nn.Module):
         log_std = self.actor_logstd(last_hidden)
         log_std = torch.clamp(log_std, self.config.min_log_std, self.config.max_log_std)
 
-        # Enforce minimum std to prevent entropy collapse (std >= 0.3)
-        # This ensures entropy >= 1.4189 + log(0.3) ≈ 0.22 (always positive)
+        # Enforce std bounds to balance exploration and confidence
+        # Min 0.3: Prevents entropy collapse (entropy >= 0.22)
+        # Max 2.0: Prevents extreme uncertainty that leads to random actions
         std = torch.exp(log_std)
-        std = torch.clamp(std, min=0.3, max=10.0)
+        std = torch.clamp(std, min=0.3, max=2.0)
         log_std = torch.log(std)
 
         # Critic: state value
@@ -565,10 +567,11 @@ class ActorCriticCodebook(nn.Module):
         log_std = self.actor_logstd(last_hidden)
         log_std = torch.clamp(log_std, self.config.min_log_std, self.config.max_log_std)
 
-        # Enforce minimum std to prevent entropy collapse (std >= 0.3)
-        # This ensures entropy >= 1.4189 + log(0.3) ≈ 0.22 (always positive)
+        # Enforce std bounds to balance exploration and confidence
+        # Min 0.3: Prevents entropy collapse (entropy >= 0.22)
+        # Max 2.0: Prevents extreme uncertainty that leads to random actions
         std = torch.exp(log_std)
-        std = torch.clamp(std, min=0.3, max=10.0)
+        std = torch.clamp(std, min=0.3, max=2.0)
         log_std = torch.log(std)
 
         # Critic: state value

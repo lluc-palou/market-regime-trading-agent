@@ -94,30 +94,72 @@ def load_final_transforms() -> dict:
 def load_split_fitted_params(split_id: int) -> dict:
     """
     Load fitted transformation parameters for a specific split from artifacts.
-    
+
     Args:
         split_id: Split ID
-        
+
     Returns:
         Dictionary with fitted parameters per feature per transform
     """
     logger(f"Loading fitted parameters for split {split_id}...", "INFO")
-    
+
     fitted_params_path = ARTIFACTS_DIR / f"split_{split_id}" / f"split_{split_id}_fitted_params.json"
-    
+
     if not fitted_params_path.exists():
         raise FileNotFoundError(
             f"Fitted parameters not found at {fitted_params_path}\n"
             f"Please run Stage 7 first: python scripts/07_select_feature_transforms.py"
         )
-    
+
     with open(fitted_params_path, 'r') as f:
         fitted_params = json.load(f)
-    
+
     logger(f"Loaded fitted parameters for {len(fitted_params)} features", "INFO")
     logger(f"From: {fitted_params_path}", "INFO")
-    
+
     return fitted_params
+
+
+def load_test_mode_artifacts() -> tuple:
+    """
+    Load test mode transformation selections and fitted parameters from artifacts.
+
+    Returns:
+        Tuple of (final_transforms, fitted_params)
+    """
+    logger("Loading test mode artifacts...", "INFO")
+
+    test_mode_dir = ARTIFACTS_DIR / "test_mode"
+
+    # Load final transforms
+    transforms_path = test_mode_dir / "final_transforms.json"
+    if not transforms_path.exists():
+        raise FileNotFoundError(
+            f"Test mode transforms not found at {transforms_path}\n"
+            f"Please run Stage 7 in test mode first: python scripts/07_feature_transform.py --mode test"
+        )
+
+    with open(transforms_path, 'r') as f:
+        final_transforms = json.load(f)
+
+    logger(f"Loaded transformations for {len(final_transforms)} features", "INFO")
+    logger(f"From: {transforms_path}", "INFO")
+
+    # Load fitted params
+    params_path = test_mode_dir / "fitted_params.json"
+    if not params_path.exists():
+        raise FileNotFoundError(
+            f"Test mode fitted params not found at {params_path}\n"
+            f"Please run Stage 7 in test mode first: python scripts/07_feature_transform.py --mode test"
+        )
+
+    with open(params_path, 'r') as f:
+        fitted_params = json.load(f)
+
+    logger(f"Loaded fitted parameters for {len(fitted_params)} features", "INFO")
+    logger(f"From: {params_path}", "INFO")
+
+    return final_transforms, fitted_params
 
 
 # =================================================================================================
@@ -452,8 +494,9 @@ def main():
             manager.close()
 
     else:  # TEST MODE
-        # TEST MODE: Apply transformations to test_data using fitted params from test_split
-        logger(f"Using fitted parameters from split_{test_split}", "INFO")
+        # TEST MODE: Apply transformations to test_data using artifacts fitted by Stage 7 test mode
+        logger("Loading transformations and fitted params from test_mode/ artifacts", "INFO")
+        logger("These were fitted by Stage 7 in test mode on split_0", "INFO")
         logger("", "INFO")
 
         # Create timestamp index on test_data
@@ -476,9 +519,8 @@ def main():
         logger('Timestamp index created/verified', "INFO")
         logger('', "INFO")
 
-        # Load transformation selections and fitted params
-        final_transforms = load_final_transforms()
-        fitted_params = load_split_fitted_params(test_split)
+        # Load transformation selections and fitted params from test_mode artifacts
+        final_transforms, fitted_params = load_test_mode_artifacts()
 
         # Create Spark session
         logger("Initializing Spark...", "INFO")
@@ -501,7 +543,7 @@ def main():
             logger("=" * 80, "INFO")
             logger("STAGE 09 COMPLETE (TEST MODE)", "INFO")
             logger("=" * 80, "INFO")
-            logger("Transformed test_data using fitted params from split_0", "INFO")
+            logger("Transformed test_data using test_mode artifacts", "INFO")
             logger("Transformed data is now in test_data collection", "INFO")
 
             return 0

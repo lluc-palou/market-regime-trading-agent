@@ -145,14 +145,17 @@ def filter_transformable_features(feature_names):
 # Main Execution
 # =================================================================================================
 
-def main():
+def main(mode='train', test_split=0):
     """Main execution function."""
-    log_section('FEATURE TRANSFORMATION SELECTION (STAGE 07)')
-    
+    log_section(f'FEATURE TRANSFORMATION SELECTION (STAGE 07) - {mode.upper()} MODE')
+
     # Setup MLflow
     mlflow.set_tracking_uri(MLFLOW_TRACKING_URI)
     mlflow.set_experiment(MLFLOW_EXPERIMENT_NAME)
     logger(f'MLflow experiment: {MLFLOW_EXPERIMENT_NAME}', "INFO")
+    logger(f'Mode: {mode}', "INFO")
+    if mode == 'test':
+        logger(f'Test split: {test_split}', "INFO")
     
     # Create Spark session (uses default 8GB driver memory and jar path)
     logger('', "INFO")
@@ -201,6 +204,75 @@ def main():
         if not split_ids:
             raise ValueError(f'No split collections found matching pattern: {INPUT_COLLECTION_PREFIX}X{INPUT_COLLECTION_SUFFIX}')
 
+        # ============================================================================
+        # TEST MODE: Process split_0 only, save artifacts
+        # ============================================================================
+        if mode == 'test':
+            logger(f'Found {len(split_ids)} split collections', "INFO")
+            logger(f'TEST MODE: Processing only split_{test_split}', "INFO")
+            logger(f'Processing {len(feature_names)} transformable features', "INFO")
+            logger('', "INFO")
+
+            # Initialize processor
+            processor = FeatureTransformProcessor(
+                spark=spark,
+                db_name=DB_NAME,
+                input_collection_prefix=INPUT_COLLECTION_PREFIX,
+                input_collection_suffix=INPUT_COLLECTION_SUFFIX,
+                train_sample_rate=TRAIN_SAMPLE_RATE
+            )
+
+            # Process test split
+            split_results = processor.process_split(
+                split_id=test_split,
+                feature_names=feature_names,
+                all_feature_names=all_feature_names
+            )
+
+            # Select best transformations from test split results
+            logger('', "INFO")
+            logger('Selecting optimal transformations from test split...', "INFO")
+            import json
+            final_transforms = {}
+            fitted_params = {}
+
+            for feat, results in split_results.items():
+                # Select transformation with best score
+                best_transform = max(results['scores'].items(), key=lambda x: x[1])[0]
+                final_transforms[feat] = best_transform
+
+                # Store fitted parameters for this feature
+                if 'fitted_params' in results:
+                    fitted_params[feat] = results['fitted_params'].get(best_transform, {})
+
+            # Save test mode artifacts
+            test_mode_dir = Path(REPO_ROOT) / 'artifacts' / 'feature_transformation' / 'test_mode'
+            test_mode_dir.mkdir(parents=True, exist_ok=True)
+
+            # Save final transforms
+            transforms_file = test_mode_dir / 'final_transforms.json'
+            with open(transforms_file, 'w') as f:
+                json.dump(final_transforms, f, indent=2)
+
+            # Save fitted parameters
+            params_file = test_mode_dir / 'fitted_params.json'
+            with open(params_file, 'w') as f:
+                json.dump(fitted_params, f, indent=2)
+
+            logger('', "INFO")
+            logger(f'Saved test mode transforms to: {transforms_file}', "INFO")
+            logger(f'Saved test mode fitted params to: {params_file}', "INFO")
+            logger(f'Features: {len(final_transforms)}', "INFO")
+
+            log_section('TEST MODE COMPLETED')
+            logger(f'Transforms: {transforms_file}', "INFO")
+            logger(f'Fitted params: {params_file}', "INFO")
+
+            return 0  # Exit after test mode
+
+        # ============================================================================
+        # TRAIN MODE: Process all splits
+        # ============================================================================
         logger(f'Found {len(split_ids)} split collections: {split_ids}', "INFO")
         logger(f'Processing {len(feature_names)} transformable features across {len(split_ids)} splits', "INFO")
 
@@ -282,5 +354,12 @@ def main():
 
 
 if __name__ == "__main__":
+    parser = argparse.ArgumentParser(description='Feature transformation selection')
+    parser.add_argument('--mode', choices=['train', 'test'], default='train',
+                       help='Pipeline mode: train (all splits) or test (split_0 only)')
+    parser.add_argument('--test-split', type=int, default=0,
+                       help='Split ID to use in test mode (default: 0)')
+    args = parser.parse_args()
+
     is_orchestrated = os.environ.get('PIPELINE_ORCHESTRATED', 'false') == 'true'
-    main()
+    main(mode=args.mode, test_split=args.test_split)

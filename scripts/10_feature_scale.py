@@ -3,6 +3,9 @@ Feature Standardization Selection Script (Stage 10)
 
 Selects optimal EWMA half-life for feature standardization using CPCV splits.
 
+TRAIN MODE: Processes all splits, selects best half-lives across splits
+TEST MODE: Processes split_0 only, fits scalers, saves test_mode artifacts
+
 Input: split_X_output collections with 18 features (after transformation)
 Processes: 16 features (excludes volatility and fwd_logret_1)
 Output: Half-life selections for 16 features
@@ -12,11 +15,14 @@ Exclusions from standardization:
 - fwd_logret_1: Target variable, keep original scale
 
 Usage:
-    python scripts/10_feature_scale.py
+    TRAIN: python scripts/10_feature_scale.py --mode train
+    TEST:  python scripts/10_feature_scale.py --mode test --test-split 0
 """
 
 import os
 import sys
+import argparse
+import json
 from pathlib import Path
 
 # Setup paths
@@ -140,14 +146,17 @@ def filter_standardizable_features(feature_names):
 # Main Execution
 # =================================================================================================
 
-def main():
+def main(mode='train', test_split=0):
     """Main execution function."""
-    log_section('FEATURE STANDARDIZATION SELECTION (STAGE 10)')
-    
+    log_section(f'FEATURE STANDARDIZATION SELECTION (STAGE 10) - {mode.upper()} MODE')
+
     # Setup MLflow
     mlflow.set_tracking_uri(MLFLOW_TRACKING_URI)
     mlflow.set_experiment(MLFLOW_EXPERIMENT_NAME)
     logger(f'MLflow experiment: {MLFLOW_EXPERIMENT_NAME}', "INFO")
+    logger(f'Mode: {mode}', "INFO")
+    if mode == 'test':
+        logger(f'Test split: {test_split}', "INFO")
     
     # Create Spark session (uses default 8GB driver memory and jar path)
     logger('', "INFO")
@@ -196,6 +205,102 @@ def main():
         if not split_ids:
             raise ValueError(f'No split collections found matching pattern: {INPUT_COLLECTION_PREFIX}X{INPUT_COLLECTION_SUFFIX}')
 
+        # ============================================================================
+        # TEST MODE: Process split_0 only, fit scalers, save artifacts
+        # ============================================================================
+        if mode == 'test':
+            logger(f'Found {len(split_ids)} split collections', "INFO")
+            logger(f'TEST MODE: Processing only split_{test_split}', "INFO")
+            logger(f'Processing {len(feature_names)} standardizable features', "INFO")
+            logger(f'Testing half-life values: {HALF_LIFE_CANDIDATES}', "INFO")
+            logger('', "INFO")
+
+            # Initialize processor
+            processor = EWMAHalfLifeProcessor(
+                spark=spark,
+                db_name=DB_NAME,
+                input_collection_prefix=INPUT_COLLECTION_PREFIX,
+                input_collection_suffix=INPUT_COLLECTION_SUFFIX
+            )
+
+            # Process test split
+            split_results = processor.process_split(
+                split_id=test_split,
+                feature_names=all_feature_names,
+                standardizable_features=feature_names
+            )
+
+            # Select best half-lives from test split results
+            logger('', "INFO")
+            logger('Selecting optimal half-lives from test split...', "INFO")
+            final_half_lives = {}
+            for feat, results in split_results.items():
+                # Select half-life with best score
+                best_hl = max(results['scores'].items(), key=lambda x: x[1])[0]
+                final_half_lives[feat] = best_hl
+
+            # Save test mode half-lives
+            test_mode_dir = Path(REPO_ROOT) / 'artifacts' / 'ewma_halflife_selection' / 'test_mode'
+            test_mode_dir.mkdir(parents=True, exist_ok=True)
+
+            halflifes_file = test_mode_dir / 'final_halflifes.json'
+            with open(halflifes_file, 'w') as f:
+                json.dump(final_half_lives, f, indent=2)
+
+            logger('', "INFO")
+            logger(f'Saved test mode half-lives to: {halflifes_file}', "INFO")
+            logger(f'Features: {len(final_half_lives)}', "INFO")
+
+            # ========================================================================
+            # FIT EWMA SCALERS and SAVE STATES
+            # ========================================================================
+            logger('', "INFO")
+            log_section('FITTING EWMA SCALERS ON TEST SPLIT')
+
+            from src.feature_standardization.apply_scaler import EWMAStandardizationApplicator
+
+            applicator = EWMAStandardizationApplicator(
+                spark=spark,
+                db_name=DB_NAME,
+                final_halflifes=final_half_lives,
+                clip_std=3.0
+            )
+
+            # Fit scalers by processing test split
+            logger(f'Processing split_{test_split}_input to fit scalers...', "INFO")
+            applicator.apply_to_split(
+                split_id=test_split,
+                feature_names=all_feature_names,
+                input_collection_prefix="split_",
+                input_collection_suffix="_input",
+                output_collection_prefix="split_",
+                output_collection_suffix="_output"
+            )
+
+            # Save scaler states
+            scaler_states_dir = Path(REPO_ROOT) / 'artifacts' / 'ewma_standardization' / 'scaler_states'
+            scaler_states_dir.mkdir(parents=True, exist_ok=True)
+
+            scaler_states_file = scaler_states_dir / 'test_mode_scaler_states.json'
+            scaler_states = applicator.get_scaler_states()
+
+            with open(scaler_states_file, 'w') as f:
+                json.dump(scaler_states, f, indent=2)
+
+            logger('', "INFO")
+            logger(f'Saved scaler states to: {scaler_states_file}', "INFO")
+            logger(f'Features: {len(scaler_states)}', "INFO")
+
+            log_section('TEST MODE COMPLETED')
+            logger(f'Half-lives: {halflifes_file}', "INFO")
+            logger(f'Scaler states: {scaler_states_file}', "INFO")
+            logger(f'Output: split_{test_split}_output', "INFO")
+
+            return 0  # Exit after test mode
+
+        # ============================================================================
+        # TRAIN MODE: Process all splits
+        # ============================================================================
         logger(f'Found {len(split_ids)} split collections: {split_ids}', "INFO")
         logger(f'Processing {len(feature_names)} standardizable features across {len(split_ids)} splits', "INFO")
         logger(f'Testing half-life values: {HALF_LIFE_CANDIDATES}', "INFO")
@@ -278,5 +383,12 @@ def main():
 
 
 if __name__ == "__main__":
+    parser = argparse.ArgumentParser(description='Feature standardization selection')
+    parser.add_argument('--mode', choices=['train', 'test'], default='train',
+                       help='Pipeline mode: train (all splits) or test (split_0 only)')
+    parser.add_argument('--test-split', type=int, default=0,
+                       help='Split ID to use in test mode (default: 0)')
+    args = parser.parse_args()
+
     is_orchestrated = os.environ.get('PIPELINE_ORCHESTRATED', 'false') == 'true'
-    main()
+    main(mode=args.mode, test_split=args.test_split)

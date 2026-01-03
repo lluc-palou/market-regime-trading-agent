@@ -222,6 +222,11 @@ def main(mode='train', test_split=0):
             fitted_params = {}
 
             for feat, results in split_results.items():
+                # Skip if no scores (insufficient data or errors)
+                if 'scores' not in results or not results['scores']:
+                    logger(f"Skipping {feat}: no transformation scores available", "WARNING")
+                    continue
+
                 # Select transformation with best score
                 best_transform = max(results['scores'].items(), key=lambda x: x[1])[0]
                 final_transforms[feat] = best_transform

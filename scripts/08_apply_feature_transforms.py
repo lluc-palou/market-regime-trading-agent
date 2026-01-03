@@ -26,13 +26,17 @@ from src.utils.logging import logger
 from src.utils.spark import create_spark_session
 from src.utils.database import write_to_mongodb
 from src.feature_transformation import identify_feature_names
+from src.feature_transformation.transforms import fit_transform_params
 
 # Import the per-split cyclic manager
 sys.path.insert(0, os.path.join(REPO_ROOT, 'scripts'))
 from src.split_materialization.per_split_cyclic_manager import PerSplitCyclicManager
 
 # Import direct transformation approach (simpler than UDFs)
-from src.feature_transformation.transformation_application import apply_transformations_direct
+from src.feature_transformation.transformation_application import (
+    apply_transformations_direct,
+    fit_selected_transforms_on_full_data
+)
 
 # =================================================================================================
 # Configuration
@@ -427,6 +431,10 @@ def main():
             # Load transformation selections
             final_transforms = load_final_transforms()
 
+            # Identify feature names from first split
+            logger("Identifying features from data...", "INFO")
+            first_split_coll = f"{INPUT_COLLECTION_PREFIX}{split_ids[0]}{INPUT_COLLECTION_SUFFIX}"
+
             # Create Spark session
             logger("", "INFO")
             logger("Initializing Spark...", "INFO")
@@ -437,6 +445,12 @@ def main():
             )
 
             try:
+                # Load features from first split to get feature names
+                df_sample = spark.read.format("mongodb").option("database", DB_NAME).option("collection", first_split_coll).load()
+                all_feature_names = identify_feature_names(df_sample)
+                logger(f"Identified {len(all_feature_names)} features from data", "INFO")
+                logger("", "INFO")
+
                 # Process each split
                 for split_id in split_ids:
                     logger("", "INFO")
@@ -452,8 +466,15 @@ def main():
                     # Prepare for processing (clear output collection)
                     manager.prepare_split_for_processing(split_id, force=FORCE_OVERWRITE)
 
-                    # Load fitted parameters for this split
-                    fitted_params = load_split_fitted_params(split_id)
+                    # Fit selected transforms on 100% of training data (not the 10% sample from Stage 7)
+                    logger(f"Fitting selected transforms on full training data for split {split_id}...", "INFO")
+                    fitted_params = fit_selected_transforms_on_full_data(
+                        spark=spark,
+                        db_name=DB_NAME,
+                        collection=f"split_{split_id}_input",
+                        feature_names=all_feature_names,
+                        final_transforms=final_transforms
+                    )
 
                     # Apply transformations: split_X_input -> split_X_output
                     apply_transformations_to_split(

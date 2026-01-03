@@ -248,3 +248,110 @@ def apply_transformations_direct(
             )
 
     logger(f"Completed transformation of {len(all_hours)} batches", "INFO")
+
+
+def fit_selected_transforms_on_full_data(
+    spark,
+    db_name: str,
+    collection: str,
+    feature_names: List[str],
+    final_transforms: Dict[str, str]
+) -> Dict[str, Dict]:
+    """
+    Fit ONLY the selected transformations on 100% of training data.
+
+    This is used in Stage 8 to re-fit the selected transforms (from Stage 7)
+    on full training data instead of the 10% sample used in Stage 7.
+
+    Args:
+        spark: SparkSession
+        db_name: Database name
+        collection: Collection name (e.g., 'split_0_input')
+        feature_names: List of all feature names
+        final_transforms: Selected transform type per feature (from Stage 7)
+
+    Returns:
+        Dictionary of fitted parameters per feature
+    """
+    import numpy as np
+    from src.utils.logging import logger
+    from src.feature_transformation.data_loader import get_all_hours, load_hour_batch
+    from src.feature_transformation.transforms import fit_transform_params
+
+    logger(f"Fitting selected transforms on 100% of training data from {collection}", "INFO")
+
+    # Build feature index map
+    feature_indices = {name: idx for idx, name in enumerate(feature_names)}
+
+    # Initialize accumulators for training data
+    train_data = {feat: [] for feat in final_transforms.keys() if feat in feature_names}
+
+    # Get all hours
+    all_hours = get_all_hours(spark, db_name, collection)
+    logger(f"Processing {len(all_hours)} hours to collect training data", "INFO")
+
+    # Collect training data from all hours
+    for hour_idx, start_hour in enumerate(all_hours):
+        end_hour = start_hour + timedelta(hours=1)
+
+        hour_df = load_hour_batch(spark, db_name, collection, start_hour, end_hour)
+
+        hour_count = hour_df.count()
+        if hour_count == 0:
+            continue
+
+        # Collect to driver and filter training data
+        rows = hour_df.select("features", "role").collect()
+
+        for row in rows:
+            # Only use training data
+            if row['role'] != 'train':
+                continue
+
+            features_array = row['features']
+            if features_array is None or len(features_array) != len(feature_names):
+                continue
+
+            # Collect values for each feature
+            for feat_name in train_data.keys():
+                feat_idx = feature_indices[feat_name]
+                value = features_array[feat_idx]
+
+                if value is not None:
+                    try:
+                        value = float(value)
+                        if np.isfinite(value):
+                            train_data[feat_name].append(value)
+                    except (TypeError, ValueError):
+                        pass
+
+        if (hour_idx + 1) % 10 == 0:
+            logger(f"  Collected data from {hour_idx + 1}/{len(all_hours)} hours", "INFO")
+
+    # Fit transformations on collected training data
+    logger("Fitting transformations on collected training data...", "INFO")
+    fitted_params = {}
+
+    for feat_name, transform_type in final_transforms.items():
+        if feat_name not in train_data:
+            logger(f"  Skipping {feat_name}: not in feature list", "WARNING")
+            continue
+
+        data = np.array(train_data[feat_name])
+
+        if len(data) < 20:
+            logger(f"  Skipping {feat_name}: insufficient data ({len(data)} samples)", "WARNING")
+            continue
+
+        # Fit the selected transform
+        params = fit_transform_params(data, transform_type)
+        if params is not None:
+            fitted_params[feat_name] = params
+            logger(f"  {feat_name}: fitted {transform_type} on {len(data):,} samples", "INFO")
+        else:
+            fitted_params[feat_name] = {}
+            logger(f"  {feat_name}: {transform_type} needs no parameters", "INFO")
+
+    logger(f"Fitted {len(fitted_params)} transformations on full training data", "INFO")
+
+    return fitted_params

@@ -169,6 +169,7 @@ class AgentState:
         self.total_reward = 0.0  # Learning signal (includes directional bonus)
 
         # Trading returns for different fee scenarios (all exclude directional bonus)
+        # Volatility-normalized (for training rewards)
         self.total_trading_return_raw = 0.0  # Baseline: Buy-and-hold (no position sizing, no fees)
         self.total_trading_return_taker = 0.0  # Taker fee 5 bps (market orders with agent sizing)
         self.total_trading_return_maker_neutral = 0.0  # Maker fee 0 bps (limit orders with agent sizing)
@@ -176,6 +177,12 @@ class AgentState:
 
         # Legacy field for backward compatibility (points to taker)
         self.total_trading_return = 0.0  # Same as total_trading_return_taker
+
+        # Raw log returns for different fee scenarios (for Sharpe analysis - NOT volatility normalized)
+        self.cumulative_raw_return_buyhold = 0.0  # Buy-and-hold baseline
+        self.cumulative_raw_return_taker = 0.0  # Taker fee 10 bps
+        self.cumulative_raw_return_maker_neutral = 0.0  # Maker fee 0 bps
+        self.cumulative_raw_return_maker_rebate = 0.0  # Maker rebate -2.5 bps
 
         # Position tracking
         self.sum_abs_position = 0.0  # For mean absolute position
@@ -197,10 +204,14 @@ class AgentState:
         unrealized_pnl: float,
         gross_pnl: float = 0.0,  # Gross PnL from current timestep
         action_std: float = 0.0,  # Policy std (agent's uncertainty/confidence)
-        trading_return_raw: float = 0.0,  # Baseline: Buy-and-hold (no position sizing, no fees)
-        trading_return_taker: float = 0.0,  # Taker fee 5 bps (market orders with agent sizing)
-        trading_return_maker_neutral: float = 0.0,  # Maker fee 0 bps (limit orders with agent sizing)
-        trading_return_maker_rebate: float = 0.0  # Maker rebate -2.5 bps (limit orders with agent sizing)
+        trading_return_raw: float = 0.0,  # Volatility-normalized: Buy-and-hold baseline
+        trading_return_taker: float = 0.0,  # Volatility-normalized: Taker 10 bps
+        trading_return_maker_neutral: float = 0.0,  # Volatility-normalized: Maker 0 bps
+        trading_return_maker_rebate: float = 0.0,  # Volatility-normalized: Maker -2.5 bps
+        raw_log_return_buyhold: float = 0.0,  # Raw log return: Buy-and-hold baseline
+        raw_log_return_taker: float = 0.0,  # Raw log return: Taker 10 bps
+        raw_log_return_maker_neutral: float = 0.0,  # Raw log return: Maker 0 bps
+        raw_log_return_maker_rebate: float = 0.0  # Raw log return: Maker -2.5 bps
     ):
         """
         Update agent state after taking action.
@@ -213,10 +224,8 @@ class AgentState:
             unrealized_pnl: Expected PnL from new position
             gross_pnl: Gross PnL from current position (before TC)
             action_std: Policy standard deviation (agent's learned uncertainty)
-            trading_return_raw: Buy-and-hold baseline (constant pos=1, no fees, excludes directional bonus)
-            trading_return_taker: Taker fee 5 bps (agent sizing, market orders, excludes directional bonus)
-            trading_return_maker_neutral: Maker fee 0 bps (agent sizing, limit orders, excludes directional bonus)
-            trading_return_maker_rebate: Maker rebate -2.5 bps (agent sizing, limit orders, excludes directional bonus)
+            trading_return_*: Volatility-normalized returns (for training rewards)
+            raw_log_return_*: Raw log returns NOT normalized (for Sharpe analysis)
         """
         # Realized PnL from previous position
         realized_this_step = self.current_position * log_return
@@ -250,12 +259,18 @@ class AgentState:
         self.sum_abs_position += abs(action)
         self.total_reward += reward  # Learning signal (with directional bonus)
 
-        # Track trading returns for all fee scenarios (all exclude directional bonus)
+        # Track volatility-normalized trading returns (for training rewards)
         self.total_trading_return_raw += trading_return_raw  # Baseline: no fees
-        self.total_trading_return_taker += trading_return_taker  # Taker 5 bps (market orders)
+        self.total_trading_return_taker += trading_return_taker  # Taker 10 bps (market orders)
         self.total_trading_return_maker_neutral += trading_return_maker_neutral  # Maker 0 bps (limit orders)
         self.total_trading_return_maker_rebate += trading_return_maker_rebate  # Maker -2.5 bps (limit orders)
         self.total_trading_return = trading_return_taker  # Legacy field (same as taker)
+
+        # Track raw log returns (for Sharpe analysis - NOT volatility normalized)
+        self.cumulative_raw_return_buyhold += raw_log_return_buyhold
+        self.cumulative_raw_return_taker += raw_log_return_taker
+        self.cumulative_raw_return_maker_neutral += raw_log_return_maker_neutral
+        self.cumulative_raw_return_maker_rebate += raw_log_return_maker_rebate
 
         self.step_count += 1
 
@@ -294,13 +309,19 @@ class AgentState:
             'total_reward': self.total_reward,  # Learning signal (with directional bonus)
             'avg_reward': self.total_reward / max(self.step_count, 1),
 
-            # Trading returns for all fee scenarios (all exclude directional bonus)
+            # Volatility-normalized trading returns (for training rewards, exclude directional bonus)
             'total_trading_return_raw': self.total_trading_return_raw,  # Baseline: buy-and-hold
-            'total_trading_return_taker': self.total_trading_return_taker,  # Taker 5 bps (agent sizing)
+            'total_trading_return_taker': self.total_trading_return_taker,  # Taker 10 bps (agent sizing)
             'total_trading_return_maker_neutral': self.total_trading_return_maker_neutral,  # Maker 0 bps (agent sizing)
             'total_trading_return_maker_rebate': self.total_trading_return_maker_rebate,  # Maker -2.5 bps (agent sizing)
             'total_trading_return': self.total_trading_return,  # Legacy (same as taker)
             'avg_trading_return': self.total_trading_return / max(self.step_count, 1),
+
+            # Raw log returns (for Sharpe analysis - NOT volatility normalized)
+            'cumulative_raw_return_buyhold': self.cumulative_raw_return_buyhold,
+            'cumulative_raw_return_taker': self.cumulative_raw_return_taker,
+            'cumulative_raw_return_maker_neutral': self.cumulative_raw_return_maker_neutral,
+            'cumulative_raw_return_maker_rebate': self.cumulative_raw_return_maker_rebate,
             # Gross PnL metrics
             'cumulative_gross_pnl': self.cumulative_gross_pnl,
             'avg_gross_pnl_per_trade': avg_gross_pnl_per_trade,

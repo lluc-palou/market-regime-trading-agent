@@ -183,17 +183,17 @@ class EWMAStandardizationApplicator:
             import pandas as pd
             pandas_df = pd.DataFrame(transformed_rows)
             transformed_df = self.spark.createDataFrame(pandas_df, schema=hour_df.schema)
-            
+
             # Drop _id if present
             if '_id' in transformed_df.columns:
                 transformed_df = transformed_df.drop('_id')
-            
-            # Sort by timestamp
-            transformed_df = transformed_df.orderBy("timestamp")
-            
+
+            # Coalesce to single partition to avoid shuffle (prevents Windows temp file issues)
+            transformed_df = transformed_df.coalesce(1)
+
             # Write with ordered writes
             write_mode = "overwrite" if first_batch else "append"
-            
+
             (transformed_df.write.format("mongodb")
              .option("database", self.db_name)
              .option("collection", output_collection)
@@ -347,8 +347,8 @@ class EWMAStandardizationApplicator:
             if '_id' in transformed_df.columns:
                 transformed_df = transformed_df.drop('_id')
 
-            # Sort by timestamp
-            transformed_df = transformed_df.orderBy("timestamp")
+            # Coalesce to single partition to avoid shuffle (prevents Windows temp file issues)
+            transformed_df = transformed_df.coalesce(1)
 
             # Write with ordered writes
             write_mode = "overwrite" if first_batch else "append"

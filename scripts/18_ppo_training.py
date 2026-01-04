@@ -599,10 +599,16 @@ def train_epoch(
 
         # Compute Sharpe ratios for all fee scenarios
         epoch_metrics['sharpe_raw'] = compute_sharpe_ratio(episode_returns_raw)  # Baseline: no fees
-        epoch_metrics['sharpe_taker'] = compute_sharpe_ratio(episode_returns_taker)  # Taker 5 bps
+        epoch_metrics['sharpe_taker'] = compute_sharpe_ratio(episode_returns_taker)  # Taker 10 bps
         epoch_metrics['sharpe_maker_neutral'] = compute_sharpe_ratio(episode_returns_maker_neutral)  # Maker 0 bps
         epoch_metrics['sharpe_maker_rebate'] = compute_sharpe_ratio(episode_returns_maker_rebate)  # Maker -2.5 bps
         epoch_metrics['sharpe'] = epoch_metrics['sharpe_taker']  # Legacy field (use taker for training - harder conditions)
+
+        # Compute average PnL per scenario (for Sharpe validation)
+        epoch_metrics['pnl_raw'] = np.mean(episode_returns_raw)
+        epoch_metrics['pnl_taker'] = np.mean(episode_returns_taker)
+        epoch_metrics['pnl_maker_neutral'] = np.mean(episode_returns_maker_neutral)
+        epoch_metrics['pnl_maker_rebate'] = np.mean(episode_returns_maker_rebate)
     else:
         epoch_metrics['avg_reward'] = 0.0
         epoch_metrics['avg_pnl'] = 0.0
@@ -612,6 +618,10 @@ def train_epoch(
         epoch_metrics['sharpe_maker_neutral'] = 0.0
         epoch_metrics['sharpe_maker_rebate'] = 0.0
         epoch_metrics['sharpe'] = 0.0
+        epoch_metrics['pnl_raw'] = 0.0
+        epoch_metrics['pnl_taker'] = 0.0
+        epoch_metrics['pnl_maker_neutral'] = 0.0
+        epoch_metrics['pnl_maker_rebate'] = 0.0
 
     # Compute loss averages
     if epoch_metrics['n_ppo_updates'] > 0:
@@ -847,10 +857,16 @@ def validate_epoch(
 
         # Compute Sharpe ratios for all fee scenarios
         val_metrics['sharpe_raw'] = compute_sharpe_ratio(episode_returns_raw)  # Baseline: no fees
-        val_metrics['sharpe_taker'] = compute_sharpe_ratio(episode_returns_taker)  # Taker 5 bps
+        val_metrics['sharpe_taker'] = compute_sharpe_ratio(episode_returns_taker)  # Taker 10 bps
         val_metrics['sharpe_maker_neutral'] = compute_sharpe_ratio(episode_returns_maker_neutral)  # Maker 0 bps
         val_metrics['sharpe_maker_rebate'] = compute_sharpe_ratio(episode_returns_maker_rebate)  # Maker -2.5 bps
         val_metrics['sharpe'] = val_metrics['sharpe_taker']  # Legacy field (use taker for training - harder conditions)
+
+        # Compute average PnL per scenario (for Sharpe validation)
+        val_metrics['pnl_raw'] = np.mean(episode_returns_raw)
+        val_metrics['pnl_taker'] = np.mean(episode_returns_taker)
+        val_metrics['pnl_maker_neutral'] = np.mean(episode_returns_maker_neutral)
+        val_metrics['pnl_maker_rebate'] = np.mean(episode_returns_maker_rebate)
     else:
         val_metrics['avg_reward'] = 0.0
         val_metrics['avg_pnl'] = 0.0
@@ -859,6 +875,10 @@ def validate_epoch(
         val_metrics['sharpe_maker_neutral'] = 0.0
         val_metrics['sharpe_maker_rebate'] = 0.0
         val_metrics['sharpe'] = 0.0
+        val_metrics['pnl_raw'] = 0.0
+        val_metrics['pnl_taker'] = 0.0
+        val_metrics['pnl_maker_neutral'] = 0.0
+        val_metrics['pnl_maker_rebate'] = 0.0
 
     # Compute model metrics (losses, entropy, uncertainty, activity) on validation data
     model_metrics = compute_validation_metrics(
@@ -922,11 +942,11 @@ def train_split(
 
     # Learning rate scheduler - reduces LR when validation Sharpe plateaus
     scheduler = optim.lr_scheduler.ReduceLROnPlateau(
-        optimizer, mode='max', factor=0.3, patience=2, min_lr=1e-6
+        optimizer, mode='max', factor=0.3, patience=2, min_lr=1e-7
     )
 
     logger(f'Agent initialized: {agent.count_parameters():,} parameters', "INFO")
-    logger(f'Learning rate scheduler: ReduceLROnPlateau (factor=0.3, patience=2)', "INFO")
+    logger(f'Learning rate scheduler: ReduceLROnPlateau (factor=0.3, patience=2, min_lr=1e-7)', "INFO")
     logger(f'Loss coefficients: entropy={config.ppo.entropy_coef}, uncertainty={config.ppo.uncertainty_coef}, turnover={config.ppo.turnover_coef}', "INFO")
 
     # Setup CSV logging for epoch results
@@ -935,11 +955,13 @@ def train_split(
         'epoch',
         # Training metrics - all Sharpe scenarios (ONLY taker is optimized)
         'train_sharpe_buyhold', 'train_sharpe_taker', 'train_sharpe_maker_neutral', 'train_sharpe_maker_rebate',
+        'train_pnl_buyhold', 'train_pnl_taker', 'train_pnl_maker_neutral', 'train_pnl_maker_rebate',
         'train_avg_reward', 'train_avg_pnl',
         'train_policy_loss', 'train_value_loss', 'train_entropy',
         'train_uncertainty', 'train_activity', 'train_turnover',
-        # Validation metrics - Sharpe scenarios only (no loss/entropy metrics)
+        # Validation metrics - Sharpe scenarios + PnL (no loss/entropy metrics)
         'val_sharpe_buyhold', 'val_sharpe_taker', 'val_sharpe_maker_neutral', 'val_sharpe_maker_rebate',
+        'val_pnl_buyhold', 'val_pnl_taker', 'val_pnl_maker_neutral', 'val_pnl_maker_rebate',
         'val_avg_reward', 'val_avg_pnl', 'val_activity',
         'learning_rate'
     ]
@@ -1028,6 +1050,10 @@ def train_split(
                 train_metrics["sharpe_taker"],
                 train_metrics["sharpe_maker_neutral"],
                 train_metrics["sharpe_maker_rebate"],
+                train_metrics["pnl_raw"],
+                train_metrics["pnl_taker"],
+                train_metrics["pnl_maker_neutral"],
+                train_metrics["pnl_maker_rebate"],
                 train_metrics["avg_reward"],
                 train_metrics["avg_pnl"],
                 train_metrics["avg_policy_loss"],
@@ -1036,11 +1062,15 @@ def train_split(
                 train_metrics["avg_uncertainty"],
                 train_metrics["avg_activity"],
                 train_metrics["avg_turnover"],
-                # Validation - Sharpe scenarios only
+                # Validation - Sharpe scenarios + PnL
                 val_metrics["sharpe_raw"],
                 val_metrics["sharpe_taker"],
                 val_metrics["sharpe_maker_neutral"],
                 val_metrics["sharpe_maker_rebate"],
+                val_metrics["pnl_raw"],
+                val_metrics["pnl_taker"],
+                val_metrics["pnl_maker_neutral"],
+                val_metrics["pnl_maker_rebate"],
                 val_metrics["avg_reward"],
                 val_metrics["avg_pnl"],
                 val_metrics["activity"],
@@ -1136,11 +1166,11 @@ def train_test_mode(
 
     # Learning rate scheduler
     scheduler = optim.lr_scheduler.ReduceLROnPlateau(
-        optimizer, mode='max', factor=0.3, patience=2, min_lr=1e-6
+        optimizer, mode='max', factor=0.3, patience=2, min_lr=1e-7
     )
 
     logger(f'Agent initialized: {agent.count_parameters():,} parameters', "INFO")
-    logger(f'Learning rate scheduler: ReduceLROnPlateau (factor=0.3, patience=2)', "INFO")
+    logger(f'Learning rate scheduler: ReduceLROnPlateau (factor=0.3, patience=2, min_lr=1e-7)', "INFO")
     logger(f'Loss coefficients: entropy={config.ppo.entropy_coef}, uncertainty={config.ppo.uncertainty_coef}, turnover={config.ppo.turnover_coef}', "INFO")
 
     # Setup CSV logging for epoch results
@@ -1149,11 +1179,13 @@ def train_test_mode(
         'epoch',
         # Training metrics (full split) - ONLY taker is optimized
         'train_sharpe_buyhold', 'train_sharpe_taker', 'train_sharpe_maker_neutral', 'train_sharpe_maker_rebate',
+        'train_pnl_buyhold', 'train_pnl_taker', 'train_pnl_maker_neutral', 'train_pnl_maker_rebate',
         'train_avg_reward', 'train_avg_pnl',
         'train_policy_loss', 'train_value_loss', 'train_entropy',
         'train_uncertainty', 'train_activity', 'train_turnover',
-        # Test metrics (test_data) - Sharpe scenarios only
+        # Test metrics (test_data) - Sharpe scenarios + PnL
         'test_sharpe_buyhold', 'test_sharpe_taker', 'test_sharpe_maker_neutral', 'test_sharpe_maker_rebate',
+        'test_pnl_buyhold', 'test_pnl_taker', 'test_pnl_maker_neutral', 'test_pnl_maker_rebate',
         'test_avg_reward', 'test_avg_pnl', 'test_activity',
         'learning_rate'
     ]
@@ -1249,13 +1281,17 @@ def train_test_mode(
                 # Training metrics (ONLY taker is optimized)
                 train_metrics["sharpe_raw"], train_metrics["sharpe_taker"],
                 train_metrics["sharpe_maker_neutral"], train_metrics["sharpe_maker_rebate"],
+                train_metrics["pnl_raw"], train_metrics["pnl_taker"],
+                train_metrics["pnl_maker_neutral"], train_metrics["pnl_maker_rebate"],
                 train_metrics["avg_reward"], train_metrics["avg_pnl"],
                 train_metrics["avg_policy_loss"], train_metrics["avg_value_loss"],
                 train_metrics["avg_entropy"], train_metrics["avg_uncertainty"],
                 train_metrics["avg_activity"], train_metrics["avg_turnover"],
-                # Test metrics - Sharpe scenarios only
+                # Test metrics - Sharpe scenarios + PnL
                 test_metrics["sharpe_raw"], test_metrics["sharpe_taker"],
                 test_metrics["sharpe_maker_neutral"], test_metrics["sharpe_maker_rebate"],
+                test_metrics["pnl_raw"], test_metrics["pnl_taker"],
+                test_metrics["pnl_maker_neutral"], test_metrics["pnl_maker_rebate"],
                 test_metrics["avg_reward"], test_metrics["avg_pnl"],
                 test_metrics["activity"],
                 current_lr

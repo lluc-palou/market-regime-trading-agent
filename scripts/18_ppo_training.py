@@ -437,10 +437,14 @@ def train_epoch(
     reward_config: RewardConfig,
     model_config: ModelConfig,
     experiment_type: ExperimentType,
-    device: str
+    device: str,
+    per_episode_returns: list = None
 ):
     """
     Train one epoch across multiple episodes.
+
+    Args:
+        per_episode_returns: Optional list to accumulate per-episode returns for all scenarios
 
     Returns:
         Training metrics dictionary
@@ -503,6 +507,17 @@ def train_epoch(
         episode_returns_taker.append(metrics['cumulative_raw_return_taker'])
         episode_returns_maker_neutral.append(metrics['cumulative_raw_return_maker_neutral'])
         episode_returns_maker_rebate.append(metrics['cumulative_raw_return_maker_rebate'])
+
+        # Log per-episode returns if tracking list provided
+        if per_episode_returns is not None:
+            per_episode_returns.append({
+                'episode_idx': len(per_episode_returns),
+                'role': 'train',
+                'return_buyhold': metrics['cumulative_raw_return_buyhold'],
+                'return_taker': metrics['cumulative_raw_return_taker'],
+                'return_maker_neutral': metrics['cumulative_raw_return_maker_neutral'],
+                'return_maker_rebate': metrics['cumulative_raw_return_maker_rebate']
+            })
 
         # Aggregate metrics by parent episode (day)
         parent_id = episode.parent_id if episode.parent_id is not None else ep_idx
@@ -744,10 +759,14 @@ def validate_epoch(
     model_config: ModelConfig,
     ppo_config: PPOConfig,
     experiment_type: ExperimentType,
-    device: str
+    device: str,
+    per_episode_returns: list = None
 ):
     """
     Validate on validation episodes.
+
+    Args:
+        per_episode_returns: Optional list to accumulate per-episode returns for all scenarios
 
     Returns:
         Validation metrics dictionary
@@ -799,6 +818,17 @@ def validate_epoch(
         episode_returns_taker.append(metrics['cumulative_raw_return_taker'])
         episode_returns_maker_neutral.append(metrics['cumulative_raw_return_maker_neutral'])
         episode_returns_maker_rebate.append(metrics['cumulative_raw_return_maker_rebate'])
+
+        # Log per-episode returns if tracking list provided
+        if per_episode_returns is not None:
+            per_episode_returns.append({
+                'episode_idx': len(per_episode_returns),
+                'role': 'val',
+                'return_buyhold': metrics['cumulative_raw_return_buyhold'],
+                'return_taker': metrics['cumulative_raw_return_taker'],
+                'return_maker_neutral': metrics['cumulative_raw_return_maker_neutral'],
+                'return_maker_rebate': metrics['cumulative_raw_return_maker_rebate']
+            })
 
         # Aggregate metrics by parent episode (day)
         parent_id = episode.parent_id if episode.parent_id is not None else ep_idx
@@ -1006,6 +1036,20 @@ def train_split(
 
     logger(f'Epoch results will be logged to: {results_csv_path}', "INFO")
 
+    # Setup CSV logging for per-episode returns (for cumulative return plotting)
+    episode_csv_path = LOG_DIR / f"split_{split_id}_episode_returns.csv"
+    episode_csv_header = [
+        'epoch', 'episode_idx', 'role',
+        'return_buyhold', 'return_taker', 'return_maker_neutral', 'return_maker_rebate'
+    ]
+
+    # Create per-episode CSV file with header
+    with open(episode_csv_path, 'w', newline='') as f:
+        writer = csv.writer(f)
+        writer.writerow(episode_csv_header)
+
+    logger(f'Per-episode returns will be logged to: {episode_csv_path}', "INFO")
+
     # Training loop
     metrics_logger = MetricsLogger(log_dir=str(LOG_DIR))
     best_val_sharpe = float('-inf')
@@ -1017,10 +1061,14 @@ def train_split(
         logger('', "INFO")
         logger(f'Epoch {epoch + 1}/{config.training.max_epochs}', "INFO")
 
+        # Per-episode returns tracking for this epoch
+        per_episode_returns = []
+
         # Training
         train_metrics = train_epoch(
             agent, optimizer, train_episodes,
-            config.ppo, config.reward, config.model, experiment_type, device
+            config.ppo, config.reward, config.model, experiment_type, device,
+            per_episode_returns
         )
 
         logger(f'  Train - Avg Reward: {train_metrics["avg_reward"]:.4f}, '
@@ -1038,8 +1086,23 @@ def train_split(
 
         # Validation (every epoch)
         val_metrics = validate_epoch(
-            agent, val_episodes, config.reward, config.model, config.ppo, experiment_type, device
+            agent, val_episodes, config.reward, config.model, config.ppo, experiment_type, device,
+            per_episode_returns
         )
+
+        # Write per-episode returns to CSV
+        with open(episode_csv_path, 'a', newline='') as f:
+            writer = csv.writer(f)
+            for episode_data in per_episode_returns:
+                writer.writerow([
+                    epoch + 1,  # Epoch number (1-indexed)
+                    episode_data['episode_idx'],
+                    episode_data['role'],
+                    episode_data['return_buyhold'],
+                    episode_data['return_taker'],
+                    episode_data['return_maker_neutral'],
+                    episode_data['return_maker_rebate']
+                ])
 
         logger(f'  Val - Avg Reward: {val_metrics["avg_reward"]:.4f}, '
                f'Avg PnL: {val_metrics["avg_pnl"]:.4f}', "INFO")
@@ -1240,6 +1303,20 @@ def train_test_mode(
 
     logger(f'Epoch results will be logged to: {results_csv_path}', "INFO")
 
+    # Setup CSV logging for per-episode returns (for cumulative return plotting)
+    episode_csv_path = LOG_DIR / f"test_split_{test_split}_episode_returns.csv"
+    episode_csv_header = [
+        'epoch', 'episode_idx', 'role',
+        'return_buyhold', 'return_taker', 'return_maker_neutral', 'return_maker_rebate'
+    ]
+
+    # Create per-episode CSV file with header
+    with open(episode_csv_path, 'w', newline='') as f:
+        writer = csv.writer(f)
+        writer.writerow(episode_csv_header)
+
+    logger(f'Per-episode returns will be logged to: {episode_csv_path}', "INFO")
+
     # Training loop
     metrics_logger = MetricsLogger(log_dir=str(LOG_DIR))
     best_test_sharpe = float('-inf')
@@ -1251,10 +1328,14 @@ def train_test_mode(
         logger('', "INFO")
         logger(f'Epoch {epoch + 1}/{config.training.max_epochs}', "INFO")
 
+        # Per-episode returns tracking for this epoch
+        per_episode_returns = []
+
         # Training on full split
         train_metrics = train_epoch(
             agent, optimizer, train_episodes,
-            config.ppo, config.reward, config.model, experiment_type, device
+            config.ppo, config.reward, config.model, experiment_type, device,
+            per_episode_returns
         )
 
         logger(f'  Train (Full Split) - Avg Reward: {train_metrics["avg_reward"]:.4f}, '
@@ -1272,8 +1353,23 @@ def train_test_mode(
 
         # Test evaluation (every epoch)
         test_metrics = validate_epoch(
-            agent, test_episodes, config.reward, config.model, config.ppo, experiment_type, device
+            agent, test_episodes, config.reward, config.model, config.ppo, experiment_type, device,
+            per_episode_returns
         )
+
+        # Write per-episode returns to CSV
+        with open(episode_csv_path, 'a', newline='') as f:
+            writer = csv.writer(f)
+            for episode_data in per_episode_returns:
+                writer.writerow([
+                    epoch + 1,  # Epoch number (1-indexed)
+                    episode_data['episode_idx'],
+                    episode_data['role'],  # 'train' or 'val' (test_data treated as val)
+                    episode_data['return_buyhold'],
+                    episode_data['return_taker'],
+                    episode_data['return_maker_neutral'],
+                    episode_data['return_maker_rebate']
+                ])
 
         logger(f'  Test (test_data) - Avg Reward: {test_metrics["avg_reward"]:.4f}, '
                f'Avg PnL: {test_metrics["avg_pnl"]:.4f}', "INFO")

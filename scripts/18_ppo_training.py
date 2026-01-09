@@ -438,18 +438,28 @@ def train_epoch(
     model_config: ModelConfig,
     experiment_type: ExperimentType,
     device: str,
-    per_episode_returns: list = None
+    per_episode_returns: list = None,
+    epoch_num: int = 0
 ):
     """
     Train one epoch across multiple episodes.
 
     Args:
         per_episode_returns: Optional list to accumulate per-episode returns for all scenarios
+        epoch_num: Current epoch number (0-indexed) for entropy annealing
 
     Returns:
         Training metrics dictionary
     """
     agent.train()
+
+    # Compute annealed entropy coefficient (linear decay from initial to final)
+    if epoch_num < ppo_config.entropy_decay_epochs:
+        progress = epoch_num / ppo_config.entropy_decay_epochs
+        current_entropy_coef = (ppo_config.entropy_coef * (1 - progress) +
+                               ppo_config.entropy_coef_final * progress)
+    else:
+        current_entropy_coef = ppo_config.entropy_coef_final
 
     state_buffer = StateBuffer(model_config.window_size)
     trajectory_buffer = TrajectoryBuffer(ppo_config.buffer_capacity)
@@ -593,7 +603,8 @@ def train_epoch(
         # Perform PPO update if buffer is full
         if trajectory_buffer.is_full():
             loss_metrics = ppo_update(
-                agent, trajectory_buffer, optimizer, ppo_config, experiment_type, device
+                agent, trajectory_buffer, optimizer, ppo_config, experiment_type, device,
+                entropy_coef_override=current_entropy_coef
             )
             epoch_metrics['total_policy_loss'] += loss_metrics['policy_loss']
             epoch_metrics['total_value_loss'] += loss_metrics['value_loss']
@@ -607,7 +618,8 @@ def train_epoch(
     # Final PPO update with remaining trajectories
     if len(trajectory_buffer) > 0:
         loss_metrics = ppo_update(
-            agent, trajectory_buffer, optimizer, ppo_config, experiment_type, device
+            agent, trajectory_buffer, optimizer, ppo_config, experiment_type, device,
+            entropy_coef_override=current_entropy_coef
         )
         epoch_metrics['total_policy_loss'] += loss_metrics['policy_loss']
         epoch_metrics['total_value_loss'] += loss_metrics['value_loss']
@@ -1068,11 +1080,21 @@ def train_split(
         train_metrics = train_epoch(
             agent, optimizer, train_episodes,
             config.ppo, config.reward, config.model, experiment_type, device,
-            per_episode_returns
+            per_episode_returns,
+            epoch_num=epoch
         )
 
+        # Compute current entropy coefficient for logging
+        if epoch < config.ppo.entropy_decay_epochs:
+            progress = epoch / config.ppo.entropy_decay_epochs
+            current_entropy_coef = (config.ppo.entropy_coef * (1 - progress) +
+                                   config.ppo.entropy_coef_final * progress)
+        else:
+            current_entropy_coef = config.ppo.entropy_coef_final
+
         logger(f'  Train - Avg Reward: {train_metrics["avg_reward"]:.4f}, '
-               f'Avg PnL: {train_metrics["avg_pnl"]:.4f}', "INFO")
+               f'Avg PnL: {train_metrics["avg_pnl"]:.4f}, '
+               f'Entropy Coef: {current_entropy_coef:.4f}', "INFO")
         logger(f'    Sharpe Ratios:', "INFO")
         logger(f'      Buy-and-Hold (baseline):  {train_metrics["sharpe_raw"]:.4f}', "INFO")
         logger(f'      Maker (0 bps):            {train_metrics["sharpe_maker_neutral"]:.4f}', "INFO")
@@ -1335,11 +1357,21 @@ def train_test_mode(
         train_metrics = train_epoch(
             agent, optimizer, train_episodes,
             config.ppo, config.reward, config.model, experiment_type, device,
-            per_episode_returns
+            per_episode_returns,
+            epoch_num=epoch
         )
 
+        # Compute current entropy coefficient for logging
+        if epoch < config.ppo.entropy_decay_epochs:
+            progress = epoch / config.ppo.entropy_decay_epochs
+            current_entropy_coef = (config.ppo.entropy_coef * (1 - progress) +
+                                   config.ppo.entropy_coef_final * progress)
+        else:
+            current_entropy_coef = config.ppo.entropy_coef_final
+
         logger(f'  Train (Full Split) - Avg Reward: {train_metrics["avg_reward"]:.4f}, '
-               f'Avg PnL: {train_metrics["avg_pnl"]:.4f}', "INFO")
+               f'Avg PnL: {train_metrics["avg_pnl"]:.4f}, '
+               f'Entropy Coef: {current_entropy_coef:.4f}', "INFO")
         logger(f'    Sharpe Ratios:', "INFO")
         logger(f'      Buy-and-Hold (baseline):  {train_metrics["sharpe_raw"]:.4f}', "INFO")
         logger(f'      Maker (0 bps):            {train_metrics["sharpe_maker_neutral"]:.4f}', "INFO")

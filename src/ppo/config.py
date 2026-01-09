@@ -86,7 +86,9 @@ class PPOConfig:
     gae_lambda: float = 0.95             # GAE lambda parameter
     clip_ratio: float = 0.2              # PPO clipping parameter (increased from 0.1 for better policy updates)
     value_coef: float = 0.20             # Value loss coefficient (middle ground: was 0.25 → 0.15 → 0.20)
-    entropy_coef: float = 0.11           # Entropy coefficient (middle ground: was 0.10 → 0.15 → 0.11)
+    entropy_coef: float = 0.15           # Initial entropy coefficient (exploration phase)
+    entropy_coef_final: float = 0.07     # Final entropy coefficient (convergence phase)
+    entropy_decay_epochs: int = 35       # Epochs over which to decay entropy (linear schedule)
     uncertainty_coef: float = 0.05       # Uncertainty penalty coefficient (middle ground: was 0.08 → 0.03 → 0.05)
     turnover_coef: float = 0.015         # Turnover penalty coefficient (REDUCED from 0.05 to allow more trading)
     max_grad_norm: float = 0.5           # Gradient clipping norm
@@ -108,8 +110,8 @@ class RewardConfig:
 @dataclass
 class TrainingConfig:
     """Training procedure configuration."""
-    max_epochs: int = 150                # Maximum training epochs (INCREASED from 100 for full convergence)
-    patience: int = 50                   # Early stopping patience (INCREASED from 40 to allow slow convergence)
+    max_epochs: int = 35                 # Training epochs per split (focused training window)
+    patience: int = 35                   # Early stopping patience (allow full training)
     min_delta: float = 0.01              # Minimum improvement for early stopping
     validate_every: int = 1              # Validate every epoch
     log_every: int = 10                  # Log every N episodes

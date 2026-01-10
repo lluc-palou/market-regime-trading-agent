@@ -129,10 +129,11 @@ def ppo_update(
         
         for start in range(0, T, config.batch_size):
             end = min(start + config.batch_size, T)
-            
+
             # Extract minibatch
             mb_codebooks = codebooks[start:end]
-            mb_features = features[start:end]
+            # Handle None features for codebook-only experiments
+            mb_features = features[start:end] if features is not None else None
             mb_timestamps = timestamps[start:end]
             mb_actions = actions[start:end]
             mb_old_log_probs = old_log_probs[start:end]

@@ -254,7 +254,11 @@ def run_episode(
 
         # Use non-blocking transfers with pinned memory for better performance
         codebooks = state['codebooks'].to(device, non_blocking=True)
-        features = state['features'].to(device, non_blocking=True)
+        # Handle None features for codebook-only experiments (Exp3, Exp4)
+        if state['features'] is not None:
+            features = state['features'].to(device, non_blocking=True)
+        else:
+            features = None
         timestamps = state['timestamps'].to(device, non_blocking=True)
 
         # Get current sample

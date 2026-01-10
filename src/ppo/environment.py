@@ -194,8 +194,8 @@ class EpisodeLoader:
 
         for episode in episodes:
             for sample in episode.samples:
-                # Convert features to tensor
-                if not isinstance(sample['features'], torch.Tensor):
+                # Convert features to tensor (skip if None for codebook-only experiments)
+                if sample['features'] is not None and not isinstance(sample['features'], torch.Tensor):
                     features_tensor = torch.tensor(sample['features'], dtype=torch.float32)
                     if self.use_pinned_memory:
                         features_tensor = features_tensor.pin_memory()
@@ -246,10 +246,11 @@ class EpisodeLoader:
             sequence_id = doc['sequence_id']
 
             # Prepare sample (defer tensorization until later for efficiency)
+            # Synthetic data: Uses same feature source as Experiment 3 (codebook indices only)
             sample = {
-                'codebook': doc['codebook_ind'],  # Synthetic uses 'codebook_ind'
-                'features': doc['features'],  # Keep as list for now
-                'timestamp': doc.get('timestamp', 0),  # Synthetic may not have real timestamps
+                'codebook': doc['codebook_index'],  # Codebook index (0-127)
+                'features': None,  # No features for codebook-only experiment
+                'timestamp': doc.get('timestamp', 0),  # Synthetic timestamps
                 'target': doc['target'],
                 'sequence_id': sequence_id,
                 'position_in_sequence': doc['position_in_sequence']

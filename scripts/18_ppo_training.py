@@ -274,6 +274,12 @@ def run_episode(
                     features, timestamps,
                     deterministic=deterministic
                 )
+            elif experiment_type == ExperimentType.EXP4_SYNTHETIC_BINS:
+                # Experiment 4: Codebook only (same as Experiment 3, but synthetic data)
+                action, log_prob, value, action_std = agent.act(
+                    codebooks, timestamps,
+                    deterministic=deterministic
+                )
             else:  # EXP3_CODEBOOK_ORIGINAL
                 # Experiment 3: Codebook only
                 action, log_prob, value, action_std = agent.act(
@@ -1004,6 +1010,9 @@ def train_split(
         agent = ActorCriticTransformer(config.model).to(device)
     elif experiment_type == ExperimentType.EXP2_FEATURES_ORIGINAL:
         agent = ActorCriticFeatures(config.model).to(device)
+    elif experiment_type == ExperimentType.EXP4_SYNTHETIC_BINS:
+        # Experiment 4: Same architecture as Experiment 3 (codebook-only)
+        agent = ActorCriticCodebook(config.model).to(device)
     else:  # EXP3_CODEBOOK_ORIGINAL
         agent = ActorCriticCodebook(config.model).to(device)
 
@@ -1281,6 +1290,9 @@ def train_test_mode(
         agent = ActorCriticTransformer(config.model).to(device)
     elif experiment_type == ExperimentType.EXP2_FEATURES_ORIGINAL:
         agent = ActorCriticFeatures(config.model).to(device)
+    elif experiment_type == ExperimentType.EXP4_SYNTHETIC_BINS:
+        # Experiment 4: Same architecture as Experiment 3 (codebook-only)
+        agent = ActorCriticCodebook(config.model).to(device)
     else:  # EXP3_CODEBOOK_ORIGINAL
         agent = ActorCriticCodebook(config.model).to(device)
 

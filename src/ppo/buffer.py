@@ -50,7 +50,7 @@ class StateBuffer:
         Returns:
             None if buffer not full, otherwise dict with:
                 - codebooks: (window_size,)
-                - features: (window_size, n_features)
+                - features: (window_size, n_features) or None for codebook-only experiments
                 - timestamps: (window_size,)
         """
         if len(self.codebooks) < self.window_size:
@@ -65,13 +65,21 @@ class StateBuffer:
             codebooks_tensor = torch.tensor(
                 list(self.codebooks), dtype=torch.long
             ).pin_memory()
-            features_tensor = torch.stack(list(self.features)).pin_memory()
+            # Handle None features for codebook-only experiments
+            if self.features[0] is not None:
+                features_tensor = torch.stack(list(self.features)).pin_memory()
+            else:
+                features_tensor = None
             timestamps_tensor = torch.tensor(
                 list(self.timestamps), dtype=torch.float32
             ).pin_memory()
         else:
             codebooks_tensor = torch.tensor(list(self.codebooks), dtype=torch.long)
-            features_tensor = torch.stack(list(self.features))
+            # Handle None features for codebook-only experiments
+            if self.features[0] is not None:
+                features_tensor = torch.stack(list(self.features))
+            else:
+                features_tensor = None
             timestamps_tensor = torch.tensor(list(self.timestamps), dtype=torch.float32)
 
         self._cached_state = {

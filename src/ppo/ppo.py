@@ -152,6 +152,11 @@ def ppo_update(
                 new_log_probs, new_values, entropy, std = agent.evaluate_actions(
                     mb_features, mb_timestamps, mb_actions
                 )
+            elif experiment_type == ExperimentType.EXP4_SYNTHETIC_BINS:
+                # Experiment 4: Codebook only (same as Experiment 3, but synthetic data)
+                new_log_probs, new_values, entropy, std = agent.evaluate_actions(
+                    mb_codebooks, mb_timestamps, mb_actions
+                )
             else:  # ExperimentType.EXP3_CODEBOOK_ORIGINAL
                 # Experiment 3: Codebook only
                 new_log_probs, new_values, entropy, std = agent.evaluate_actions(

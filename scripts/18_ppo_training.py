@@ -410,7 +410,7 @@ def run_episode(
         if not deterministic:
             transition = Transition(
                 codebooks=codebooks.cpu(),
-                features=features.cpu(),
+                features=features.cpu() if features is not None else None,
                 timestamps=timestamps.cpu(),
                 action=action_val,
                 log_prob=log_prob_val,

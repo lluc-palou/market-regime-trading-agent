@@ -178,14 +178,7 @@ def run_production_training(
 
                 # Reconstruct model from checkpoint
                 from .model import VQVAEModel
-                model = VQVAEModel(
-                    input_dim=checkpoint['config']['input_dim'],
-                    latent_dim=checkpoint['config']['latent_dim'],
-                    num_embeddings=checkpoint['config']['num_embeddings'],
-                    commitment_cost=checkpoint['config']['commitment_cost'],
-                    n_conv_layers=checkpoint['config']['n_conv_layers'],
-                    dropout=checkpoint['config']['dropout']
-                ).to(device)
+                model = VQVAEModel(config=checkpoint['config']).to(device)
                 model.load_state_dict(checkpoint['model_state_dict'])
                 model.eval()
 

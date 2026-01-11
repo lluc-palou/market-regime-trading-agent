@@ -174,11 +174,11 @@ def run_production_training(
                 logger('Skipping training, loading existing model...', "INFO")
 
                 # Load existing model
-                checkpoint = torch.load(model_path, map_location=device)
+                checkpoint = torch.load(model_path, map_location=device, weights_only=False)
 
                 # Reconstruct model from checkpoint
-                from .model import VQVAE
-                model = VQVAE(
+                from .model import VQVAEModel
+                model = VQVAEModel(
                     input_dim=checkpoint['config']['input_dim'],
                     latent_dim=checkpoint['config']['latent_dim'],
                     num_embeddings=checkpoint['config']['num_embeddings'],

@@ -14,7 +14,7 @@ drl-lob/
 │   ├── 02_data_ingestion.py                    <- Stage 2: Ingest .parquet files to MongoDB
 │   ├── 03_data_splitting.py                    <- Stage 3: Assign CPCV fold IDs to samples
 │   ├── 04_feature_derivation.py                <- Stage 4: Derive LOB-based features (microprice, depth, etc.)
-│   ├── 05_lob_standardization.py               <- Stage 5: Standardize LOB features (price/spread normalization)
+│   ├── 05_lob_standardization.py               <- Stage 5: LOB standardization
 │   ├── 06_materialize_splits.py                <- Stage 6: Create split_X collections and test_data
 │   ├── 07_feature_transform.py                 <- Stage 8: Select and fit feature transformations
 │   ├── 08_apply_feature_transforms.py          <- Stage 9: Apply fitted transformers to data
@@ -61,7 +61,7 @@ drl-lob/
 │   │   ├── orchestrator.py                     <- Main feature derivation orchestrator
 │   │   └── __init__.py
 │   │
-│   ├── lob_standardization/                    <- LOB data standardization
+│   ├── lob_standardization/                    <- LOB standardization
 │   │   ├── price_standardizer.py               <- Price/spread normalization (tick-based)
 │   │   ├── volume_quantizer.py                 <- Volume quantization to bins
 │   │   ├── volume_coverage_analyzer.py         <- Analyze volume distribution coverage
@@ -70,7 +70,7 @@ drl-lob/
 │   │   └── __init__.py
 │   │
 │   ├── vqvae_representation/                   <- VQ-VAE for latent encoding
-│   │   ├── model.py                            <- VQ-VAE architecture with EMA codebook updates
+│   │   ├── model.py                            <- VQ-VAE architecture
 │   │   ├── trainer.py                          <- Training loop with early stopping
 │   │   ├── hyperparameter_search.py            <- Grid search for optimal config
 │   │   ├── production_trainer.py               <- Production model training
@@ -155,10 +155,6 @@ drl-lob/
 │   ├── environment.yaml                        <- Conda environment specification
 │   └── installation_guide.md                   <- Setup guide (Java, Scala, Spark, MongoDB)
 │
-├── lob_data/                                   <- Local LOB data storage
-│   └── README.md                               <- Data directory documentation
-│
-├── check_feature_pipeline.py                   <- Diagnostic script for transform/standardization
 └── .gitignore                                  <- Git ignore patterns
 ```
 

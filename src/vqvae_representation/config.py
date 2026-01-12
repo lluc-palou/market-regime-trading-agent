@@ -20,11 +20,9 @@ HYPERPARAM_GRID = {
     'beta': [0.25, 0.5],            # Commitment loss coefficient: low vs high
     'lr': [1e-3],                   # Learning rate: single best estimate (fast)
     'dropout': [0.2],               # Dropout rate for regularization
-    'use_ema': [True],              # EMA codebook updates (improved stability)
-    'ema_decay': [0.99],            # EMA decay rate (standard value)
     'recon_loss_type': ['wasserstein']  # Reconstruction loss: Wasserstein for probability distributions
 }
-# Total: 2 × 1 × 2 × 2 × 1 × 1 × 1 × 1 × 1 = 8 configurations (worst-case budget)
+# Total: 2 × 1 × 2 × 2 × 1 × 1 × 1 = 8 configurations (worst-case budget)
 # Parameter range: ~800K (K=128,D=64,n=2) to ~2.1M (K=512,D=64,n=3)
 # ALL 28 splits tested per configuration (full statistical validity)
 #

@@ -142,48 +142,67 @@ class LatentGenerator:
     ) -> Dict:
         """
         Process one group of hours (typically 100).
-        
+
         Args:
             hour_group: List of hours to process
             split_id: Split identifier
             mini_batch_size: Mini-batch size for GPU processing
-            
+
         Returns:
             Statistics dictionary
         """
-        # Load all samples for this hour group (both train and validation)
-        hour_data = []  # List of (hour, role, samples_tensor, original_docs)
-        
+        # Check if processing test_data (no role field)
+        is_test_data = 'test' in self.split_collection.lower()
+
+        # Load all samples for this hour group (both train and validation, or all if test_data)
+        hour_data = []  # List of (role, samples_tensor, original_docs)
+
         for hour in hour_group:
             hour_end = hour + timedelta(hours=1)
-            
-            # Load training samples
-            train_batch = load_hourly_batch(
-                self.spark,
-                self.db_name,
-                self.split_collection,
-                hour,
-                hour_end,
-                role='train'
-            )
-            
-            if train_batch is not None:
-                train_docs = self._fetch_original_documents(hour, hour_end, 'train')
-                hour_data.append(('train', train_batch, train_docs))
-            
-            # Load validation samples
-            val_batch = load_hourly_batch(
-                self.spark,
-                self.db_name,
-                self.split_collection,
-                hour,
-                hour_end,
-                role='validation'
-            )
-            
-            if val_batch is not None:
-                val_docs = self._fetch_original_documents(hour, hour_end, 'validation')
-                hour_data.append(('validation', val_batch, val_docs))
+
+            if is_test_data:
+                # For test_data: load all samples without role filter
+                all_batch = load_hourly_batch(
+                    self.spark,
+                    self.db_name,
+                    self.split_collection,
+                    hour,
+                    hour_end,
+                    role=None  # No role filter for test_data
+                )
+
+                if all_batch is not None:
+                    all_docs = self._fetch_original_documents(hour, hour_end, role=None)
+                    hour_data.append(('test', all_batch, all_docs))
+            else:
+                # For split collections: load train and validation separately
+                # Load training samples
+                train_batch = load_hourly_batch(
+                    self.spark,
+                    self.db_name,
+                    self.split_collection,
+                    hour,
+                    hour_end,
+                    role='train'
+                )
+
+                if train_batch is not None:
+                    train_docs = self._fetch_original_documents(hour, hour_end, 'train')
+                    hour_data.append(('train', train_batch, train_docs))
+
+                # Load validation samples
+                val_batch = load_hourly_batch(
+                    self.spark,
+                    self.db_name,
+                    self.split_collection,
+                    hour,
+                    hour_end,
+                    role='validation'
+                )
+
+                if val_batch is not None:
+                    val_docs = self._fetch_original_documents(hour, hour_end, 'validation')
+                    hour_data.append(('validation', val_batch, val_docs))
         
         # Process all accumulated samples through model
         total_processed = 0
@@ -230,7 +249,7 @@ class LatentGenerator:
         self,
         hour_start: datetime,
         hour_end: datetime,
-        role: str
+        role: str = None
     ) -> List[Dict]:
         """
         Fetch original documents from MongoDB using PyMongo (faster than Spark).
@@ -238,7 +257,7 @@ class LatentGenerator:
         Args:
             hour_start: Start of hour window
             hour_end: End of hour window
-            role: 'train' or 'validation'
+            role: 'train', 'validation', or None (for test_data or all roles)
 
         Returns:
             List of original documents
@@ -248,9 +267,12 @@ class LatentGenerator:
 
         # Query MongoDB
         query = {
-            'timestamp': {'$gte': hour_start, '$lt': hour_end},
-            'role': role
+            'timestamp': {'$gte': hour_start, '$lt': hour_end}
         }
+
+        # Add role filter only if specified (test_data doesn't have role field)
+        if role is not None:
+            query['role'] = role
 
         # Fetch documents (sorted by timestamp for consistency)
         docs = list(input_col.find(query).sort('timestamp', 1))

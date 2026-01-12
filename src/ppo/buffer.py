@@ -9,9 +9,9 @@ from dataclasses import dataclass
 @dataclass
 class Transition:
     """Single transition in trajectory."""
-    codebooks: torch.Tensor      # (window_size,)
-    features: torch.Tensor        # (window_size, n_features)
-    timestamps: torch.Tensor      # (window_size,)
+    codebooks: torch.Tensor                    # (window_size,)
+    features: Optional[torch.Tensor]           # (window_size, n_features) or None for codebook-only
+    timestamps: torch.Tensor                    # (window_size,)
     action: float
     log_prob: float
     reward: float
@@ -50,7 +50,7 @@ class StateBuffer:
         Returns:
             None if buffer not full, otherwise dict with:
                 - codebooks: (window_size,)
-                - features: (window_size, n_features)
+                - features: (window_size, n_features) or None for codebook-only experiments
                 - timestamps: (window_size,)
         """
         if len(self.codebooks) < self.window_size:
@@ -65,13 +65,21 @@ class StateBuffer:
             codebooks_tensor = torch.tensor(
                 list(self.codebooks), dtype=torch.long
             ).pin_memory()
-            features_tensor = torch.stack(list(self.features)).pin_memory()
+            # Handle None features for codebook-only experiments
+            if self.features[0] is not None:
+                features_tensor = torch.stack(list(self.features)).pin_memory()
+            else:
+                features_tensor = None
             timestamps_tensor = torch.tensor(
                 list(self.timestamps), dtype=torch.float32
             ).pin_memory()
         else:
             codebooks_tensor = torch.tensor(list(self.codebooks), dtype=torch.long)
-            features_tensor = torch.stack(list(self.features))
+            # Handle None features for codebook-only experiments
+            if self.features[0] is not None:
+                features_tensor = torch.stack(list(self.features))
+            else:
+                features_tensor = None
             timestamps_tensor = torch.tensor(list(self.timestamps), dtype=torch.float32)
 
         self._cached_state = {
@@ -110,11 +118,11 @@ class TrajectoryBuffer:
     def get_batch(self, device: str = 'cuda') -> Dict[str, torch.Tensor]:
         """
         Return all transitions as batched tensors.
-        
+
         Returns:
             Dictionary with batched tensors:
                 - codebooks: (T, window_size)
-                - features: (T, window_size, n_features)
+                - features: (T, window_size, n_features) or None for codebook-only experiments
                 - timestamps: (T, window_size)
                 - actions: (T,)
                 - log_probs: (T,)
@@ -124,11 +132,17 @@ class TrajectoryBuffer:
         """
         if len(self.transitions) == 0:
             raise ValueError("Buffer is empty")
-        
+
+        # Handle None features for codebook-only experiments
+        if self.transitions[0].features is not None:
+            features_batch = torch.stack([t.features for t in self.transitions]).to(device, non_blocking=True)
+        else:
+            features_batch = None
+
         # Use non-blocking transfers for better performance (works with pinned memory)
         return {
             'codebooks': torch.stack([t.codebooks for t in self.transitions]).to(device, non_blocking=True),
-            'features': torch.stack([t.features for t in self.transitions]).to(device, non_blocking=True),
+            'features': features_batch,
             'timestamps': torch.stack([t.timestamps for t in self.transitions]).to(device, non_blocking=True),
             'actions': torch.tensor([t.action for t in self.transitions], dtype=torch.float32).to(device, non_blocking=True),
             'log_probs': torch.tensor([t.log_prob for t in self.transitions], dtype=torch.float32).to(device, non_blocking=True),

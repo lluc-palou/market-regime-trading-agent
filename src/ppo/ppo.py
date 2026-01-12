@@ -56,7 +56,8 @@ def ppo_update(
     optimizer: torch.optim.Optimizer,
     config,
     experiment_type,
-    device: str = 'cuda'
+    device: str = 'cuda',
+    entropy_coef_override: float = None
 ) -> Dict[str, float]:
     """
     Perform PPO update using trajectories in buffer.
@@ -68,6 +69,7 @@ def ppo_update(
         optimizer: Optimizer
         config: PPOConfig with hyperparameters
         device: Device for computation
+        entropy_coef_override: Optional override for entropy coefficient (for annealing)
 
     Returns:
         Dictionary with loss metrics
@@ -127,10 +129,11 @@ def ppo_update(
         
         for start in range(0, T, config.batch_size):
             end = min(start + config.batch_size, T)
-            
+
             # Extract minibatch
             mb_codebooks = codebooks[start:end]
-            mb_features = features[start:end]
+            # Handle None features for codebook-only experiments
+            mb_features = features[start:end] if features is not None else None
             mb_timestamps = timestamps[start:end]
             mb_actions = actions[start:end]
             mb_old_log_probs = old_log_probs[start:end]
@@ -149,6 +152,11 @@ def ppo_update(
                 # Experiment 2: Features only
                 new_log_probs, new_values, entropy, std = agent.evaluate_actions(
                     mb_features, mb_timestamps, mb_actions
+                )
+            elif experiment_type == ExperimentType.EXP4_SYNTHETIC_BINS:
+                # Experiment 4: Codebook only (same as Experiment 3, but synthetic data)
+                new_log_probs, new_values, entropy, std = agent.evaluate_actions(
+                    mb_codebooks, mb_timestamps, mb_actions
                 )
             else:  # ExperimentType.EXP3_CODEBOOK_ORIGINAL
                 # Experiment 3: Codebook only
@@ -174,8 +182,9 @@ def ppo_update(
             # Policy gradient is unchanged (uses normalized advantages from raw returns via GAE)
             value_loss = F.mse_loss(new_values, mb_returns_normalized)
 
-            # Fixed entropy bonus (encourages exploration)
-            entropy_bonus = config.entropy_coef * entropy.mean()
+            # Entropy bonus (encourages exploration, can be annealed)
+            current_entropy_coef = entropy_coef_override if entropy_coef_override is not None else config.entropy_coef
+            entropy_bonus = current_entropy_coef * entropy.mean()
 
             # Uncertainty penalty (prevents std exploitation)
             uncertainty_penalty = config.uncertainty_coef * std.mean()

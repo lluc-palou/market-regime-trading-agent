@@ -254,7 +254,11 @@ def run_episode(
 
         # Use non-blocking transfers with pinned memory for better performance
         codebooks = state['codebooks'].to(device, non_blocking=True)
-        features = state['features'].to(device, non_blocking=True)
+        # Handle None features for codebook-only experiments (Exp3, Exp4)
+        if state['features'] is not None:
+            features = state['features'].to(device, non_blocking=True)
+        else:
+            features = None
         timestamps = state['timestamps'].to(device, non_blocking=True)
 
         # Get current sample
@@ -272,6 +276,12 @@ def run_episode(
                 # Experiment 2: Features only
                 action, log_prob, value, action_std = agent.act(
                     features, timestamps,
+                    deterministic=deterministic
+                )
+            elif experiment_type == ExperimentType.EXP4_SYNTHETIC_BINS:
+                # Experiment 4: Codebook only (same as Experiment 3, but synthetic data)
+                action, log_prob, value, action_std = agent.act(
+                    codebooks, timestamps,
                     deterministic=deterministic
                 )
             else:  # EXP3_CODEBOOK_ORIGINAL
@@ -400,7 +410,7 @@ def run_episode(
         if not deterministic:
             transition = Transition(
                 codebooks=codebooks.cpu(),
-                features=features.cpu(),
+                features=features.cpu() if features is not None else None,
                 timestamps=timestamps.cpu(),
                 action=action_val,
                 log_prob=log_prob_val,
@@ -437,15 +447,29 @@ def train_epoch(
     reward_config: RewardConfig,
     model_config: ModelConfig,
     experiment_type: ExperimentType,
-    device: str
+    device: str,
+    per_episode_returns: list = None,
+    epoch_num: int = 0
 ):
     """
     Train one epoch across multiple episodes.
+
+    Args:
+        per_episode_returns: Optional list to accumulate per-episode returns for all scenarios
+        epoch_num: Current epoch number (0-indexed) for entropy annealing
 
     Returns:
         Training metrics dictionary
     """
     agent.train()
+
+    # Compute annealed entropy coefficient (linear decay from initial to final)
+    if epoch_num < ppo_config.entropy_decay_epochs:
+        progress = epoch_num / ppo_config.entropy_decay_epochs
+        current_entropy_coef = (ppo_config.entropy_coef * (1 - progress) +
+                               ppo_config.entropy_coef_final * progress)
+    else:
+        current_entropy_coef = ppo_config.entropy_coef_final
 
     state_buffer = StateBuffer(model_config.window_size)
     trajectory_buffer = TrajectoryBuffer(ppo_config.buffer_capacity)
@@ -503,6 +527,17 @@ def train_epoch(
         episode_returns_taker.append(metrics['cumulative_raw_return_taker'])
         episode_returns_maker_neutral.append(metrics['cumulative_raw_return_maker_neutral'])
         episode_returns_maker_rebate.append(metrics['cumulative_raw_return_maker_rebate'])
+
+        # Log per-episode returns if tracking list provided
+        if per_episode_returns is not None:
+            per_episode_returns.append({
+                'episode_idx': len(per_episode_returns),
+                'role': 'train',
+                'return_buyhold': metrics['cumulative_raw_return_buyhold'],
+                'return_taker': metrics['cumulative_raw_return_taker'],
+                'return_maker_neutral': metrics['cumulative_raw_return_maker_neutral'],
+                'return_maker_rebate': metrics['cumulative_raw_return_maker_rebate']
+            })
 
         # Aggregate metrics by parent episode (day)
         parent_id = episode.parent_id if episode.parent_id is not None else ep_idx
@@ -578,7 +613,8 @@ def train_epoch(
         # Perform PPO update if buffer is full
         if trajectory_buffer.is_full():
             loss_metrics = ppo_update(
-                agent, trajectory_buffer, optimizer, ppo_config, experiment_type, device
+                agent, trajectory_buffer, optimizer, ppo_config, experiment_type, device,
+                entropy_coef_override=current_entropy_coef
             )
             epoch_metrics['total_policy_loss'] += loss_metrics['policy_loss']
             epoch_metrics['total_value_loss'] += loss_metrics['value_loss']
@@ -592,7 +628,8 @@ def train_epoch(
     # Final PPO update with remaining trajectories
     if len(trajectory_buffer) > 0:
         loss_metrics = ppo_update(
-            agent, trajectory_buffer, optimizer, ppo_config, experiment_type, device
+            agent, trajectory_buffer, optimizer, ppo_config, experiment_type, device,
+            entropy_coef_override=current_entropy_coef
         )
         epoch_metrics['total_policy_loss'] += loss_metrics['policy_loss']
         epoch_metrics['total_value_loss'] += loss_metrics['value_loss']
@@ -744,10 +781,14 @@ def validate_epoch(
     model_config: ModelConfig,
     ppo_config: PPOConfig,
     experiment_type: ExperimentType,
-    device: str
+    device: str,
+    per_episode_returns: list = None
 ):
     """
     Validate on validation episodes.
+
+    Args:
+        per_episode_returns: Optional list to accumulate per-episode returns for all scenarios
 
     Returns:
         Validation metrics dictionary
@@ -799,6 +840,17 @@ def validate_epoch(
         episode_returns_taker.append(metrics['cumulative_raw_return_taker'])
         episode_returns_maker_neutral.append(metrics['cumulative_raw_return_maker_neutral'])
         episode_returns_maker_rebate.append(metrics['cumulative_raw_return_maker_rebate'])
+
+        # Log per-episode returns if tracking list provided
+        if per_episode_returns is not None:
+            per_episode_returns.append({
+                'episode_idx': len(per_episode_returns),
+                'role': 'val',
+                'return_buyhold': metrics['cumulative_raw_return_buyhold'],
+                'return_taker': metrics['cumulative_raw_return_taker'],
+                'return_maker_neutral': metrics['cumulative_raw_return_maker_neutral'],
+                'return_maker_rebate': metrics['cumulative_raw_return_maker_rebate']
+            })
 
         # Aggregate metrics by parent episode (day)
         parent_id = episode.parent_id if episode.parent_id is not None else ep_idx
@@ -962,6 +1014,9 @@ def train_split(
         agent = ActorCriticTransformer(config.model).to(device)
     elif experiment_type == ExperimentType.EXP2_FEATURES_ORIGINAL:
         agent = ActorCriticFeatures(config.model).to(device)
+    elif experiment_type == ExperimentType.EXP4_SYNTHETIC_BINS:
+        # Experiment 4: Same architecture as Experiment 3 (codebook-only)
+        agent = ActorCriticCodebook(config.model).to(device)
     else:  # EXP3_CODEBOOK_ORIGINAL
         agent = ActorCriticCodebook(config.model).to(device)
 
@@ -973,11 +1028,11 @@ def train_split(
 
     # Learning rate scheduler - reduces LR when validation Sharpe plateaus
     scheduler = optim.lr_scheduler.ReduceLROnPlateau(
-        optimizer, mode='max', factor=0.5, patience=5, min_lr=1e-8
+        optimizer, mode='max', factor=0.5, patience=8, min_lr=1e-8
     )
 
     logger(f'Agent initialized: {agent.count_parameters():,} parameters', "INFO")
-    logger(f'Learning rate scheduler: ReduceLROnPlateau (factor=0.5, patience=5, min_lr=1e-8)', "INFO")
+    logger(f'Learning rate scheduler: ReduceLROnPlateau (factor=0.5, patience=8, min_lr=1e-8)', "INFO")
     logger(f'Loss coefficients: entropy={config.ppo.entropy_coef}, uncertainty={config.ppo.uncertainty_coef}, turnover={config.ppo.turnover_coef}', "INFO")
 
     # Setup CSV logging for epoch results
@@ -1006,6 +1061,20 @@ def train_split(
 
     logger(f'Epoch results will be logged to: {results_csv_path}', "INFO")
 
+    # Setup CSV logging for per-episode returns (for cumulative return plotting)
+    episode_csv_path = LOG_DIR / f"split_{split_id}_episode_returns.csv"
+    episode_csv_header = [
+        'epoch', 'episode_idx', 'role',
+        'return_buyhold', 'return_taker', 'return_maker_neutral', 'return_maker_rebate'
+    ]
+
+    # Create per-episode CSV file with header
+    with open(episode_csv_path, 'w', newline='') as f:
+        writer = csv.writer(f)
+        writer.writerow(episode_csv_header)
+
+    logger(f'Per-episode returns will be logged to: {episode_csv_path}', "INFO")
+
     # Training loop
     metrics_logger = MetricsLogger(log_dir=str(LOG_DIR))
     best_val_sharpe = float('-inf')
@@ -1017,14 +1086,28 @@ def train_split(
         logger('', "INFO")
         logger(f'Epoch {epoch + 1}/{config.training.max_epochs}', "INFO")
 
+        # Per-episode returns tracking for this epoch
+        per_episode_returns = []
+
         # Training
         train_metrics = train_epoch(
             agent, optimizer, train_episodes,
-            config.ppo, config.reward, config.model, experiment_type, device
+            config.ppo, config.reward, config.model, experiment_type, device,
+            per_episode_returns,
+            epoch_num=epoch
         )
 
+        # Compute current entropy coefficient for logging
+        if epoch < config.ppo.entropy_decay_epochs:
+            progress = epoch / config.ppo.entropy_decay_epochs
+            current_entropy_coef = (config.ppo.entropy_coef * (1 - progress) +
+                                   config.ppo.entropy_coef_final * progress)
+        else:
+            current_entropy_coef = config.ppo.entropy_coef_final
+
         logger(f'  Train - Avg Reward: {train_metrics["avg_reward"]:.4f}, '
-               f'Avg PnL: {train_metrics["avg_pnl"]:.4f}', "INFO")
+               f'Avg PnL: {train_metrics["avg_pnl"]:.4f}, '
+               f'Entropy Coef: {current_entropy_coef:.4f}', "INFO")
         logger(f'    Sharpe Ratios:', "INFO")
         logger(f'      Buy-and-Hold (baseline):  {train_metrics["sharpe_raw"]:.4f}', "INFO")
         logger(f'      Maker (0 bps):            {train_metrics["sharpe_maker_neutral"]:.4f}', "INFO")
@@ -1038,8 +1121,23 @@ def train_split(
 
         # Validation (every epoch)
         val_metrics = validate_epoch(
-            agent, val_episodes, config.reward, config.model, config.ppo, experiment_type, device
+            agent, val_episodes, config.reward, config.model, config.ppo, experiment_type, device,
+            per_episode_returns
         )
+
+        # Write per-episode returns to CSV
+        with open(episode_csv_path, 'a', newline='') as f:
+            writer = csv.writer(f)
+            for episode_data in per_episode_returns:
+                writer.writerow([
+                    epoch + 1,  # Epoch number (1-indexed)
+                    episode_data['episode_idx'],
+                    episode_data['role'],
+                    episode_data['return_buyhold'],
+                    episode_data['return_taker'],
+                    episode_data['return_maker_neutral'],
+                    episode_data['return_maker_rebate']
+                ])
 
         logger(f'  Val - Avg Reward: {val_metrics["avg_reward"]:.4f}, '
                f'Avg PnL: {val_metrics["avg_pnl"]:.4f}', "INFO")
@@ -1196,6 +1294,9 @@ def train_test_mode(
         agent = ActorCriticTransformer(config.model).to(device)
     elif experiment_type == ExperimentType.EXP2_FEATURES_ORIGINAL:
         agent = ActorCriticFeatures(config.model).to(device)
+    elif experiment_type == ExperimentType.EXP4_SYNTHETIC_BINS:
+        # Experiment 4: Same architecture as Experiment 3 (codebook-only)
+        agent = ActorCriticCodebook(config.model).to(device)
     else:  # EXP3_CODEBOOK_ORIGINAL
         agent = ActorCriticCodebook(config.model).to(device)
 
@@ -1207,11 +1308,11 @@ def train_test_mode(
 
     # Learning rate scheduler
     scheduler = optim.lr_scheduler.ReduceLROnPlateau(
-        optimizer, mode='max', factor=0.5, patience=5, min_lr=1e-8
+        optimizer, mode='max', factor=0.5, patience=8, min_lr=1e-8
     )
 
     logger(f'Agent initialized: {agent.count_parameters():,} parameters', "INFO")
-    logger(f'Learning rate scheduler: ReduceLROnPlateau (factor=0.5, patience=5, min_lr=1e-8)', "INFO")
+    logger(f'Learning rate scheduler: ReduceLROnPlateau (factor=0.5, patience=8, min_lr=1e-8)', "INFO")
     logger(f'Loss coefficients: entropy={config.ppo.entropy_coef}, uncertainty={config.ppo.uncertainty_coef}, turnover={config.ppo.turnover_coef}', "INFO")
 
     # Setup CSV logging for epoch results
@@ -1240,6 +1341,20 @@ def train_test_mode(
 
     logger(f'Epoch results will be logged to: {results_csv_path}', "INFO")
 
+    # Setup CSV logging for per-episode returns (for cumulative return plotting)
+    episode_csv_path = LOG_DIR / f"test_split_{test_split}_episode_returns.csv"
+    episode_csv_header = [
+        'epoch', 'episode_idx', 'role',
+        'return_buyhold', 'return_taker', 'return_maker_neutral', 'return_maker_rebate'
+    ]
+
+    # Create per-episode CSV file with header
+    with open(episode_csv_path, 'w', newline='') as f:
+        writer = csv.writer(f)
+        writer.writerow(episode_csv_header)
+
+    logger(f'Per-episode returns will be logged to: {episode_csv_path}', "INFO")
+
     # Training loop
     metrics_logger = MetricsLogger(log_dir=str(LOG_DIR))
     best_test_sharpe = float('-inf')
@@ -1251,14 +1366,28 @@ def train_test_mode(
         logger('', "INFO")
         logger(f'Epoch {epoch + 1}/{config.training.max_epochs}', "INFO")
 
+        # Per-episode returns tracking for this epoch
+        per_episode_returns = []
+
         # Training on full split
         train_metrics = train_epoch(
             agent, optimizer, train_episodes,
-            config.ppo, config.reward, config.model, experiment_type, device
+            config.ppo, config.reward, config.model, experiment_type, device,
+            per_episode_returns,
+            epoch_num=epoch
         )
 
+        # Compute current entropy coefficient for logging
+        if epoch < config.ppo.entropy_decay_epochs:
+            progress = epoch / config.ppo.entropy_decay_epochs
+            current_entropy_coef = (config.ppo.entropy_coef * (1 - progress) +
+                                   config.ppo.entropy_coef_final * progress)
+        else:
+            current_entropy_coef = config.ppo.entropy_coef_final
+
         logger(f'  Train (Full Split) - Avg Reward: {train_metrics["avg_reward"]:.4f}, '
-               f'Avg PnL: {train_metrics["avg_pnl"]:.4f}', "INFO")
+               f'Avg PnL: {train_metrics["avg_pnl"]:.4f}, '
+               f'Entropy Coef: {current_entropy_coef:.4f}', "INFO")
         logger(f'    Sharpe Ratios:', "INFO")
         logger(f'      Buy-and-Hold (baseline):  {train_metrics["sharpe_raw"]:.4f}', "INFO")
         logger(f'      Maker (0 bps):            {train_metrics["sharpe_maker_neutral"]:.4f}', "INFO")
@@ -1272,8 +1401,23 @@ def train_test_mode(
 
         # Test evaluation (every epoch)
         test_metrics = validate_epoch(
-            agent, test_episodes, config.reward, config.model, config.ppo, experiment_type, device
+            agent, test_episodes, config.reward, config.model, config.ppo, experiment_type, device,
+            per_episode_returns
         )
+
+        # Write per-episode returns to CSV
+        with open(episode_csv_path, 'a', newline='') as f:
+            writer = csv.writer(f)
+            for episode_data in per_episode_returns:
+                writer.writerow([
+                    epoch + 1,  # Epoch number (1-indexed)
+                    episode_data['episode_idx'],
+                    episode_data['role'],  # 'train' or 'val' (test_data treated as val)
+                    episode_data['return_buyhold'],
+                    episode_data['return_taker'],
+                    episode_data['return_maker_neutral'],
+                    episode_data['return_maker_rebate']
+                ])
 
         logger(f'  Test (test_data) - Avg Reward: {test_metrics["avg_reward"]:.4f}, '
                f'Avg PnL: {test_metrics["avg_pnl"]:.4f}', "INFO")

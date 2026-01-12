@@ -194,8 +194,8 @@ class EpisodeLoader:
 
         for episode in episodes:
             for sample in episode.samples:
-                # Convert features to tensor
-                if not isinstance(sample['features'], torch.Tensor):
+                # Convert features to tensor (skip if None for codebook-only experiments)
+                if sample['features'] is not None and not isinstance(sample['features'], torch.Tensor):
                     features_tensor = torch.tensor(sample['features'], dtype=torch.float32)
                     if self.use_pinned_memory:
                         features_tensor = features_tensor.pin_memory()
@@ -215,6 +215,10 @@ class EpisodeLoader:
         Synthetic data is organized by sequence_id (100 sequences per split),
         with each sequence containing 120 samples ordered by position_in_sequence.
 
+        Since synthetic data has NO 'role' field, we split by sequence_id:
+        - Train: sequences 0-79 (80 sequences, 80%)
+        - Validation: sequences 80-99 (20 sequences, 20%)
+
         Args:
             split_id: Split identifier
             role: 'train', 'val', or None (None loads all roles)
@@ -224,16 +228,18 @@ class EpisodeLoader:
         """
         collection = self.db[f'split_{split_id}_synthetic']  # Synthetic data collection
 
-        # Build query filter
+        # Build query filter based on sequence_id (synthetic data has no 'role' field)
         if role is None:
-            # Load all roles
+            # Load all sequences (0-99)
             query_filter = {}
-        else:
-            # Map 'val' to 'validation' for database query
-            db_role = 'validation' if role == 'val' else role
-            query_filter = {'role': db_role}
+        elif role == 'train':
+            # Train: sequences 0-79 (80%)
+            query_filter = {'sequence_id': {'$lt': 80}}
+        else:  # role == 'val' or 'validation'
+            # Validation: sequences 80-99 (20%)
+            query_filter = {'sequence_id': {'$gte': 80}}
 
-        # Query synthetic samples with role filter, sorted by sequence and position
+        # Query synthetic samples with sequence filter, sorted by sequence and position
         cursor = collection.find(
             query_filter,
             sort=[('sequence_id', 1), ('position_in_sequence', 1)]
@@ -245,11 +251,17 @@ class EpisodeLoader:
         for doc in cursor:
             sequence_id = doc['sequence_id']
 
+            # Extract and convert timestamp to Unix timestamp (float)
+            timestamp = doc.get('timestamp', 0)
+            if isinstance(timestamp, datetime):
+                timestamp = timestamp.timestamp()
+
             # Prepare sample (defer tensorization until later for efficiency)
+            # Synthetic data: Uses same feature source as Experiment 3 (codebook indices only)
             sample = {
-                'codebook': doc['codebook_ind'],  # Synthetic uses 'codebook_ind'
-                'features': doc['features'],  # Keep as list for now
-                'timestamp': doc.get('timestamp', 0),  # Synthetic may not have real timestamps
+                'codebook': doc['codebook_index'],  # Codebook index (0-127)
+                'features': None,  # No features for codebook-only experiment
+                'timestamp': timestamp,  # Convert datetime to Unix timestamp
                 'target': doc['target'],
                 'sequence_id': sequence_id,
                 'position_in_sequence': doc['position_in_sequence']

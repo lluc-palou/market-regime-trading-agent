@@ -161,118 +161,147 @@ def run_production_training(
                 logger(f'No hours found in {split_collection}, skipping', "WARNING")
                 continue
             
-            # Train production model for this split
-            with mlflow.start_run(
-                run_name=f"split_{split_id}_production",
-                nested=True
-            ):
+            # Determine model path
+            if test_mode:
+                model_path = production_dir / f"split_{split_id}_full_model.pth"
+            else:
+                model_path = production_dir / f"split_{split_id}_model.pth"
+
+            # Check if model already exists
+            if model_path.exists():
                 logger('', "INFO")
-                if test_mode:
-                    logger(f'Training production model for split {split_id} (full split - all roles)...', "INFO")
-                else:
-                    logger(f'Training production model for split {split_id}...', "INFO")
+                logger(f'Model already exists: {model_path}', "INFO")
+                logger('Skipping training, loading existing model...', "INFO")
 
-                # Train model
-                model, training_results = train_production_model(
-                    spark=spark,
-                    db_name=db_name,
-                    split_collection=split_collection,
-                    device=device,
-                    config=best_config,
-                    all_hours=all_hours,
-                    mongo_uri=mongo_uri,
-                    use_pymongo=use_pymongo,
-                    train_role=None if test_mode else 'train',
-                    val_role=None if test_mode else 'validation'
-                )
-                
-                # Log training results to MLflow
-                mlflow.log_param("split_id", split_id)
-                mlflow.log_param("split_collection", split_collection)
-                mlflow.log_metric("best_val_loss", training_results['best_val_loss'])
-                mlflow.log_metric("best_epoch", training_results['best_epoch'])
-                mlflow.log_metric("epochs_trained", training_results['epochs_trained'])
-                mlflow.log_metric("val_perplexity", training_results['final_val_losses']['perplexity'])
-                mlflow.log_metric("val_codebook_usage", training_results['final_val_losses']['codebook_usage'])
-                
-                # Save model artifacts
-                if test_mode:
-                    model_path = production_dir / f"split_{split_id}_full_model.pth"
-                else:
-                    model_path = production_dir / f"split_{split_id}_model.pth"
+                # Load existing model
+                checkpoint = torch.load(model_path, map_location=device, weights_only=False)
 
-                torch.save({
-                    'model_state_dict': model.state_dict(),
-                    'config': best_config,
-                    'split_id': split_id,
-                    'training_results': training_results,
-                    'test_mode': test_mode
-                }, model_path)
+                # Reconstruct model from checkpoint
+                from .model import VQVAEModel
+                model = VQVAEModel(config=checkpoint['config']).to(device)
+                model.load_state_dict(checkpoint['model_state_dict'])
+                model.eval()
 
-                logger(f'Model saved to: {model_path}', "INFO")
-                mlflow.log_artifact(str(model_path))
+                training_results = checkpoint.get('training_results', {
+                    'best_val_loss': 0.0,
+                    'best_epoch': 0,
+                    'epochs_trained': 0
+                })
 
-                # Generate latent representations
-                logger('', "INFO")
-                if test_mode:
-                    logger(f'Generating latent representations for {test_collection}...', "INFO")
-                    # Get hours from test_collection
-                    test_hours = get_all_hours(spark, db_name, test_collection)
-                    encode_collection = test_collection
-                    encode_output = f"{test_collection}_latent"
-                    encode_hours = test_hours
-                else:
-                    logger(f'Generating latent representations for split {split_id}...', "INFO")
-                    encode_collection = split_collection
-                    encode_output = output_collection
-                    encode_hours = all_hours
+                logger(f'✓ Model loaded successfully', "INFO")
+                logger(f'  Best validation loss: {training_results.get("best_val_loss", "N/A")}', "INFO")
 
-                # Clear output collection if exists
-                if encode_output in db.list_collection_names():
-                    db[encode_output].drop()
-                    logger(f'Cleared existing collection: {encode_output}', "INFO")
+            else:
+                # Train production model for this split
+                with mlflow.start_run(
+                    run_name=f"split_{split_id}_production",
+                    nested=True
+                ):
+                    logger('', "INFO")
+                    if test_mode:
+                        logger(f'Training production model for split {split_id} (full split - all roles)...', "INFO")
+                    else:
+                        logger(f'Training production model for split {split_id}...', "INFO")
 
-                # Generate and write latents
-                latent_gen = LatentGenerator(
-                    spark=spark,
-                    db_name=db_name,
-                    split_collection=encode_collection,
-                    output_collection=encode_output,
-                    model=model,
-                    device=device
-                )
+                    # Train model
+                    model, training_results = train_production_model(
+                        spark=spark,
+                        db_name=db_name,
+                        split_collection=split_collection,
+                        device=device,
+                        config=best_config,
+                        all_hours=all_hours,
+                        mongo_uri=mongo_uri,
+                        use_pymongo=use_pymongo,
+                        train_role=None if test_mode else 'train',
+                        val_role=None if test_mode else 'validation'
+                    )
 
-                latent_stats = latent_gen.generate_and_write_latents(
-                    all_hours=encode_hours,
-                    split_id=split_id
-                )
-                
-                latent_gen.close()
-                
-                # Log latent generation stats
+                    # Log training results to MLflow
+                    mlflow.log_param("split_id", split_id)
+                    mlflow.log_param("split_collection", split_collection)
+                    mlflow.log_metric("best_val_loss", training_results['best_val_loss'])
+                    mlflow.log_metric("best_epoch", training_results['best_epoch'])
+                    mlflow.log_metric("epochs_trained", training_results['epochs_trained'])
+                    mlflow.log_metric("val_perplexity", training_results['final_val_losses']['perplexity'])
+                    mlflow.log_metric("val_codebook_usage", training_results['final_val_losses']['codebook_usage'])
+
+                    # Save model artifacts
+                    torch.save({
+                        'model_state_dict': model.state_dict(),
+                        'config': best_config,
+                        'split_id': split_id,
+                        'training_results': training_results,
+                        'test_mode': test_mode
+                    }, model_path)
+
+                    logger(f'Model saved to: {model_path}', "INFO")
+                    mlflow.log_artifact(str(model_path))
+
+            # Generate latent representations (runs regardless of whether model was trained or loaded)
+            logger('', "INFO")
+            if test_mode:
+                logger(f'Generating latent representations for {test_collection}...', "INFO")
+                # Get hours from test_collection
+                test_hours = get_all_hours(spark, db_name, test_collection)
+                encode_collection = test_collection
+                encode_output = f"{test_collection}_latent"
+                encode_hours = test_hours
+            else:
+                logger(f'Generating latent representations for split {split_id}...', "INFO")
+                encode_collection = split_collection
+                encode_output = output_collection
+                encode_hours = all_hours
+
+            # Clear output collection if exists
+            if encode_output in db.list_collection_names():
+                db[encode_output].drop()
+                logger(f'Cleared existing collection: {encode_output}', "INFO")
+
+            # Generate and write latents
+            latent_gen = LatentGenerator(
+                spark=spark,
+                db_name=db_name,
+                split_collection=encode_collection,
+                output_collection=encode_output,
+                model=model,
+                device=device
+            )
+
+            latent_stats = latent_gen.generate_and_write_latents(
+                all_hours=encode_hours,
+                split_id=split_id
+            )
+
+            latent_gen.close()
+
+            # Log latent generation stats (wrap in try/except in case MLflow run not active)
+            try:
                 mlflow.log_metric("latent_total_samples", latent_stats['total_samples'])
                 mlflow.log_metric("latent_train_samples", latent_stats['train_samples'])
                 mlflow.log_metric("latent_val_samples", latent_stats['val_samples'])
-                
-                total_samples_processed += latent_stats['total_samples']
-                
-                # Store results
-                split_duration = time.time() - split_start_time
-                
-                split_result = {
-                    'split_id': split_id,
-                    'training_results': training_results,
-                    'latent_stats': latent_stats,
-                    'model_path': str(model_path),
-                    'duration_seconds': split_duration
-                }
-                
-                all_split_results.append(split_result)
-                
-                logger('', "INFO")
-                logger(f'Split {split_id} complete in {split_duration:.1f}s', "INFO")
-                logger(f'  Best validation loss: {training_results["best_val_loss"]:.4f}', "INFO")
-                logger(f'  Latent codes generated: {latent_stats["total_samples"]:,}', "INFO")
+            except:
+                pass  # MLflow run may not be active if model was loaded
+
+            total_samples_processed += latent_stats['total_samples']
+
+            # Store results
+            split_duration = time.time() - split_start_time
+
+            split_result = {
+                'split_id': split_id,
+                'training_results': training_results,
+                'latent_stats': latent_stats,
+                'model_path': str(model_path),
+                'duration_seconds': split_duration
+            }
+
+            all_split_results.append(split_result)
+
+            logger('', "INFO")
+            logger(f'Split {split_id} complete in {split_duration:.1f}s', "INFO")
+            logger(f'  Best validation loss: {training_results["best_val_loss"]:.4f}', "INFO")
+            logger(f'  Latent codes generated: {latent_stats["total_samples"]:,}', "INFO")
         
         # Rename collections: split_X_output -> split_X_input (train mode only)
         if not test_mode:

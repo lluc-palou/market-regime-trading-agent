@@ -1,8 +1,6 @@
 """
 Stylized Facts Testing Module
 Applies statistical tests to representative windows from each fold.
-
-CORRECTED: Properly excludes metadata fields and only tests actual features.
 """
 
 import pandas as pd
@@ -22,14 +20,9 @@ from src.utils.logging import logger
 # =================================================================================================
 
 class FeaturePreprocessor:
-    """
-    Identifies feature types and applies stride to forward returns.
-    
-    CORRECTED: Properly excludes metadata columns from feature classification.
-    Only processes actual features extracted from the 'features' array.
-    """
-    
-    # Define metadata columns that should NEVER be tested
+    """Identifies feature types and applies stride to forward returns."""
+
+    # Metadata columns excluded from testing
     METADATA_COLUMNS = {
         '_id',
         'timestamp',
@@ -39,19 +32,18 @@ class FeaturePreprocessor:
         'split_roles',
         'role',
         'bins',
-        'feature_names',  # This is just the list of names, not data
-        'features'  # This is the raw array, already expanded to columns
+        'feature_names',
+        'features'
     }
-    
-    # Define feature categories to EXCLUDE from testing
+
+    # Feature patterns to exclude from testing
     EXCLUDED_FEATURE_PATTERNS = [
-        'fwd_logret',  # Forward returns - don't test these
+        'fwd_logret',
         'fwd_ret',
         'forward_return'
     ]
-    
-    # Minimum samples required for reliable statistical tests
-    MIN_SAMPLES_FOR_TESTING = 30  # Standard minimum for most statistical tests
+
+    MIN_SAMPLES_FOR_TESTING = 30
     
     def __init__(self, forecast_horizon_steps: int):
         """
@@ -63,19 +55,7 @@ class FeaturePreprocessor:
         self.other_features = []
     
     def _get_feature_columns(self, df: pd.DataFrame) -> List[str]:
-        """
-        Extract actual feature columns, excluding all metadata and forward returns.
-        
-        FOCUS: Only past_logret (with stride) and lob features (no stride)
-        EXCLUDE: fwd_logret features
-        
-        Args:
-            df: DataFrame with features as columns
-            
-        Returns:
-            List of feature column names (metadata and fwd_logret excluded)
-        """
-        # Get all columns except metadata
+        """Extract feature columns, excluding metadata and forward returns."""
         candidate_cols = [
             col for col in df.columns 
             if col not in self.METADATA_COLUMNS
@@ -87,8 +67,6 @@ class FeaturePreprocessor:
         
         for col in candidate_cols:
             col_lower = col.lower()
-            
-            # Check if this is a forward return feature (to exclude)
             is_fwd_return = any(pattern in col_lower for pattern in self.EXCLUDED_FEATURE_PATTERNS)
             
             if is_fwd_return:
@@ -100,7 +78,6 @@ class FeaturePreprocessor:
             logger("WARNING: No feature columns found after filtering metadata and forward returns!", "WARNING")
             logger(f"Available columns: {df.columns.tolist()}", "DEBUG")
         else:
-            # Count how many metadata columns were actually present and excluded
             excluded_metadata_count = len(self.METADATA_COLUMNS & set(df.columns))
             logger(f"Found {len(feature_cols)} feature columns to test", "DEBUG")
             logger(f"  Excluded {excluded_metadata_count} metadata columns", "DEBUG")
@@ -109,22 +86,12 @@ class FeaturePreprocessor:
         return feature_cols
     
     def _filter_low_sample_features(
-        self, 
-        df: pd.DataFrame, 
+        self,
+        df: pd.DataFrame,
         features: List[str],
         min_samples: int = None
     ) -> Tuple[List[str], List[str]]:
-        """
-        Filter out features with insufficient non-null samples for testing.
-        
-        Args:
-            df: DataFrame with feature data
-            features: List of feature names to check
-            min_samples: Minimum required samples (uses class default if None)
-            
-        Returns:
-            Tuple of (valid_features, excluded_features)
-        """
+        """Filter out features with insufficient non-null samples."""
         if min_samples is None:
             min_samples = self.MIN_SAMPLES_FOR_TESTING
         
@@ -135,19 +102,17 @@ class FeaturePreprocessor:
             if feature not in df.columns:
                 excluded_features.append((feature, 0, "not in dataframe"))
                 continue
-            
-            # Count non-null samples
+
             non_null_count = df[feature].notna().sum()
             
             if non_null_count < min_samples:
                 excluded_features.append((feature, non_null_count, f"< {min_samples} samples"))
             else:
                 valid_features.append(feature)
-        
-        # Log exclusions
+
         if excluded_features:
             logger(f"Excluded {len(excluded_features)} features with insufficient samples:", "WARNING")
-            for feat, count, reason in excluded_features[:5]:  # Show first 5
+            for feat, count, reason in excluded_features[:5]:
                 logger(f"      - {feat}: {count} samples ({reason})", "WARNING")
             if len(excluded_features) > 5:
                 logger(f"      ... and {len(excluded_features) - 5} more", "WARNING")
@@ -155,54 +120,24 @@ class FeaturePreprocessor:
         return valid_features, excluded_features
     
     def classify_features(self, df: pd.DataFrame) -> Tuple[List[str], List[str]]:
-        """
-        Classifies features into two categories:
-        1. past_logret features (need stride to avoid overlapping lookbacks)
-        2. lob features (no stride needed)
-        
-        Also filters out features with insufficient samples for testing.
-        
-        LOGIC:
-        - past_logret features with lookback > forecast_horizon need stride
-        - lob features are instantaneous snapshots, no stride needed
-        - fwd_logret features are excluded entirely
-        - Features with < MIN_SAMPLES_FOR_TESTING samples are excluded
-        
-        Args:
-            df: DataFrame with features as columns
-            
-        Returns:
-            Tuple of (past_logret_features, lob_features)
-        """
-        # Get only actual feature columns (no metadata, no forward returns)
+        """Classify features: past_logret (needs stride) vs lob (no stride)."""
         all_features = self._get_feature_columns(df)
-        
-        # First pass: categorize by feature type
+
         past_logret_candidates = []
         lob_candidates = []
         
         for feature in all_features:
             feature_lower = feature.lower()
-            
-            # Check if this is a past_logret feature
             is_past_logret = any(kw in feature_lower for kw in ['past_logret', 'past_ret', 'logret'])
-            
-            # Check if this is a lob feature
             is_lob = 'lob' in feature_lower
-            
+
             if is_past_logret:
-                # past_logret features need stride
                 past_logret_candidates.append(feature)
             elif is_lob:
-                # lob features are instantaneous, no stride needed
                 lob_candidates.append(feature)
             else:
-                # Any other features that aren't fwd_logret (already filtered)
-                # Treat as lob-like (no stride)
                 lob_candidates.append(feature)
-        
-        # Second pass: filter features with insufficient samples
-        # Note: We check BEFORE applying stride for past_logret features
+
         self.return_features, excluded_past = self._filter_low_sample_features(
             df, past_logret_candidates
         )
@@ -210,8 +145,7 @@ class FeaturePreprocessor:
         self.other_features, excluded_lob = self._filter_low_sample_features(
             df, lob_candidates
         )
-        
-        # Summary logging
+
         logger("", "INFO")
         logger(f"Feature Classification Summary:", "INFO")
         logger(f"  past_logret features (with stride={self.forecast_horizon}): {len(self.return_features)}", "INFO")
@@ -232,129 +166,73 @@ class FeaturePreprocessor:
         return self.return_features, self.other_features
     
     def apply_stride_per_feature(
-        self, 
-        df: pd.DataFrame, 
+        self,
+        df: pd.DataFrame,
         features: List[str]
     ) -> Dict[str, pd.DataFrame]:
-        """
-        Apply feature-specific stride based on lookback period.
-        
-        CORRECTED LOGIC:
-        - past_logret_1: lookback=1, stride=1 -> all samples independent
-        - past_logret_10: lookback=10, stride=10 -> no overlap
-        - past_logret_240: lookback=240, stride=240 -> no overlap
-        
-        Returns one DataFrame per feature with appropriate stride.
-        
-        Args:
-            df: DataFrame with all samples
-            features: List of past_logret feature names
-            
-        Returns:
-            Dictionary mapping feature_name -> strided_dataframe
-        """
+        """Apply feature-specific stride based on lookback period to avoid overlap."""
         import re
         
         feature_dfs = {}
-        
+
         for feature in features:
-            # Extract lookback from feature name
-            # Pattern: past_logret_10, past_ret_240, logret_5
             lookback_match = re.search(r'_(\d+)', feature)
-            
+
             if lookback_match:
                 lookback = int(lookback_match.group(1))
             else:
                 # Default to forecast_horizon if can't extract
                 logger(f"Cannot extract lookback from '{feature}', using stride={self.forecast_horizon}", "WARNING")
                 lookback = self.forecast_horizon
-            
-            # Stride = lookback to ensure no overlap
+
             stride = lookback
-            
-            # Apply stride
+
             if stride > 0:
                 strided = df.iloc[::stride].copy()
-                
-                # Keep timestamp and this feature
+
                 keep_cols = ['timestamp', feature] if feature in df.columns else ['timestamp']
                 feature_df = strided[keep_cols].reset_index(drop=True)
-                
+
                 samples_before = len(df)
                 samples_after = len(feature_df)
-                
+
                 logger(f"    {feature}: stride={stride}, {samples_before} to {samples_after} samples", "DEBUG")
-                
-                # Warn if still too few samples
+
                 if samples_after < self.MIN_SAMPLES_FOR_TESTING:
                     logger(f"Only {samples_after} samples after stride, less than {self.MIN_SAMPLES_FOR_TESTING}", "WARNING")
-                
+
                 feature_dfs[feature] = feature_df
             else:
                 logger(f"Invalid stride {stride} for {feature}", "WARNING")
         
         return feature_dfs
-    
-    def apply_stride(self, df: pd.DataFrame, features: List[str]) -> pd.DataFrame:
-        """
-        DEPRECATED: Use apply_stride_per_feature instead.
-        
-        This method applies a single stride to all features, which is incorrect
-        for past_logret features with different lookback periods.
-        
-        Kept for backward compatibility but logs a warning.
-        """
-        logger("WARNING: apply_stride() applies same stride to all features", "WARNING")
-        logger("Use apply_stride_per_feature() for correct per-feature stride", "WARNING")
-        
-        # Apply uniform stride (original behavior)
-        strided_df = df.iloc[::self.forecast_horizon].copy()
-        keep_cols = ['timestamp'] + [f for f in features if f in df.columns]
-        result_df = strided_df[keep_cols].reset_index(drop=True)
-        
-        return result_df
-    
+
     def prepare_windows(self, windows_dict: Dict[int, pd.DataFrame]) -> Tuple[Dict[int, Dict[str, pd.DataFrame]], Dict[int, pd.DataFrame]]:
-        """
-        Prepares windows by applying feature-specific stride to past_logret features.
-        
-        CORRECTED: Each past_logret feature gets its own stride based on lookback.
-        
-        Args:
-            windows_dict: Dictionary mapping fold_id to window DataFrame
-            
-        Returns:
-            returns_dict: Dict[fold_id -> Dict[feature_name -> strided_df]]
-            features_dict: Dict[fold_id -> df with all lob features]
-        """
+        """Prepare windows by applying feature-specific stride to past_logret features."""
         logger("="*80, "INFO")
         logger("PREPARING FEATURES FOR TESTING", "INFO")
         logger("="*80, "INFO")
         
         returns_dict = {}
         features_dict = {}
-        
+
         for fold_id, df in windows_dict.items():
-            # Classify features (only need to do once)
             if not self.return_features and not self.other_features:
                 self.classify_features(df)
-            
-            # Apply per-feature stride to past_logret features
+
             if self.return_features:
                 feature_dfs = self.apply_stride_per_feature(df, self.return_features)
                 returns_dict[fold_id] = feature_dfs
-                
-                # Log summary
+
                 total_samples = sum(len(feat_df) for feat_df in feature_dfs.values())
                 logger(f"Fold {fold_id}: {len(self.return_features)} past_logret features with per-feature stride", "INFO")
                 logger(f"  Total strided samples across all features: {total_samples}", "DEBUG")
-            
-            # Keep all samples for lob features
+
             if self.other_features:
                 keep_cols = ['timestamp'] + [f for f in self.other_features if f in df.columns]
                 features_dict[fold_id] = df[keep_cols].copy()
                 logger(f"Fold {fold_id}: {len(features_dict[fold_id])} full samples for {len(self.other_features)} lob features", "INFO")
-        
+
         logger("="*80, "INFO")
         return returns_dict, features_dict
 
@@ -364,9 +242,7 @@ class FeaturePreprocessor:
 # =================================================================================================
 
 class StylizedFactsTests:
-    """
-    Implements battery of statistical tests for time series features.
-    """
+    """Battery of statistical tests for time series features."""
     
     def __init__(self, significance_level: float = 0.05):
         """
@@ -1009,58 +885,42 @@ class StylizedFactsTests:
     # =============================================================================================
     
     def run_all_tests(self, series: pd.Series, fold_id: int, fold_type: str, feature_name: str):
-        """
-        Runs all statistical tests on a given series.
-        
-        Skips testing if series has insufficient non-null samples.
-        """
-        # Check if series has sufficient samples
+        """Run all statistical tests on a given series."""
         clean_series = series.dropna()
         n_samples = len(clean_series)
-        
-        # Minimum samples needed for reliable tests (most tests need at least 20-30)
         min_required = 30
-        
+
         if n_samples < min_required:
             logger(f"  Skipping {feature_name}: only {n_samples} samples (need {min_required})", "WARNING")
             return
-        
+
         logger(f"  Testing {feature_name} ({n_samples} samples)...", "DEBUG")
-        
-        # Stationarity tests
+
         self.test_adf(series, fold_id, fold_type, feature_name)
         self.test_kpss(series, fold_id, fold_type, feature_name)
         self.test_phillips_perron(series, fold_id, fold_type, feature_name)
-        
-        # Normality tests
+
         self.test_jarque_bera(series, fold_id, fold_type, feature_name)
         self.test_shapiro_wilk(series, fold_id, fold_type, feature_name)
         self.test_anderson_darling(series, fold_id, fold_type, feature_name)
         self.test_dagostino_pearson(series, fold_id, fold_type, feature_name)
-        
-        # Autocorrelation tests
+
         self.test_ljung_box(series, fold_id, fold_type, feature_name)
         self.test_durbin_watson(series, fold_id, fold_type, feature_name)
-        
-        # Heteroskedasticity tests
+
         self.test_arch_lm(series, fold_id, fold_type, feature_name)
         self.test_breusch_pagan(series, fold_id, fold_type, feature_name)
         self.test_white(series, fold_id, fold_type, feature_name)
-        
-        # Independence tests
+
         self.test_bds(series, fold_id, fold_type, feature_name)
         self.test_runs(series, fold_id, fold_type, feature_name)
         self.test_mcleod_li(series, fold_id, fold_type, feature_name)
-        
-        # Distributional shape
+
         self.compute_moments(series, fold_id, fold_type, feature_name)
         self.compute_tail_index(series, fold_id, fold_type, feature_name)
-        
-        # Long memory
+
         self.compute_hurst_exponent(series, fold_id, fold_type, feature_name)
     
     def get_results_dataframe(self) -> pd.DataFrame:
-        """
-        Returns all test results as a DataFrame.
-        """
+        """Return all test results as DataFrame."""
         return pd.DataFrame(self.test_results)

@@ -6,7 +6,6 @@ from .ppo import ppo_update, compute_gae
 from .environment import Episode, EpisodeLoader, get_valid_timesteps
 from .reward import (
     compute_policy_based_position,
-    compute_volatility_scaled_position,
     compute_simple_reward,
     compute_transaction_cost,
     compute_unrealized_pnl,
@@ -43,7 +42,6 @@ __all__ = [
     'EpisodeLoader',
     'get_valid_timesteps',
     'compute_policy_based_position',
-    'compute_volatility_scaled_position',
     'compute_simple_reward',
     'compute_transaction_cost',
     'compute_unrealized_pnl',

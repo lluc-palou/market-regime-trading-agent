@@ -1,6 +1,13 @@
 # Deep Reinforcement Learning for Limit Order Book Trading
 
-A sophisticated 19-stage pipeline for training RL agents on limit order book (LOB) data using VQ-VAE representation learning and PPO.
+This project explores whether exploitable patterns exist in the market microstructure of high-frequency limit order book data from cryptocurrency assets. The research investigates if market inefficiencies during price formation can be identified and exploited through machine learning to develop profitable algorithmic trading strategies.
+
+The framework implements a statistically robust validation methodology combining three core components:
+- **VQ-VAE**: Extracts discrete latent representations of market regimes from LOB data
+- **Transformer + PPO**: Learns optimal trading policies using reinforcement learning
+- **Prior Model**: Captures temporal dynamics of latent representations for synthetic data generation
+
+The system evaluates trading strategies across multiple feature representations (latent codes, hand-crafted LOB indicators, hybrid approaches) and transaction cost scenarios, demonstrating that exploitable patterns exist in market microstructure under realistic trading conditions.
 
 ## Project Structure
 

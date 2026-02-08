@@ -9,7 +9,7 @@ The framework implements a statistically robust validation methodology combining
 
 The system evaluates trading strategies across multiple feature representations (latent codes, hand-crafted LOB indicators, hybrid approaches) and transaction cost scenarios, demonstrating that exploitable patterns exist in market microstructure under realistic trading conditions.
 
-This work was developed as the final degree project for the BSc in Data Science and Engineering at Universitat Politècnica de Catalunya (UPC), Barcelona, and forms part of ongoing PhD research.
+This work was developed as the final degree project for the BSc in Data Science and Engineering at Universitat Politècnica de Catalunya (UPC), Barcelona, and forms part of ongoing research.
 
 ## Project Structure
 ```
@@ -99,13 +99,11 @@ conda activate drl-lob
 - **Installation Guide**: See `env/installation_guide.md` for detailed setup instructions (Java, Scala, Spark, MongoDB)
 - **MongoDB**: Start MongoDB instance for data storage (see `ops/start_mongodb.bat`)
 - **MLflow**: Launch MLflow UI for experiment tracking: `mlflow ui` (or use `ops/start_mlflow.bat`)
-- **AWS S3**: Configure credentials for dataset download and cloud storage access
+- **AWS S3**: Optional configuration for additional dataset management
 
 ## Execution
 
-### Full Pipeline Execution
-
-Run the complete pipeline in train or test mode:
+### Pipeline Execution
 ```bash
 # Initialize MongoDB collections
 python scripts/pipeline_init.py
@@ -115,39 +113,18 @@ python scripts/run_pipeline.py --mode train
 
 # Run test/evaluation pipeline
 python scripts/run_pipeline.py --mode test
+
+# Execute individual stages
+python scripts/13_vqvae_hyperparameter_search.py
+python scripts/14_vqvae_production.py
+python scripts/18_ppo_training.py
 ```
-
-### Individual Stage Execution
-
-Execute specific pipeline stages independently:
-```bash
-# Data processing stages
-python scripts/03_data_splitting.py          # CPCV fold assignment
-python scripts/04_feature_derivation.py      # Derive LOB features
-python scripts/07_feature_transform.py       # Feature transformation selection
-
-# VQ-VAE training
-python scripts/13_vqvae_hyperparameter_search.py    # Hyperparameter search
-python scripts/14_vqvae_production.py               # Train production model
-
-# Prior model training
-python scripts/15_prior_hyperparameter_search.py    # Hyperparameter search
-python scripts/16_prior_production.py               # Train production model
-
-# RL agent training
-python scripts/18_ppo_training.py            # PPO agent training and evaluation
-
-# Validation
-python scripts/19_generalization_validation.py      # Quality assurance metrics
-```
-
-### Key Parameters
-
-Most scripts support configuration through command-line arguments or config files. Common parameters include:
-
-- `--mode` - Execution mode (train/test)
-- `--config` - Path to configuration file
-- `--splits` - Specific CPCV splits to process
-- `--device` - GPU device selection
 
 Refer to individual script help messages for detailed parameter options: `python scripts/<script_name>.py --help`
+
+## Contact
+
+For questions or collaboration opportunities, please contact:
+
+**Lluc Palou Masmatí**  
+Email: paloumasmarti@gmail.com

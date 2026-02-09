@@ -9,7 +9,7 @@ The framework implements a statistically robust validation methodology combining
 
 The system evaluates trading strategies across multiple feature representations (latent codes, hand-crafted LOB indicators, hybrid approaches) and transaction cost scenarios, demonstrating that exploitable patterns exist in market microstructure under realistic trading conditions.
 
-This work was developed as the final degree project for the BSc in Data Science and Engineering at Universitat Politècnica de Catalunya (UPC), Barcelona, and forms part of ongoing research. The complete thesis report is available here: [`report.pdf`](report.pdf)
+This work was developed as the final degree project for the BSc in Data Science and Engineering at Universitat Politècnica de Catalunya (UPC), Barcelona, and forms part of ongoing research. The complete thesis report is available here: [`report.pdf`](report.pdf) (draft version).
 
 ## Pipeline Overview
 
